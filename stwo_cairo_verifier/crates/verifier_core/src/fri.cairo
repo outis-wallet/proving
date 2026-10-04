@@ -1,4 +1,3 @@
-use core::array::SpanIter;
 use core::dict::Felt252Dict;
 use core::iter::{IntoIterator, Iterator};
 use stwo_verifier_utils::zip_eq::zip_eq;
@@ -275,14 +274,6 @@ impl FriLayerDomainImpl of FriLayerDomainTrait {
             FriLayerDomain::Line(line_domain) => line_domain.log_size(),
         }
     }
-
-    /// Returns the error reported when the layer's proof evaluations are invalid.
-    fn evaluations_invalid_error(self: @FriLayerDomain) -> FriVerificationError {
-        match self {
-            FriLayerDomain::Circle(_) => FriVerificationError::FirstLayerEvaluationsInvalid,
-            FriLayerDomain::Line(_) => FriVerificationError::InnerLayerEvaluationsInvalid,
-        }
-    }
 }
 
 /// Verifier of a single FRI layer.
@@ -320,15 +311,10 @@ impl FriLayerVerifierImpl of FriLayerVerifierTrait {
         let column_log_size = self.domain.log_size();
         assert!(queries.log_domain_size == column_log_size);
 
-        let mut fri_witness = (**self.proof.fri_witness).into_iter();
-
         let (decommitment_positions, sparse_evaluation) =
             compute_decommitment_positions_and_rebuild_evals(
-            queries, evals_at_queries, ref fri_witness, *self.fold_step,
+            queries, evals_at_queries, **self.proof.fri_witness, *self.fold_step,
         );
-
-        // Check all proof evals have been consumed.
-        assert!(fri_witness.next().is_none(), "{}", self.domain.evaluations_invalid_error());
 
         // For decommitment, each QM31 col must be split into its constituent M31 coordinate cols.
         let mut decommitted_values = array![];
@@ -388,11 +374,13 @@ impl FriLayerVerifierImpl of FriLayerVerifierTrait {
 ///
 /// # Panics
 ///
-/// Panics if the number of queries doesn't match the number of query evals.
+/// Panics if:
+/// * The number of queries doesn't match the number of query evals.
+/// * `witness_evals` isn't fully consumed.
 fn compute_decommitment_positions_and_rebuild_evals(
     mut queries: Queries,
     mut query_evals: Span<QM31>,
-    ref witness_evals_iter: SpanIter<QM31>,
+    mut witness_evals: Span<QM31>,
     fold_step: u32,
 ) -> (Span<usize>, SparseEvaluation) {
     let fold_factor = pow2(fold_step);
@@ -420,7 +408,7 @@ fn compute_decommitment_positions_and_rebuild_evals(
                 .append(
                     *match query_positions.next_if_eq(@decommitment_position) {
                         Some(_) => query_evals.pop_front().unwrap(),
-                        None => witness_evals_iter.next().unwrap(),
+                        None => witness_evals.pop_front().unwrap(),
                     },
                 );
         }
@@ -434,6 +422,8 @@ fn compute_decommitment_positions_and_rebuild_evals(
     // Sanity check all the values have been consumed.
     assert!(query_positions.is_empty());
     assert!(query_evals.is_empty());
+    // Check all proof evals have been consumed.
+    assert!(witness_evals.is_empty(), "{}", FriVerificationError::LayerEvaluationsInvalid);
 
     let sparse_evaluation = SparseEvaluationImpl::new(
         subset_evals, subset_domain_start_indices.span(),
@@ -614,8 +604,7 @@ pub struct FriLayerProof {
 #[derive(Debug, Drop)]
 pub enum FriVerificationError {
     InvalidNumFriLayers,
-    FirstLayerEvaluationsInvalid,
-    InnerLayerEvaluationsInvalid,
+    LayerEvaluationsInvalid,
     LastLayerDegreeInvalid,
     LastLayerEvaluationsInvalid,
     LastLayerLogDegreeMustBeZero,
@@ -628,12 +617,7 @@ impl FriVerificationErrorDisplay of core::fmt::Display<FriVerificationError> {
     ) -> Result<(), core::fmt::Error> {
         match self {
             FriVerificationError::InvalidNumFriLayers => write!(f, "Invalid number of FRI layers"),
-            FriVerificationError::FirstLayerEvaluationsInvalid => write!(
-                f, "Invalid First layer evaluations",
-            ),
-            FriVerificationError::InnerLayerEvaluationsInvalid => write!(
-                f, "Invalid inner layer evaluations",
-            ),
+            FriVerificationError::LayerEvaluationsInvalid => write!(f, "Invalid layer evaluations"),
             FriVerificationError::LastLayerDegreeInvalid => write!(f, "Invalid last layer degree"),
             FriVerificationError::LastLayerEvaluationsInvalid => write!(
                 f, "Invalid last layer evaluations",
