@@ -66,10 +66,7 @@ pub fn verify<A, +Air<A>, +Drop<A>>(
     let StarkProof { commitment_scheme_proof } = proof;
     let oods_proof_of_work = commitment_scheme_proof.oods_proof_of_work;
 
-    // Check that there are enough security bits.
-    assert!(
-        params.security_bits() >= min_security_bits, "{}", VerificationError::SecurityBitsTooLow,
-    );
+    params.validate(min_security_bits);
 
     // Draw a random coefficient from the channel to be used in the composition polynomial.
     // The composition polynomial is defined as: Σ_i (composition_random_coeff^i * quotient_i).
@@ -175,8 +172,6 @@ pub enum VerificationError {
     OodsProofOfWork,
     /// Invalid OODS eval.
     OodsNotMatching,
-    /// Security bits are too low.
-    SecurityBitsTooLow,
     /// Interaction proof of work verification failed.
     InteractionProofOfWork,
     /// The logup sum is not zero.
@@ -194,7 +189,6 @@ impl VerificationErrorDisplay of core::fmt::Display<VerificationError> {
                 f, "OODS Proof Of Work verification failed",
             ),
             VerificationError::OodsNotMatching => write!(f, "Invalid OODS eval"),
-            VerificationError::SecurityBitsTooLow => write!(f, "Security bits are too low"),
             VerificationError::InteractionProofOfWork => write!(
                 f, "Interaction Proof Of Work verification failed",
             ),

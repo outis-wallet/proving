@@ -17,6 +17,10 @@ use crate::vcs::verifier::{MerkleDecommitment, MerkleVerifier, MerkleVerifierTra
 /// Log of the number of QM31 evaluations packed into a single Merkle leaf when `fold_step > 1`.
 pub const LOG_PACKED_LEAF_SIZE: u32 = 2;
 
+/// The range of supported FRI fold steps.
+const MIN_FOLD_STEP: u32 = 1;
+const MAX_FOLD_STEP: u32 = 4;
+
 #[derive(Drop, Serde, Copy, PartialEq)]
 pub struct FriParams {
     pub pow_bits: u32,
@@ -30,6 +34,28 @@ pub struct FriParams {
 pub impl FriParamsImpl of FriParamsTrait {
     fn security_bits(self: @FriParams) -> u32 {
         *self.pow_bits + *self.log_blowup_factor * *self.n_queries
+    }
+
+    /// Panics if the config isn't supported by the verifier, or doesn't reach
+    /// `min_security_bits`.
+    fn validate(self: @FriParams, min_security_bits: u32) {
+        assert!(
+            self.security_bits() >= min_security_bits,
+            "{}",
+            FriVerificationError::SecurityBitsTooLow,
+        );
+        let fold_step = *self.fold_step;
+        assert!(
+            MIN_FOLD_STEP <= fold_step && fold_step <= MAX_FOLD_STEP,
+            "{}",
+            FriVerificationError::InvalidFoldStep,
+        );
+        // Only a constant last layer is supported.
+        assert!(
+            *self.log_last_layer_degree_bound == 0,
+            "{}",
+            FriVerificationError::LastLayerLogDegreeMustBeZero,
+        );
     }
 
     fn mix_into(self: @FriParams, ref channel: Channel) {
@@ -104,7 +130,7 @@ pub impl FriVerifierImpl of FriVerifierTrait {
                 // last layer degree bound.
                 let remaining = layer_log_bound - params.log_last_layer_degree_bound;
                 assert!(
-                    1 <= remaining && remaining <= params.fold_step,
+                    MIN_FOLD_STEP <= remaining && remaining <= params.fold_step,
                     "{}",
                     FriVerificationError::InvalidNumFriLayers,
                 );
@@ -589,6 +615,8 @@ pub enum FriVerificationError {
     LastLayerEvaluationsInvalid,
     LastLayerLogDegreeMustBeZero,
     ProofOfWork,
+    SecurityBitsTooLow,
+    InvalidFoldStep,
 }
 
 impl FriVerificationErrorDisplay of core::fmt::Display<FriVerificationError> {
@@ -606,6 +634,8 @@ impl FriVerificationErrorDisplay of core::fmt::Display<FriVerificationError> {
                 f, "Last layer log degree must be zero",
             ),
             FriVerificationError::ProofOfWork => write!(f, "Proof Of Work verification failed"),
+            FriVerificationError::SecurityBitsTooLow => write!(f, "Security bits are too low"),
+            FriVerificationError::InvalidFoldStep => write!(f, "Unsupported FRI fold step"),
         }
     }
 }

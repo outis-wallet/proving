@@ -22,6 +22,72 @@ fn test_security_bits() {
 }
 
 #[test]
+fn test_validate_accepts_supported_fold_steps() {
+    for fold_step in 1..5_u32 {
+        let params = FriParams {
+            pow_bits: 0,
+            log_blowup_factor: 1,
+            log_last_layer_degree_bound: 0,
+            n_queries: 1,
+            fold_step,
+        };
+        params.validate(min_security_bits: 0);
+    }
+}
+
+#[test]
+#[should_panic(expected: "Unsupported FRI fold step")]
+fn test_validate_rejects_zero_fold_step() {
+    let params = FriParams {
+        pow_bits: 0,
+        log_blowup_factor: 1,
+        log_last_layer_degree_bound: 0,
+        n_queries: 1,
+        fold_step: 0,
+    };
+    params.validate(min_security_bits: 0);
+}
+
+#[test]
+#[should_panic(expected: "Unsupported FRI fold step")]
+fn test_validate_rejects_too_large_fold_step() {
+    let params = FriParams {
+        pow_bits: 0,
+        log_blowup_factor: 1,
+        log_last_layer_degree_bound: 0,
+        n_queries: 1,
+        fold_step: 5,
+    };
+    params.validate(min_security_bits: 0);
+}
+
+#[test]
+#[should_panic(expected: "Last layer log degree must be zero")]
+fn test_validate_rejects_non_zero_log_last_layer_degree_bound() {
+    let params = FriParams {
+        pow_bits: 0,
+        log_blowup_factor: 1,
+        log_last_layer_degree_bound: 1,
+        n_queries: 1,
+        fold_step: 1,
+    };
+    params.validate(min_security_bits: 0);
+}
+
+#[test]
+#[should_panic(expected: "Security bits are too low")]
+fn test_validate_rejects_low_security_bits() {
+    let params = FriParams {
+        pow_bits: 10,
+        log_blowup_factor: 1,
+        log_last_layer_degree_bound: 0,
+        n_queries: 5,
+        fold_step: 1,
+    };
+    params.validate(min_security_bits: params.security_bits() + 1);
+}
+
+#[test]
 /// The test data was generated using [`stwo::core::fri::tests::valid_proof_passes_verification`]
 /// on commit c66302ae7afaa09e6e9fe8a5039094100121d673.
 fn valid_proof_passes_verification() {
