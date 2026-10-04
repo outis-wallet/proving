@@ -9,7 +9,8 @@ use crate::pcs::quotients::{ColumnSampleBatch, QuotientConstantsImpl, fri_answer
 use crate::pcs::verifier::CommitmentSchemeVerifierImpl;
 use crate::poly::circle::{CanonicCosetImpl, CircleDomainImpl, CircleEvaluationImpl};
 use crate::utils::{
-    DictImpl, group_columns_by_degree_bound, pad_and_transpose_columns_by_log_deg_bound_per_tree,
+    DictImpl, group_columns_by_log_degree_bound,
+    pad_and_transpose_columns_by_log_deg_bound_per_tree,
 };
 use super::{CanonicCosetTrait, accumulate_row_quotients};
 
@@ -35,7 +36,7 @@ fn test_fri_answers() {
         .span();
     let columns_by_degree_bound_per_tree = array![
         array![].span(), array![].span(),
-        group_columns_by_degree_bound(
+        group_columns_by_log_degree_bound(
             array![col0_degree_bound, col1_degree_bound, col2_degree_bound].span(),
         ),
     ]
@@ -131,7 +132,7 @@ fn test_fri_answers_with_1000_columns() {
         size_vector.append(log_degree_bound)
     }
     let columns_by_degree_bound_per_tree = array![
-        array![].span(), group_columns_by_degree_bound(size_vector.span()), array![].span(),
+        array![].span(), group_columns_by_log_degree_bound(size_vector.span()), array![].span(),
     ]
         .span();
     let columns_per_tree_by_degree_bound = pad_and_transpose_columns_by_log_deg_bound_per_tree(

@@ -211,7 +211,7 @@ pub type ColumnsIndicesByLogDegreeBound = LogDegreeBoundSpan<Span<usize>>;
 ///
 /// * `columns_by_log_degree_bound`: A span where the i'th element is a span of the column indices
 /// of size 2**i.
-pub fn group_columns_by_degree_bound(
+pub fn group_columns_by_log_degree_bound(
     log_degree_bound_by_column: ColumnSpan<u32>,
 ) -> ColumnsIndicesByLogDegreeBound {
     let mut column_by_degree_bound: Felt252Dict<Nullable<Array<u32>>> = Default::default();

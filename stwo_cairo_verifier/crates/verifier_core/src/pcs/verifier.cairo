@@ -8,7 +8,7 @@ use crate::fri::{FriParams, FriProof, FriVerifierTrait};
 use crate::pcs::quotients::fri_answers;
 use crate::utils::{
     ArrayImpl, ColumnsIndicesPerTreeByLogDegreeBound, DictImpl, SpanExTrait,
-    group_columns_by_degree_bound, pad_and_transpose_columns_by_log_deg_bound_per_tree, pow2,
+    group_columns_by_log_degree_bound, pad_and_transpose_columns_by_log_deg_bound_per_tree, pow2,
 };
 use crate::vcs::MerkleHasher;
 use crate::vcs::verifier::{MerkleDecommitment, MerkleVerifier, MerkleVerifierTrait};
@@ -81,7 +81,7 @@ pub impl CommitmentSchemeVerifierImpl of CommitmentSchemeVerifierTrait {
         let mut columns_by_log_deg_bound_per_tree = array![];
         for tree in self.trees.span() {
             columns_by_log_deg_bound_per_tree
-                .append(group_columns_by_degree_bound(*tree.column_log_deg_bounds));
+                .append(group_columns_by_log_degree_bound(*tree.column_log_deg_bounds));
         }
 
         pad_and_transpose_columns_by_log_deg_bound_per_tree(
