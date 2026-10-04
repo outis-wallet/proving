@@ -1,6 +1,5 @@
 use core::dict::Felt252Dict;
 use core::iter::{IntoIterator, Iterator};
-use stwo_verifier_utils::zip_eq::zip_eq;
 use crate::Hash;
 use crate::channel::{Channel, ChannelTrait};
 use crate::circle::{CirclePointM31Impl, CosetImpl};
@@ -193,10 +192,10 @@ fn decommit_layers(
     let mut layer_query_evals = first_layer_query_evals;
 
     for layer in verifier.layers.span() {
-        let sparse_evaluation = layer
+        let fold_preimage_evals = layer
             .verify(queries: layer_queries, evals_at_queries: layer_query_evals);
         layer_queries = layer_queries.fold(*layer.fold_step);
-        layer_query_evals = layer.fold(sparse_evaluation).span();
+        layer_query_evals = layer.fold(fold_preimage_evals).span();
     }
 
     (layer_queries, layer_query_evals)
@@ -307,19 +306,19 @@ impl FriLayerVerifierImpl of FriLayerVerifierTrait {
     /// * The Merkle decommitment is invalid.
     fn verify(
         self: @FriLayerVerifier, queries: Queries, evals_at_queries: Span<QM31>,
-    ) -> SparseEvaluation {
+    ) -> FoldPreimageEvals {
         let column_log_size = self.domain.log_size();
         assert!(queries.log_domain_size == column_log_size);
 
-        let (decommitment_positions, sparse_evaluation) =
+        let (decommitment_positions, fold_preimage_evals) =
             compute_decommitment_positions_and_rebuild_evals(
             queries, evals_at_queries, **self.proof.fri_witness, *self.fold_step,
         );
 
         // For decommitment, each QM31 col must be split into its constituent M31 coordinate cols.
         let mut decommitted_values = array![];
-        for subset_eval in sparse_evaluation.subset_evals.span() {
-            for eval in subset_eval.span() {
+        for (_, evals) in fold_preimage_evals.indexed_evals {
+            for eval in *evals {
                 // Split the QM31 into its M31 coordinate values.
                 let [v0, v1, v2, v3] = (*eval).to_fixed_array();
                 decommitted_values.append(v0);
@@ -354,18 +353,18 @@ impl FriLayerVerifierImpl of FriLayerVerifierTrait {
                 merkle_positions, decommitted_values.span(), (*self.proof.decommitment).clone(),
             );
 
-        sparse_evaluation
+        fold_preimage_evals
     }
 
     /// Folds the layer's evaluations into evaluations of the next layer.
     ///
     /// The first (circle) layer is folded circle-to-line, and inner (line) layers are folded
     /// line-to-line.
-    fn fold(self: @FriLayerVerifier, sparse_evaluation: SparseEvaluation) -> Array<QM31> {
+    fn fold(self: @FriLayerVerifier, fold_preimage_evals: FoldPreimageEvals) -> Array<QM31> {
         match *self.domain {
-            FriLayerDomain::Circle(circle_domain) => sparse_evaluation
+            FriLayerDomain::Circle(circle_domain) => fold_preimage_evals
                 .fold_circle(*self.folding_alpha, circle_domain, *self.fold_step),
-            FriLayerDomain::Line(line_domain) => sparse_evaluation
+            FriLayerDomain::Line(line_domain) => fold_preimage_evals
                 .fold_line(*self.folding_alpha, line_domain, *self.fold_step),
         }
     }
@@ -384,29 +383,28 @@ fn compute_decommitment_positions_and_rebuild_evals(
     mut query_evals: Span<QM31>,
     mut witness_evals: Span<QM31>,
     fold_step: u32,
-) -> (Span<usize>, SparseEvaluation) {
+) -> (Span<usize>, FoldPreimageEvals) {
     let fold_factor = pow2(fold_step);
 
     let mut decommitment_positions = array![];
-    let mut subset_evals = array![];
-    let mut subset_domain_start_indices = array![];
+    let mut indexed_evals = array![];
 
     let mut query_positions = queries.positions;
     let mut folded_query_positions = queries.fold(fold_step).positions;
 
     for folded_query_position in folded_query_positions {
-        let subset_start = *folded_query_position * fold_factor;
-        let subset_end = subset_start + fold_factor;
-        let mut subset_decommitment_positions = (subset_start..subset_end).into_iter();
-        let mut subset_eval = array![];
+        let preimage_start = *folded_query_position * fold_factor;
+        let preimage_end = preimage_start + fold_factor;
+        let mut preimage_decommitment_positions = (preimage_start..preimage_end).into_iter();
+        let mut preimage_evals = array![];
 
-        // Extract the subset eval and decommitment positions.
-        for decommitment_position in subset_decommitment_positions {
+        // Extract the preimage evals and decommitment positions.
+        for decommitment_position in preimage_decommitment_positions {
             decommitment_positions.append(decommitment_position);
 
             // If the decommitment position is a query position: take the value from `query_evals`,
             // else: take the value from `witness_evals`.
-            subset_eval
+            preimage_evals
                 .append(
                     *match query_positions.next_if_eq(@decommitment_position) {
                         Some(_) => query_evals.pop_front().unwrap(),
@@ -415,10 +413,8 @@ fn compute_decommitment_positions_and_rebuild_evals(
                 );
         }
 
-        subset_evals.append(subset_eval);
-
-        subset_domain_start_indices
-            .append(bit_reverse_index(subset_start, queries.log_domain_size));
+        let initial_index = bit_reverse_index(preimage_start, queries.log_domain_size);
+        indexed_evals.append((initial_index, preimage_evals.span()));
     }
 
     // Sanity check all the values have been consumed.
@@ -427,41 +423,32 @@ fn compute_decommitment_positions_and_rebuild_evals(
     // Check all proof evals have been consumed.
     assert!(witness_evals.is_empty(), "{}", FriVerificationError::LayerEvaluationsInvalid);
 
-    let sparse_evaluation = SparseEvaluationImpl::new(
-        subset_evals, subset_domain_start_indices.span(),
-    );
-
-    (decommitment_positions.span(), sparse_evaluation)
+    (decommitment_positions.span(), FoldPreimageEvals { indexed_evals: indexed_evals.span() })
 }
 
-/// Foldable subsets of evaluations on a circle polynomial or univariate polynomial.
-#[derive(Drop)]
-struct SparseEvaluation {
-    // TODO(andrew): Perhaps subset isn't the right word. Coset, Subgroup?
-    subset_evals: Array<Array<QM31>>,
-    subset_domain_initial_indexes: Span<usize>,
+/// Foldable evaluations of a circle polynomial or univariate polynomial on the preimages, under
+/// the fold, of the folded query positions.
+#[derive(Drop, Copy)]
+struct FoldPreimageEvals {
+    /// A span of `(initial_index, evals)` where:
+    /// - `initial_index` is the index (in the layer domain) of the initial point of the preimage
+    ///   coset of size `2^fold_step`.
+    /// - `evals` are the evaluations of the polynomial over this coset, in committed (bit-reversed)
+    ///   order.
+    indexed_evals: Span<(usize, Span<QM31>)>,
 }
 
 #[generate_trait]
-impl SparseEvaluationImpl of SparseEvaluationTrait {
-    fn new(
-        subset_evals: Array<Array<QM31>>, subset_domain_initial_indexes: Span<usize>,
-    ) -> SparseEvaluation {
-        assert!(subset_evals.len() == subset_domain_initial_indexes.len());
-        SparseEvaluation { subset_evals, subset_domain_initial_indexes }
-    }
-
+impl FoldPreimageEvalsImpl of FoldPreimageEvalsTrait {
     /// Folds evaluations of a degree `d` univariate polynomial into evaluations of a degree
     /// `d / 2^fold_step` univariate polynomial.
     fn fold_line(
-        self: @SparseEvaluation, fold_alpha: QM31, source_domain: LineDomain, fold_step: u32,
+        self: FoldPreimageEvals, fold_alpha: QM31, source_domain: LineDomain, fold_step: u32,
     ) -> Array<QM31> {
         let mut folded_eval = array![];
 
-        for (subset_eval, subset_domain_initial_index) in zip_eq(
-            self.subset_evals.span(), *self.subset_domain_initial_indexes,
-        ) {
-            let fold_domain_initial = source_domain.coset.index_at(*subset_domain_initial_index);
+        for (initial_index, evals) in self.indexed_evals {
+            let fold_domain_initial = source_domain.coset.index_at(*initial_index);
             let fold_domain = LineDomainImpl::new_unchecked(
                 CosetImpl::new(fold_domain_initial, fold_step),
             );
@@ -473,7 +460,7 @@ impl SparseEvaluationImpl of SparseEvaluationTrait {
                 j += 2;
             }
 
-            folded_eval.append(fold_coset(subset_eval.span(), x_coords.span(), fold_alpha));
+            folded_eval.append(fold_coset(*evals, x_coords.span(), fold_alpha));
         }
 
         folded_eval
@@ -482,31 +469,26 @@ impl SparseEvaluationImpl of SparseEvaluationTrait {
     /// Folds evaluations of a degree `d` circle polynomial into evaluations of a
     /// degree `d / 2^fold_step` univariate polynomial.
     fn fold_circle(
-        self: @SparseEvaluation, fold_alpha: QM31, source_domain: CircleDomain, fold_step: u32,
+        self: FoldPreimageEvals, fold_alpha: QM31, source_domain: CircleDomain, fold_step: u32,
     ) -> Array<QM31> {
         let mut folded_eval = array![];
 
         if fold_step == 1 {
-            for (subset_eval, subset_domain_initial_index) in zip_eq(
-                self.subset_evals.span(), *self.subset_domain_initial_indexes,
-            ) {
-                let boxed_pair: Box<[QM31; 2]> = *subset_eval.span().try_into().unwrap();
-                let [v0, v1] = boxed_pair.unbox();
-                let circle_point = source_domain.at(*subset_domain_initial_index);
+            for (initial_index, evals) in self.indexed_evals {
+                let [v0, v1]: [QM31; 2] = (*(*evals).try_into().unwrap()).unbox();
+                let circle_point = source_domain.at(*initial_index);
                 folded_eval.append(fri_fold(v0, v1, circle_point.y.inverse(), fold_alpha));
             }
             return folded_eval;
         }
 
-        for (subset_eval, subset_domain_initial_index) in zip_eq(
-            self.subset_evals.span(), *self.subset_domain_initial_indexes,
-        ) {
-            let fold_domain_initial = source_domain.index_at(*subset_domain_initial_index);
+        for (initial_index, evals) in self.indexed_evals {
+            let fold_domain_initial = source_domain.index_at(*initial_index);
             let circle_fold_domain = CircleDomainImpl::new(
                 CosetImpl::new(fold_domain_initial, fold_step - 1),
             );
 
-            let mut subset_eval = subset_eval.span();
+            let mut preimage_evals = *evals;
             let mut x_coords = array![];
             let mut line_eval_domain = array![];
             let mut j = 0;
@@ -514,7 +496,7 @@ impl SparseEvaluationImpl of SparseEvaluationTrait {
             // with coordinates that are actually needed.
             // Since fold_step > 1, we are guaranteed that `circle_fold_domain.size() = 2^k` with k
             // >= 2, hence the indices are never out of bounds.
-            while let Some(evals) = subset_eval.multi_pop_front::<4>() {
+            while let Some(evals) = preimage_evals.multi_pop_front::<4>() {
                 let [v0, v1, v2, v3] = evals.unbox();
                 let circle_pt_0 = circle_fold_domain.at(bit_reverse_index(j, fold_step));
                 let circle_pt_1 = circle_fold_domain.at(bit_reverse_index(j + 2, fold_step));
