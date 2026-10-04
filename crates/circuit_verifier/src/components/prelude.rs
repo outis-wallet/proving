@@ -1,4 +1,3 @@
-pub use circuit_common::component_utils::*;
 pub use circuits::context::{Context, Var};
 pub use circuits::eval;
 pub use circuits::ivalue::IValue;

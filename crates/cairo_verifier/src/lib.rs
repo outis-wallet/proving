@@ -1,4 +1,5 @@
 pub mod all_components;
+pub mod component_utils;
 pub mod components;
 pub mod preprocessed_columns;
 pub mod privacy;

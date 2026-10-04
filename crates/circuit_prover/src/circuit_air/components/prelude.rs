@@ -1,4 +1,3 @@
-pub use circuit_common::component_utils::*;
 pub use circuit_verifier::relations;
 pub use circuits::context::{Context, Var};
 pub use circuits::eval;
