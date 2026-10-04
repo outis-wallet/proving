@@ -63,10 +63,9 @@ pub struct FriVerifier {
 pub impl FriVerifierImpl of FriVerifierTrait {
     /// Verifies the commitment stage of FRI.
     ///
-    /// `log_bound` should be the committed circle polynomial log
-    /// degree bound.
+    /// `log_degree_bound` should be the committed circle polynomial log degree bound.
     fn commit(
-        ref channel: Channel, params: FriParams, proof: FriProof, log_bound: u32,
+        ref channel: Channel, params: FriParams, proof: FriProof, log_degree_bound: u32,
     ) -> FriVerifier {
         let FriProof {
             first_layer: first_layer_proof,
@@ -77,11 +76,11 @@ pub impl FriVerifierImpl of FriVerifierTrait {
 
         channel.mix_commitment(first_layer_proof.commitment);
 
-        let commitment_domain_log_size = log_bound + params.log_blowup_factor;
+        let commitment_domain_log_size = log_degree_bound + params.log_blowup_factor;
         let commitment_domain = CanonicCosetImpl::new(commitment_domain_log_size).circle_domain();
 
         let first_layer = FriLayerVerifier {
-            log_degree_bound: log_bound,
+            log_degree_bound,
             domain: FriLayerDomain::Circle(commitment_domain),
             folding_alpha: channel.draw_secure_felt(),
             proof: @first_layer_proof,
@@ -90,7 +89,7 @@ pub impl FriVerifierImpl of FriVerifierTrait {
         };
         let mut layers = array![first_layer];
 
-        let mut layer_log_bound = log_bound - params.fold_step;
+        let mut layer_log_bound = log_degree_bound - params.fold_step;
         let mut layer_domain = LineDomainImpl::new_unchecked(
             CosetImpl::half_odds(layer_log_bound + params.log_blowup_factor),
         );
