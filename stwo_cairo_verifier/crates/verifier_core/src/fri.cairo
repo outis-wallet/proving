@@ -14,7 +14,7 @@ use crate::utils::{ArrayImpl, OptionImpl, SpanExTrait, bit_reverse_index, pow2};
 use crate::vcs::MerkleHasher;
 use crate::vcs::verifier::{MerkleDecommitment, MerkleVerifier, MerkleVerifierTrait};
 
-/// Number of QM31 evaluations packed into a single Merkle leaf when `fold_step > 1`.
+/// Log of the number of QM31 evaluations packed into a single Merkle leaf when `fold_step > 1`.
 pub const LOG_PACKED_LEAF_SIZE: u32 = 2;
 
 #[derive(Drop, Serde, Copy, PartialEq)]
