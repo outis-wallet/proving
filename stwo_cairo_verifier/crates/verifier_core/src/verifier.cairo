@@ -49,7 +49,7 @@ pub trait Air<T> {
 /// - `commitment_scheme`: verifier-side state for the polynomial commitment scheme used by the
 ///    proof, the commitment scheme already holds the commitments for the preprocessed trace, trace,
 ///    and interaction trace.
-/// - `config`: the FRI configuration to verify against. It is not read from the proof: the caller
+/// - `params`: the FRI configuration to verify against. It is not read from the proof: the caller
 ///    supplies the parameters it considers canonical, so a prover cannot choose them.
 /// - `channel`: verifier Fiat–Shamir channel used to sample challenges while checking the proof.
 /// - `min_security_bits`: minimum security level to enforce (soundness).
@@ -59,7 +59,7 @@ pub fn verify<A, +Air<A>, +Drop<A>>(
     log_trace_degree_bound: u32,
     composition_commitment: Hash,
     mut commitment_scheme: CommitmentSchemeVerifier,
-    config: FriParams,
+    params: FriParams,
     ref channel: Channel,
     min_security_bits: u32,
 ) {
@@ -68,7 +68,7 @@ pub fn verify<A, +Air<A>, +Drop<A>>(
 
     // Check that there are enough security bits.
     assert!(
-        config.security_bits() >= min_security_bits, "{}", VerificationError::SecurityBitsTooLow,
+        params.security_bits() >= min_security_bits, "{}", VerificationError::SecurityBitsTooLow,
     );
 
     // Draw a random coefficient from the channel to be used in the composition polynomial.
@@ -82,7 +82,7 @@ pub fn verify<A, +Air<A>, +Drop<A>>(
             composition_commitment,
             [log_trace_degree_bound; COMPOSITION_SPLIT_FACTOR * QM31_EXTENSION_DEGREE].span(),
             ref channel,
-            config.log_blowup_factor,
+            params.log_blowup_factor,
         );
 
     // Verify the proof of work ground before the OODS point.
@@ -119,7 +119,7 @@ pub fn verify<A, +Air<A>, +Drop<A>>(
 
     commitment_scheme
         .verify_values(
-            ood_point, commitment_scheme_proof, config, ref channel, log_trace_degree_bound,
+            ood_point, commitment_scheme_proof, params, ref channel, log_trace_degree_bound,
         );
 }
 

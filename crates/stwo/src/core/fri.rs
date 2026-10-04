@@ -131,7 +131,7 @@ mod config_tests {
 }
 
 pub struct FriVerifier<MC: MerkleChannel> {
-    config: FriParams,
+    params: FriParams,
     // TODO(andrew): The first layer currently commits to all input polynomials. Consider allowing
     // flexibility to only commit to input polynomials on a per-log-size basis. This allows
     // flexibility for cases where committing to the first layer, for a specific log size, isn't
@@ -158,33 +158,33 @@ impl<MC: MerkleChannel> FriVerifier<MC> {
     /// * The degree of the last layer polynomial is too high.
     pub fn commit(
         channel: &mut MC::C,
-        config: FriParams,
+        params: FriParams,
         proof: FriProof<MC::H>,
         column_bound: CirclePolyDegreeBound,
     ) -> Result<Self, FriVerificationError> {
         MC::mix_root(channel, proof.first_layer.commitment);
 
         let column_commitment_domain =
-            CanonicCoset::new(column_bound.log_degree_bound + config.log_blowup_factor)
+            CanonicCoset::new(column_bound.log_degree_bound + params.log_blowup_factor)
                 .circle_domain();
 
         let first_layer = FriFirstLayerVerifier {
             column_commitment_domain,
             proof: proof.first_layer,
             folding_alpha: channel.draw_secure_felt(),
-            fold_step: config.fold_step,
+            fold_step: params.fold_step,
             pack_leaves: column_commitment_domain.log_size() >= LOG_PACKED_LEAF_SIZE
-                && config.fold_step > 1,
+                && params.fold_step > 1,
         };
 
         let mut inner_layers = Vec::new();
         let initial_line_log_degree = column_bound
             .log_degree_bound
-            .checked_sub(config.fold_step)
+            .checked_sub(params.fold_step)
             .ok_or(FriVerificationError::InvalidNumFriLayers)?;
         let mut layer_bound = LinePolyDegreeBound { log_degree_bound: initial_line_log_degree };
         let mut layer_domain = LineDomain::new(Coset::half_odds(
-            layer_bound.log_degree_bound + config.log_blowup_factor,
+            layer_bound.log_degree_bound + params.log_blowup_factor,
         ));
 
         let n_inner_layers = proof.inner_layers.len();
@@ -193,17 +193,17 @@ impl<MC: MerkleChannel> FriVerifier<MC> {
 
             // Compute the folding step.
             let is_last = layer_index == n_inner_layers - 1;
-            // If we're not at the last inner layer, fold by the config value.
+            // If we're not at the last inner layer, fold by `params.fold_step`.
             let fold_step = if !is_last {
-                config.fold_step
+                params.fold_step
             } else {
                 // At the last inner layer, fold by the number required to get exactly to the last
                 // layer size.
                 let res = (layer_bound.log_degree_bound)
-                    .checked_sub(config.log_last_layer_degree_bound)
+                    .checked_sub(params.log_last_layer_degree_bound)
                     .ok_or(FriVerificationError::InvalidNumFriLayers)?;
                 // `res` should be in (0, fold_step].
-                if !(1..=config.fold_step).contains(&res) {
+                if !(1..=params.fold_step).contains(&res) {
                     return Err(FriVerificationError::InvalidNumFriLayers);
                 }
                 res
@@ -222,21 +222,21 @@ impl<MC: MerkleChannel> FriVerifier<MC> {
             layer_domain = layer_domain.repeated_double(fold_step);
         }
 
-        if layer_bound.log_degree_bound != config.log_last_layer_degree_bound {
+        if layer_bound.log_degree_bound != params.log_last_layer_degree_bound {
             return Err(FriVerificationError::InvalidNumFriLayers);
         }
 
         let last_layer_domain = layer_domain;
         let last_layer_poly = proof.last_layer_poly;
 
-        if last_layer_poly.len() > (1 << config.log_last_layer_degree_bound) {
+        if last_layer_poly.len() > (1 << params.log_last_layer_degree_bound) {
             return Err(FriVerificationError::LastLayerDegreeInvalid);
         }
 
         channel.mix_felts(&last_layer_poly);
 
         Ok(Self {
-            config,
+            params,
             first_layer,
             inner_layers,
             last_layer_domain,
@@ -272,7 +272,7 @@ impl<MC: MerkleChannel> FriVerifier<MC> {
     ) -> Result<(), FriVerificationError> {
         let first_layer_sparse_eval =
             self.decommit_first_layer(queries, first_layer_query_evals)?;
-        let inner_layer_queries = queries.fold(self.config.fold_step);
+        let inner_layer_queries = queries.fold(self.params.fold_step);
         let (last_layer_queries, last_layer_query_evals) =
             self.decommit_inner_layers(&inner_layer_queries, first_layer_sparse_eval)?;
         self.decommit_last_layer(last_layer_queries, last_layer_query_evals)
@@ -305,7 +305,7 @@ impl<MC: MerkleChannel> FriVerifier<MC> {
         let mut layer_query_evals = first_layer_sparse_evals.fold_circle(
             self.first_layer.folding_alpha,
             first_layer_column_domain,
-            self.config.fold_step,
+            self.params.fold_step,
         );
 
         for layer in self.inner_layers.iter() {
@@ -341,7 +341,7 @@ impl<MC: MerkleChannel> FriVerifier<MC> {
     /// Must be called before [`Self::sample_query_positions`]: the nonce gates the query
     /// positions drawn from the channel.
     pub fn verify_proof_of_work(&self, channel: &mut MC::C) -> Result<(), FriVerificationError> {
-        if !channel.verify_pow_nonce(self.config.pow_bits, self.proof_of_work) {
+        if !channel.verify_pow_nonce(self.params.pow_bits, self.proof_of_work) {
             return Err(FriVerificationError::ProofOfWork);
         }
         channel.mix_u64(self.proof_of_work);
@@ -352,7 +352,7 @@ impl<MC: MerkleChannel> FriVerifier<MC> {
     pub fn sample_query_positions(&mut self, channel: &mut MC::C) -> Vec<usize> {
         let first_layer_log_size = self.first_layer.column_commitment_domain.log_size();
         let unsorted_query_locations =
-            draw_queries(channel, first_layer_log_size, self.config.n_queries);
+            draw_queries(channel, first_layer_log_size, self.params.n_queries);
         let queries = Queries::new(&unsorted_query_locations, first_layer_log_size);
         self.queries = Some(queries.clone());
         queries.positions

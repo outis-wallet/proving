@@ -94,7 +94,7 @@ pub struct FriDecommitResult<H: MerkleHasherLifted> {
 
 /// A FRI prover that applies the FRI protocol to prove a set of polynomials are of low degree.
 pub struct FriProver<'a, B: FriOps + MerkleOpsLifted<MC::H>, MC: MerkleChannel> {
-    config: FriParams,
+    params: FriParams,
     first_layer: FriFirstLayerProver<'a, B, MC::H>,
     inner_layers: Vec<FriInnerLayerProver<B, MC::H>>,
     last_layer_poly: LinePoly,
@@ -112,29 +112,29 @@ impl<'a, B: FriOps + MerkleOpsLifted<MC::H> + GrindOps<MC::C>, MC: MerkleChannel
     #[instrument(skip_all)]
     pub fn commit(
         channel: &mut MC::C,
-        config: FriParams,
+        params: FriParams,
         column: &'a SecureEvaluation<B, BitReversedOrder>,
         twiddles: &TwiddleTree<B>,
     ) -> Self {
         assert!(column.domain.is_canonic(), "not canonic");
 
-        let first_layer = Self::commit_first_layer(channel, &config, column);
+        let first_layer = Self::commit_first_layer(channel, &params, column);
         let (inner_layers, last_layer_evaluation) =
-            Self::commit_inner_layers(channel, config, column, twiddles);
-        let last_layer_poly = Self::commit_last_layer(channel, config, last_layer_evaluation);
+            Self::commit_inner_layers(channel, params, column, twiddles);
+        let last_layer_poly = Self::commit_last_layer(channel, params, last_layer_evaluation);
 
-        Self { config, first_layer, inner_layers, last_layer_poly }
+        Self { params, first_layer, inner_layers, last_layer_poly }
     }
 
     /// Commits to the first FRI layer.
     fn commit_first_layer(
         channel: &mut MC::C,
-        config: &FriParams,
+        params: &FriParams,
         column: &'a SecureEvaluation<B, BitReversedOrder>,
     ) -> FriFirstLayerProver<'a, B, MC::H> {
-        // The circle-to-line fold is always equal to the config.fold_step.
+        // The circle-to-line fold is always equal to `params.fold_step`.
         // TODO(Leo): consider support for smaller steps.
-        let layer = FriFirstLayerProver::new(column, config.fold_step);
+        let layer = FriFirstLayerProver::new(column, params.fold_step);
         MC::mix_root(channel, layer.merkle_tree.root());
         layer
     }
@@ -144,7 +144,7 @@ impl<'a, B: FriOps + MerkleOpsLifted<MC::H> + GrindOps<MC::C>, MC: MerkleChannel
     /// Returns all inner layers and the evaluation of the last layer.
     fn commit_inner_layers(
         channel: &mut MC::C,
-        config: FriParams,
+        params: FriParams,
         column: &SecureEvaluation<B, BitReversedOrder>,
         twiddles: &TwiddleTree<B>,
     ) -> (Vec<FriInnerLayerProver<B, MC::H>>, LineEvaluation<B>) {
@@ -155,15 +155,15 @@ impl<'a, B: FriOps + MerkleOpsLifted<MC::H> + GrindOps<MC::C>, MC: MerkleChannel
         let mut line_log_size = layer_evaluation.domain().log_size();
 
         // Apply any additional line folds requested for the first stage.
-        if config.fold_step > 1 {
-            let extra_line_folds = config.fold_step - 1;
+        if params.fold_step > 1 {
+            let extra_line_folds = params.fold_step - 1;
             let alpha_sq_powers =
                 squared_alpha_powers(folding_alpha * folding_alpha, extra_line_folds);
             layer_evaluation = B::fold_line(&layer_evaluation, &alpha_sq_powers, twiddles);
             line_log_size -= extra_line_folds;
         }
 
-        let last_layer_log_domain_size = config.last_layer_domain_size().ilog2();
+        let last_layer_log_domain_size = params.last_layer_domain_size().ilog2();
         assert!(
             line_log_size >= last_layer_log_domain_size,
             "The circle-to-line fold results in a smaller line domain than the last layer."
@@ -172,18 +172,18 @@ impl<'a, B: FriOps + MerkleOpsLifted<MC::H> + GrindOps<MC::C>, MC: MerkleChannel
         if line_log_size == last_layer_log_domain_size {
             return (layers, layer_evaluation);
         }
-        // While we can, skip `config.fold_step` layers.
-        while line_log_size > last_layer_log_domain_size + config.fold_step {
-            let layer = FriInnerLayerProver::new(layer_evaluation, config.fold_step);
+        // While we can, skip `params.fold_step` layers.
+        while line_log_size > last_layer_log_domain_size + params.fold_step {
+            let layer = FriInnerLayerProver::new(layer_evaluation, params.fold_step);
             MC::mix_root(channel, layer.merkle_tree.root());
             let folding_alpha = channel.draw_secure_felt();
-            let alpha_sq_powers = squared_alpha_powers(folding_alpha, config.fold_step);
+            let alpha_sq_powers = squared_alpha_powers(folding_alpha, params.fold_step);
             layer_evaluation = B::fold_line(&layer.evaluation, &alpha_sq_powers, twiddles);
             layers.push(layer);
-            line_log_size -= config.fold_step;
+            line_log_size -= params.fold_step;
         }
 
-        // Do one last fold (of size 0 < k <= config.fold_step) to reach the correct size.
+        // Do one last fold (of size 0 < k <= params.fold_step) to reach the correct size.
         let last_fold_step = line_log_size - last_layer_log_domain_size;
         let layer = FriInnerLayerProver::new(layer_evaluation, last_fold_step);
         MC::mix_root(channel, layer.merkle_tree.root());
@@ -207,15 +207,15 @@ impl<'a, B: FriOps + MerkleOpsLifted<MC::H> + GrindOps<MC::C>, MC: MerkleChannel
     /// * The evaluation is not of sufficiently low degree.
     fn commit_last_layer(
         channel: &mut MC::C,
-        config: FriParams,
+        params: FriParams,
         evaluation: LineEvaluation<B>,
     ) -> LinePoly {
-        assert_eq!(evaluation.len(), config.last_layer_domain_size());
+        assert_eq!(evaluation.len(), params.last_layer_domain_size());
 
         let evaluation = evaluation.to_cpu();
         let mut coeffs = evaluation.interpolate().into_ordered_coefficients();
 
-        let last_layer_degree_bound = 1 << config.log_last_layer_degree_bound;
+        let last_layer_degree_bound = 1 << params.log_last_layer_degree_bound;
         let zeros = coeffs.split_off(last_layer_degree_bound);
         assert!(zeros.iter().all(SecureField::is_zero), "invalid degree");
 
@@ -235,7 +235,7 @@ impl<'a, B: FriOps + MerkleOpsLifted<MC::H> + GrindOps<MC::C>, MC: MerkleChannel
         span1.exit();
         channel.mix_u64(proof_of_work);
         let unsorted_query_locations =
-            draw_queries(channel, first_layer_log_size, self.config.n_queries);
+            draw_queries(channel, first_layer_log_size, self.params.n_queries);
         let queries = Queries::new(&unsorted_query_locations, first_layer_log_size);
 
         let fri_proof = self.decommit_on_queries(&queries, proof_of_work);
@@ -254,13 +254,13 @@ impl<'a, B: FriOps + MerkleOpsLifted<MC::H> + GrindOps<MC::C>, MC: MerkleChannel
         queries: &Queries,
         proof_of_work: u64,
     ) -> ExtendedFriProof<MC::H> {
-        let Self { config, first_layer, inner_layers, last_layer_poly } = self;
+        let Self { params, first_layer, inner_layers, last_layer_poly } = self;
 
-        let first_layer_proof = first_layer.decommit(queries, config.fold_step);
+        let first_layer_proof = first_layer.decommit(queries, params.fold_step);
 
         let inner_layer_proofs = inner_layers
             .into_iter()
-            .scan(queries.fold(config.fold_step), |layer_queries, layer| {
+            .scan(queries.fold(params.fold_step), |layer_queries, layer| {
                 let fold_step = layer.fold_step;
                 let layer_proof = layer.decommit(layer_queries);
                 *layer_queries = layer_queries.fold(fold_step);

@@ -52,7 +52,7 @@ pub impl FriParamsImpl of FriParamsTrait {
 
 #[derive(Drop)]
 pub struct FriVerifier {
-    config: FriParams,
+    params: FriParams,
     first_layer: FriFirstLayerVerifier,
     inner_layers: Array<FriInnerLayerVerifier>,
     last_layer_domain: LineDomain,
@@ -67,7 +67,7 @@ pub impl FriVerifierImpl of FriVerifierTrait {
     /// `log_bound` should be the committed circle polynomial log
     /// degree bound.
     fn commit(
-        ref channel: Channel, config: FriParams, proof: FriProof, log_bound: u32,
+        ref channel: Channel, params: FriParams, proof: FriProof, log_bound: u32,
     ) -> FriVerifier {
         let FriProof {
             first_layer: first_layer_proof,
@@ -78,23 +78,23 @@ pub impl FriVerifierImpl of FriVerifierTrait {
 
         channel.mix_commitment(first_layer_proof.commitment);
 
-        let commitment_domain_log_size = log_bound + config.log_blowup_factor;
+        let commitment_domain_log_size = log_bound + params.log_blowup_factor;
         let commitment_domain = CanonicCosetImpl::new(commitment_domain_log_size).circle_domain();
 
         let first_layer = FriFirstLayerVerifier {
-            log_blowup_factor: config.log_blowup_factor,
+            log_blowup_factor: params.log_blowup_factor,
             log_bound,
             commitment_domain,
             proof: first_layer_proof,
             folding_alpha: channel.draw_secure_felt(),
-            // The circle-to-line fold is always equal to `config.fold_step`.
-            fold_step: config.fold_step,
+            // The circle-to-line fold is always equal to `params.fold_step`.
+            fold_step: params.fold_step,
         };
 
         let mut inner_layers = array![];
-        let mut layer_log_bound = log_bound - config.fold_step;
+        let mut layer_log_bound = log_bound - params.fold_step;
         let mut layer_domain = LineDomainImpl::new_unchecked(
-            CosetImpl::half_odds(layer_log_bound + config.log_blowup_factor),
+            CosetImpl::half_odds(layer_log_bound + params.log_blowup_factor),
         );
 
         let n_inner_layers = inner_layer_proofs.len();
@@ -105,15 +105,15 @@ pub impl FriVerifierImpl of FriVerifierTrait {
             let fold_step = if layer_index == n_inner_layers - 1 {
                 // At the last inner layer, fold by the amount needed to reach exactly the
                 // last layer degree bound.
-                let remaining = layer_log_bound - config.log_last_layer_degree_bound;
+                let remaining = layer_log_bound - params.log_last_layer_degree_bound;
                 assert!(
-                    1 <= remaining && remaining <= config.fold_step,
+                    1 <= remaining && remaining <= params.fold_step,
                     "{}",
                     FriVerificationError::InvalidNumFriLayers,
                 );
                 remaining
             } else {
-                config.fold_step
+                params.fold_step
             };
 
             inner_layers
@@ -133,13 +133,13 @@ pub impl FriVerifierImpl of FriVerifierTrait {
             layer_domain = layer_domain.repeated_double(fold_step);
         }
         assert!(
-            layer_log_bound == config.log_last_layer_degree_bound,
+            layer_log_bound == params.log_last_layer_degree_bound,
             "{}",
             FriVerificationError::InvalidNumFriLayers,
         );
 
         assert!(
-            last_layer_poly.log_size == config.log_last_layer_degree_bound,
+            last_layer_poly.log_size == params.log_last_layer_degree_bound,
             "{}",
             FriVerificationError::LastLayerDegreeInvalid,
         );
@@ -147,7 +147,7 @@ pub impl FriVerifierImpl of FriVerifierTrait {
         channel.mix_felts(last_layer_poly.coeffs.span());
 
         FriVerifier {
-            config,
+            params,
             first_layer,
             inner_layers,
             last_layer_domain: layer_domain,
@@ -162,7 +162,7 @@ pub impl FriVerifierImpl of FriVerifierTrait {
             @self, queries, first_layer_query_evals,
         );
 
-        let inner_layer_queries = queries.fold(self.config.fold_step);
+        let inner_layer_queries = queries.fold(self.params.fold_step);
 
         let (last_layer_queries, last_layer_query_evals) = decommit_inner_layers(
             @self, inner_layer_queries, first_layer_sparse_evals,
@@ -178,7 +178,7 @@ pub impl FriVerifierImpl of FriVerifierTrait {
     fn verify_proof_of_work(self: @FriVerifier, ref channel: Channel) {
         let proof_of_work_nonce = *self.proof_of_work_nonce;
         assert!(
-            channel.verify_pow_nonce(*self.config.pow_bits, proof_of_work_nonce),
+            channel.verify_pow_nonce(*self.params.pow_bits, proof_of_work_nonce),
             "{}",
             FriVerificationError::ProofOfWork,
         );
@@ -190,7 +190,7 @@ pub impl FriVerifierImpl of FriVerifierTrait {
     /// Output is of the form `(unique_log_sizes, queries_by_log_size)`.
     fn sample_query_positions(self: @FriVerifier, ref channel: Channel) -> Queries {
         let query_domain_log_size = self.first_layer.commitment_domain.log_size();
-        let n_queries = *self.config.n_queries;
+        let n_queries = *self.params.n_queries;
         let queries = QueriesImpl::generate(ref channel, query_domain_log_size, n_queries);
         queries
     }
@@ -216,7 +216,7 @@ fn decommit_inner_layers(
         .fold_circle(
             *verifier.first_layer.folding_alpha,
             *verifier.first_layer.commitment_domain,
-            *verifier.config.fold_step,
+            *verifier.params.fold_step,
         );
 
     let mut layer_queries = queries;
