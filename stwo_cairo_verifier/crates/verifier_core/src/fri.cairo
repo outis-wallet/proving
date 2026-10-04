@@ -329,7 +329,9 @@ impl FriLayerVerifierImpl of FriLayerVerifierTrait {
             };
         }
 
-        let leaf_log_size: u32 = if column_log_size >= LOG_PACKED_LEAF_SIZE && *self.fold_step > 1 {
+        // Traces of size < 4 are not supported.
+        assert!(column_log_size >= LOG_PACKED_LEAF_SIZE);
+        let leaf_log_size: u32 = if *self.fold_step > 1 {
             LOG_PACKED_LEAF_SIZE
         } else {
             0
