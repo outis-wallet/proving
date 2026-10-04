@@ -309,8 +309,7 @@ impl FriLayerVerifierImpl of FriLayerVerifierTrait {
         let column_log_size = self.domain.log_size();
         assert!(queries.log_domain_size == column_log_size);
 
-        let (decommitment_positions, fold_preimage_evals) =
-            compute_decommitment_positions_and_rebuild_evals(
+        let fold_preimage_evals = rebuild_fold_preimage_evals(
             queries, evals_at_queries, **self.proof.fri_witness, *self.fold_step,
         );
 
@@ -335,7 +334,7 @@ impl FriLayerVerifierImpl of FriLayerVerifierTrait {
             0
         };
         let merkle_positions = build_merkle_verification_inputs(
-            decommitment_positions, leaf_log_size,
+            fold_preimage_evals, *self.fold_step, leaf_log_size,
         );
         let n_columns = QM31_EXTENSION_DEGREE * pow2(leaf_log_size);
         let degree_bound_by_column = ArrayImpl::new_repeated(
@@ -369,23 +368,24 @@ impl FriLayerVerifierImpl of FriLayerVerifierTrait {
     }
 }
 
-/// Returns a column's Merkle tree decommitment positions and re-builds the evaluations needed by
-/// the verifier for folding and decommitment.
+/// Re-builds the evaluations needed by the verifier for folding and decommitment, on the preimage
+/// of each folded query position.
+///
+/// Each preimage spans the `2^fold_step` consecutive decommitment positions from its start.
 ///
 /// # Panics
 ///
 /// Panics if:
 /// * The number of queries doesn't match the number of query evals.
 /// * `witness_evals` isn't fully consumed.
-fn compute_decommitment_positions_and_rebuild_evals(
+fn rebuild_fold_preimage_evals(
     mut queries: Queries,
     mut query_evals: Span<QM31>,
     mut witness_evals: Span<QM31>,
     fold_step: u32,
-) -> (Span<usize>, FoldPreimageEvals) {
+) -> FoldPreimageEvals {
     let fold_factor = pow2(fold_step);
 
-    let mut decommitment_positions = array![];
     let mut indexed_evals = array![];
 
     let mut query_positions = queries.positions;
@@ -397,10 +397,8 @@ fn compute_decommitment_positions_and_rebuild_evals(
         let mut preimage_decommitment_positions = (preimage_start..preimage_end).into_iter();
         let mut preimage_evals = array![];
 
-        // Extract the preimage evals and decommitment positions.
+        // Extract the preimage evals.
         for decommitment_position in preimage_decommitment_positions {
-            decommitment_positions.append(decommitment_position);
-
             // If the decommitment position is a query position: take the value from `query_evals`,
             // else: take the value from `witness_evals`.
             preimage_evals
@@ -412,8 +410,7 @@ fn compute_decommitment_positions_and_rebuild_evals(
                 );
         }
 
-        let initial_index = bit_reverse_index(preimage_start, queries.log_domain_size);
-        indexed_evals.append((initial_index, preimage_evals.span()));
+        indexed_evals.append((preimage_start, preimage_evals.span()));
     }
 
     // Sanity check all the values have been consumed.
@@ -422,18 +419,17 @@ fn compute_decommitment_positions_and_rebuild_evals(
     // Check all proof evals have been consumed.
     assert!(witness_evals.is_empty(), "{}", FriVerificationError::LayerEvaluationsInvalid);
 
-    (decommitment_positions.span(), FoldPreimageEvals { indexed_evals: indexed_evals.span() })
+    FoldPreimageEvals { indexed_evals: indexed_evals.span() }
 }
 
 /// Foldable evaluations of a circle polynomial or univariate polynomial on the preimages, under
 /// the fold, of the folded query positions.
 #[derive(Drop, Copy)]
 struct FoldPreimageEvals {
-    /// A span of `(initial_index, evals)` where:
-    /// - `initial_index` is the index (in the layer domain's natural order) of the initial point of
-    ///   the preimage coset of size `2^fold_step`.
-    /// - `evals` are the evaluations of the polynomial over this coset, in committed (bit-reversed)
-    ///   order.
+    /// A span of `(preimage_start, evals)`, sorted by `preimage_start`, where:
+    /// - `preimage_start` is the committed (bit-reversed) position of the initial point of the
+    ///   preimage coset of size `2^fold_step`.
+    /// - `evals` are the evaluations of the polynomial over this coset, in committed order.
     indexed_evals: Span<(usize, Span<QM31>)>,
 }
 
@@ -445,9 +441,11 @@ impl FoldPreimageEvalsImpl of FoldPreimageEvalsTrait {
         self: FoldPreimageEvals, fold_alpha: QM31, source_domain: LineDomain, fold_step: u32,
     ) -> Array<QM31> {
         let mut folded_eval = array![];
+        let log_domain_size = source_domain.log_size();
 
-        for (initial_index, evals) in self.indexed_evals {
-            let fold_domain_initial = source_domain.coset.index_at(*initial_index);
+        for (preimage_start, evals) in self.indexed_evals {
+            let initial_index = bit_reverse_index(*preimage_start, log_domain_size);
+            let fold_domain_initial = source_domain.coset.index_at(initial_index);
             let fold_domain = LineDomainImpl::new_unchecked(
                 CosetImpl::new(fold_domain_initial, fold_step),
             );
@@ -471,18 +469,21 @@ impl FoldPreimageEvalsImpl of FoldPreimageEvalsTrait {
         self: FoldPreimageEvals, fold_alpha: QM31, source_domain: CircleDomain, fold_step: u32,
     ) -> Array<QM31> {
         let mut folded_eval = array![];
+        let log_domain_size = source_domain.log_size();
 
         if fold_step == 1 {
-            for (initial_index, evals) in self.indexed_evals {
+            for (preimage_start, evals) in self.indexed_evals {
                 let [v0, v1]: [QM31; 2] = (*(*evals).try_into().unwrap()).unbox();
-                let circle_point = source_domain.at(*initial_index);
+                let initial_index = bit_reverse_index(*preimage_start, log_domain_size);
+                let circle_point = source_domain.at(initial_index);
                 folded_eval.append(fri_fold(v0, v1, circle_point.y.inverse(), fold_alpha));
             }
             return folded_eval;
         }
 
-        for (initial_index, evals) in self.indexed_evals {
-            let fold_domain_initial = source_domain.index_at(*initial_index);
+        for (preimage_start, evals) in self.indexed_evals {
+            let initial_index = bit_reverse_index(*preimage_start, log_domain_size);
+            let fold_domain_initial = source_domain.index_at(initial_index);
             let circle_fold_domain = CircleDomainImpl::new(
                 CosetImpl::new(fold_domain_initial, fold_step - 1),
             );
@@ -516,25 +517,21 @@ impl FoldPreimageEvalsImpl of FoldPreimageEvalsTrait {
     }
 }
 
-/// Shifts decommitment positions right by `leaf_log_size` and deduplicates them, producing
-/// Merkle tree positions for packed leaves. When `leaf_log_size == 0`, it returns the positions
-/// unchanged.
+/// Returns the Merkle tree positions to verify for the decommitted preimages.
 ///
-/// It assumes that `decommitment positions` is sorted in ascending order.
+/// Each preimage spans `2^fold_step` consecutive decommitment positions, and each Merkle leaf
+/// packs `2^leaf_log_size` of them. Preimage starts are aligned to the leaf size, so each
+/// preimage spans `2^(fold_step - leaf_log_size)` consecutive leaves.
 fn build_merkle_verification_inputs(
-    decommitment_positions: Span<u32>, leaf_log_size: u32,
+    fold_preimage_evals: FoldPreimageEvals, fold_step: u32, leaf_log_size: u32,
 ) -> Span<u32> {
-    if leaf_log_size == 0 {
-        return decommitment_positions;
-    }
     let leaf_size = pow2(leaf_log_size);
+    let n_leaves_per_preimage = pow2(fold_step - leaf_log_size);
     let mut merkle_positions = array![];
-    let mut prev: Option<u32> = Option::None;
-    for pos in decommitment_positions {
-        let merkle_pos = *pos / leaf_size;
-        if prev != Option::Some(merkle_pos) {
-            merkle_positions.append(merkle_pos);
-            prev = Option::Some(merkle_pos);
+    for (preimage_start, _) in fold_preimage_evals.indexed_evals {
+        let first_leaf = *preimage_start / leaf_size;
+        for leaf in first_leaf..first_leaf + n_leaves_per_preimage {
+            merkle_positions.append(leaf);
         }
     }
     merkle_positions.span()
