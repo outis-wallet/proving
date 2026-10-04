@@ -533,41 +533,37 @@ fn build_merkle_verification_inputs(
     merkle_positions.span()
 }
 
-/// Folds `2^n` evaluations into a single evaluation using precomputed twiddles.
+/// Folds `2^n` (n > 0) evaluations into a single evaluation using precomputed twiddles.
 ///
 /// # Arguments
 ///
 /// * `eval` - evaluations of length `2^n` on a coset domain.
 /// * `x_coords` - x-coordinates of the even-index coset points, of length `2^{n-1}`.
 /// * `alpha` - the random folding factor.
-pub fn fold_coset(eval: Span<QM31>, x_coords: Span<M31>, alpha: QM31) -> QM31 {
+pub fn fold_coset(mut eval: Span<QM31>, mut x_coords: Span<M31>, mut alpha: QM31) -> QM31 {
     assert!(eval.len() == 2 * x_coords.len());
+    assert!(eval.len() >= 2);
 
-    let mut current_eval = eval;
-    let mut current_x_coords = x_coords;
-    let mut folding_alpha = alpha;
-    #[cairofmt::skip]
-    // In each iteration of the loop, we scan `current_eval` with a stride of 4. At the end of the loop
-    // we are guaranteed that `current_eval.len() == 2`.
-    while current_eval.len() > 2 {
+    // In each iteration of the loop, we scan `eval` with a stride of 4. At the end of the loop
+    // we are guaranteed that `eval.len() == 2`.
+    while eval.len() != 2 {
         let mut next_eval = array![];
         let mut next_x_coords = array![];
-        while let Some(boxed_tuple) = current_eval.multi_pop_front::<4>() {
+        while let Some(boxed_tuple) = eval.multi_pop_front::<4>() {
             let [v0, v1, v2, v3]: [QM31; 4] = boxed_tuple.unbox();
-            let [x0, x1]: [M31; 2] = current_x_coords.multi_pop_front::<2>().unwrap().unbox();
-            next_eval.append(fri_fold(v0, v1, x0.inverse(), folding_alpha));
-            next_eval.append(fri_fold(v2, v3, x1.inverse(), folding_alpha));
+            let [x0, x1]: [M31; 2] = x_coords.multi_pop_front::<2>().unwrap().unbox();
+            next_eval.append(fri_fold(v0, v1, x0.inverse(), alpha));
+            next_eval.append(fri_fold(v2, v3, x1.inverse(), alpha));
             next_x_coords.append(CirclePointM31Impl::double_x(x0));
         }
-        folding_alpha = folding_alpha * folding_alpha;
-        current_eval = next_eval.span();
-        current_x_coords = next_x_coords.span();
-    };
-    let boxed_pair: Box<[QM31; 2]> = *current_eval.try_into().unwrap();
-    let boxed_x_coord: Box<[M31; 1]> = *current_x_coords.try_into().unwrap();
-    let [v0, v1] = boxed_pair.unbox();
-    let [x0] = boxed_x_coord.unbox();
-    fri_fold(v0, v1, x0.inverse(), folding_alpha)
+        assert!(eval.is_empty());
+        alpha = alpha * alpha;
+        eval = next_eval.span();
+        x_coords = next_x_coords.span();
+    }
+    let [v0, v1]: [QM31; 2] = (*eval.try_into().unwrap()).unbox();
+    let [x0]: [M31; 1] = (*x_coords.try_into().unwrap()).unbox();
+    fri_fold(v0, v1, x0.inverse(), alpha)
 }
 
 /// Proof of an individual FRI layer.
