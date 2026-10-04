@@ -148,6 +148,9 @@ pub impl FriVerifierImpl of FriVerifierTrait {
     }
 
     /// Verifies the decommitment stage of FRI.
+    ///
+    /// The query positions are in bit-reversed order: position q refers to the domain point at
+    /// bit_reverse_index(q).
     fn decommit(self: FriVerifier, queries: Queries, first_layer_query_evals: Span<QM31>) {
         let (last_layer_queries, last_layer_query_evals) = decommit_layers(
             @self, queries, first_layer_query_evals,
@@ -427,8 +430,8 @@ fn compute_decommitment_positions_and_rebuild_evals(
 #[derive(Drop, Copy)]
 struct FoldPreimageEvals {
     /// A span of `(initial_index, evals)` where:
-    /// - `initial_index` is the index (in the layer domain) of the initial point of the preimage
-    ///   coset of size `2^fold_step`.
+    /// - `initial_index` is the index (in the layer domain's natural order) of the initial point of
+    ///   the preimage coset of size `2^fold_step`.
     /// - `evals` are the evaluations of the polynomial over this coset, in committed (bit-reversed)
     ///   order.
     indexed_evals: Span<(usize, Span<QM31>)>,
