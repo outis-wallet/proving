@@ -171,14 +171,11 @@ pub impl FriVerifierImpl of FriVerifierTrait {
         channel.mix_u64(proof_of_work_nonce);
     }
 
-    /// Samples and returns query positions mapped by column log size.
-    ///
-    /// Output is of the form `(unique_log_sizes, queries_by_log_size)`.
+    /// Samples and returns the query positions on the first layer's domain.
     fn sample_query_positions(self: @FriVerifier, ref channel: Channel) -> Queries {
         let query_domain_log_size = self.layers[0].domain.log_size();
         let n_queries = *self.params.n_queries;
-        let queries = QueriesImpl::generate(ref channel, query_domain_log_size, n_queries);
-        queries
+        QueriesImpl::generate(ref channel, query_domain_log_size, n_queries)
     }
 }
 
