@@ -498,12 +498,16 @@ impl FoldPreimageEvalsImpl of FoldPreimageEvalsTrait {
             while let Some(evals) = preimage_evals.multi_pop_front::<4>() {
                 let [v0, v1, v2, v3] = evals.unbox();
                 let circle_pt_0 = circle_fold_domain.at(bit_reverse_index(j, fold_step));
-                let circle_pt_1 = circle_fold_domain.at(bit_reverse_index(j + 2, fold_step));
-                line_eval_domain.append(fri_fold(v0, v1, circle_pt_0.y.inverse(), fold_alpha));
-                line_eval_domain.append(fri_fold(v2, v3, circle_pt_1.y.inverse(), fold_alpha));
+                // The evaluation `v2` is at the antipode of `circle_pt_0` (and `v3` is at the
+                // reflection of `circle_pt_0` about the y-axis). So the twiddle of their fold is
+                // `-y_inv`.
+                let y_inv = circle_pt_0.y.inverse();
+                line_eval_domain.append(fri_fold(v0, v1, y_inv, fold_alpha));
+                line_eval_domain.append(fri_fold(v2, v3, -y_inv, fold_alpha));
                 x_coords.append(circle_pt_0.x);
                 j += 4;
             }
+            assert!(preimage_evals.is_empty());
             let alpha_sq = fold_alpha * fold_alpha;
             folded_eval.append(fold_coset(line_eval_domain.span(), x_coords.span(), alpha_sq));
         }
