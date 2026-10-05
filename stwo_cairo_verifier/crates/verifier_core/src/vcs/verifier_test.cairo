@@ -65,6 +65,21 @@ mod BlakeTest {
             .verify(queries_position, queried_values, decommitment);
     }
 
+    /// Verification must reject a query position outside the tree.
+    #[test]
+    #[should_panic(expected: "Merkle Verification Error: Not All Merkle Nodes Were Consumed")]
+    fn test_out_of_range_position_fail() {
+        let test_values = prepare_verifier_values();
+        let [_root, w0, w1, w2, w3] = (*test_values.span().try_into().unwrap()).unbox();
+        let decommitment = MerkleDecommitment::<
+            Blake2sMerkleHasher,
+        > { hash_witness: array![w0, w0, w1, w1, w2, w2, w3, w3].span() };
+        // Position 40 is larger than 2^tree_height.
+        let queries_position = array![4, 40].span();
+        let queried_values = array![m31(0), m31(2), m31(4), m31(1), m31(1), m31(1)].span();
+        MerkleVerifier { root: *test_values[0], tree_height: 4, n_committed_columns: 3 }
+            .verify(queries_position, queried_values, decommitment);
+    }
 
     #[test]
     fn test_duplication_success() {

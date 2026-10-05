@@ -128,6 +128,8 @@ impl MerkleVerifierImpl<
             let (child_position, child_hash) = positions_and_hashes.pop_front().unwrap();
             let (parent_position, parity) = child_position.div_rem(2);
 
+            // One could also check for `child_position == 1`, however that conditional would cost
+            // one instruction more than checking `parent_position == 0`.
             if parent_position == 0 {
                 break child_hash;
             }
@@ -170,6 +172,8 @@ impl MerkleVerifierImpl<
             positions_and_hashes.append((parent_position, parent_hash));
         };
 
+        // Check that every node was hashed into the root.
+        assert!(positions_and_hashes.is_empty(), "{}", MerkleVerificationError::NodesRemaining);
         // Check that the witness has been consumed.
         assert!(hash_witness.is_empty(), "{}", MerkleVerificationError::WitnessTooLong);
         assert!(@computed_root == self.root, "{}", MerkleVerificationError::RootMismatch);
@@ -181,6 +185,7 @@ pub enum MerkleVerificationError {
     WitnessTooShort,
     WitnessTooLong,
     RootMismatch,
+    NodesRemaining,
 }
 
 impl MerkleVerificationErrorDisplay of core::fmt::Display<MerkleVerificationError> {
@@ -196,6 +201,9 @@ impl MerkleVerificationErrorDisplay of core::fmt::Display<MerkleVerificationErro
             ),
             MerkleVerificationError::RootMismatch => write!(
                 f, "Merkle Verification Error: Root Mismatch",
+            ),
+            MerkleVerificationError::NodesRemaining => write!(
+                f, "Merkle Verification Error: Not All Merkle Nodes Were Consumed",
             ),
         }
     }
