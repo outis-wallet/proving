@@ -102,7 +102,7 @@ impl MerkleVerifierImpl<
             }
             prev_pos = Some(*pos);
             let column_values = queried_values.pop_front_n(n_columns);
-            positions_and_hashes.append((*pos + layer_idx, H::hash_node(None, column_values)));
+            positions_and_hashes.append((*pos + layer_idx, H::hash_leaf(column_values)));
         }
         assert!(queried_values.is_empty());
         // Check that the largest query position is smaller than the number of leaves.
@@ -129,7 +129,7 @@ impl MerkleVerifierImpl<
                 let sibling_hash = *hash_witness
                     .pop_front()
                     .unwrap_or_else(|| panic!("{}", MerkleVerificationError::WitnessTooShort));
-                let parent_hash = H::hash_node(Some((sibling_hash, child_hash)), array![].span());
+                let parent_hash = H::hash_children(sibling_hash, child_hash);
                 positions_and_hashes.append((parent_position, parent_hash));
                 continue;
             }
@@ -154,7 +154,7 @@ impl MerkleVerifierImpl<
                     .unwrap_or_else(|| panic!("{}", MerkleVerificationError::WitnessTooShort))
             };
 
-            let parent_hash = H::hash_node(Some((child_hash, sibling_hash)), array![].span());
+            let parent_hash = H::hash_children(child_hash, sibling_hash);
             positions_and_hashes.append((parent_position, parent_hash));
         };
 
