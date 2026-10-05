@@ -13,10 +13,10 @@ pub struct MerkleVerifier<impl H: MerkleHasher> {
     pub root: H::Hash,
     // The height of the Merkle tree.
     //
-    // The height can be computed as log_blowup_factor + column_log_deg_bounds.max().
+    // The height can be computed as log_blowup_factor + max log degree bound of the columns.
     pub tree_height: u32,
-    // The log degree bounds of the committed columns.
-    pub column_log_deg_bounds: Span<u32>,
+    // The number of committed columns.
+    pub n_committed_columns: u32,
 }
 impl MerkleVerifierDrop<impl H: MerkleHasher, +Drop<H::Hash>> of Drop<MerkleVerifier<H>>;
 
@@ -88,7 +88,7 @@ impl MerkleVerifierImpl<
         mut queried_values: Span<BaseField>,
         decommitment: MerkleDecommitment<H>,
     ) {
-        let n_columns = self.column_log_deg_bounds.len();
+        let n_columns = *self.n_committed_columns;
         let mut positions_and_values: Felt252Dict<Nullable<Span<BaseField>>> = Default::default();
 
         for pos in query_positions {

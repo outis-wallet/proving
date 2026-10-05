@@ -65,13 +65,18 @@ pub struct CommitmentSchemeProof {
 /// The verifier side of a FRI polynomial commitment scheme. See [super].
 #[derive(Drop)]
 pub struct CommitmentSchemeVerifier {
-    pub trees: TreeArray<MerkleVerifier<MerkleHasher>>,
+    trees: TreeArray<MerkleVerifier<MerkleHasher>>,
+    /// The log degree bounds of the committed columns, per tree.
+    ///
+    /// Both `trees` and `column_log_deg_bounds_per_tree` are guaranteed
+    /// to always have the same length.
+    column_log_deg_bounds_per_tree: TreeArray<ColumnSpan<u32>>,
 }
 
 #[generate_trait]
 pub impl CommitmentSchemeVerifierImpl of CommitmentSchemeVerifierTrait {
     fn new() -> CommitmentSchemeVerifier {
-        CommitmentSchemeVerifier { trees: array![] }
+        CommitmentSchemeVerifier { trees: array![], column_log_deg_bounds_per_tree: array![] }
     }
 
     /// Returns the column indices grouped by log degree bound (outer), then by tree (inner).
@@ -79,9 +84,9 @@ pub impl CommitmentSchemeVerifierImpl of CommitmentSchemeVerifierTrait {
         self: @CommitmentSchemeVerifier,
     ) -> ColumnsIndicesPerTreeByLogDegreeBound {
         let mut columns_by_log_deg_bound_per_tree = array![];
-        for tree in self.trees.span() {
+        for column_log_deg_bounds in self.column_log_deg_bounds_per_tree.span() {
             columns_by_log_deg_bound_per_tree
-                .append(group_columns_by_log_degree_bound(*tree.column_log_deg_bounds));
+                .append(group_columns_by_log_degree_bound(*column_log_deg_bounds));
         }
 
         pad_and_transpose_columns_by_log_deg_bound_per_tree(
@@ -92,8 +97,9 @@ pub impl CommitmentSchemeVerifierImpl of CommitmentSchemeVerifierTrait {
     /// Reads a Merkle root commitment for a set of columns from the prover and registers it with
     /// the verifier.
     ///
-    /// This function mixes the commitment root into the Fiat-Shamir channel and appends a new
-    /// MerkleVerifier for this commitment to the verifier's state.
+    /// This function mixes the commitment root into the Fiat-Shamir channel, appends a new
+    /// MerkleVerifier for this commitment to the verifier's state and stores the degree bounds of
+    /// the committed columns.
     ///
     /// # Arguments
     /// * `commitment` - The Merkle root of the committed columns.
@@ -115,9 +121,10 @@ pub impl CommitmentSchemeVerifierImpl of CommitmentSchemeVerifierTrait {
                 MerkleVerifier {
                     root: commitment,
                     tree_height: log_blowup_factor + max_log_degree_bound,
-                    column_log_deg_bounds: degree_bound_by_column,
+                    n_committed_columns: degree_bound_by_column.len(),
                 },
             );
+        self.column_log_deg_bounds_per_tree.append(degree_bound_by_column);
     }
 
     /// Verifies that `proof.sampled_values` corresponds to the evaluations

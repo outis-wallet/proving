@@ -10,7 +10,7 @@ use crate::poly::circle::{CanonicCosetImpl, CircleDomain, CircleDomainImpl};
 use crate::poly::line::{LineDomain, LineDomainImpl, LineDomainTrait, LineEvaluationImpl, LinePoly};
 use crate::poly::utils::fri_fold;
 use crate::queries::{Queries, QueriesImpl};
-use crate::utils::{ArrayImpl, OptionImpl, SpanExTrait, bit_reverse_index, pow2};
+use crate::utils::{OptionImpl, SpanExTrait, bit_reverse_index, pow2};
 use crate::vcs::MerkleHasher;
 use crate::vcs::verifier::{MerkleDecommitment, MerkleVerifier, MerkleVerifierTrait};
 
@@ -362,14 +362,10 @@ impl FriLayerVerifierImpl of FriLayerVerifierTrait {
         let merkle_positions = build_merkle_verification_inputs(
             fold_preimage_evals, *self.fold_step, leaf_log_size,
         );
-        let n_columns = QM31_EXTENSION_DEGREE * pow2(leaf_log_size);
-        let degree_bound_by_column = ArrayImpl::new_repeated(
-            n: n_columns, v: *self.log_degree_bound,
-        );
         let merkle_verifier = MerkleVerifier {
             root: **self.proof.commitment,
             tree_height: column_log_size - leaf_log_size,
-            column_log_deg_bounds: degree_bound_by_column.span(),
+            n_committed_columns: QM31_EXTENSION_DEGREE * pow2(leaf_log_size),
         };
 
         merkle_verifier
