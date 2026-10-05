@@ -131,6 +131,9 @@ Type: Intentional deviation (efficiency)
 Risk: NEUTRAL (reduces number of Merkle trees and proof size)
 Status: OPEN
 Notes: The `vcs_lifted` module is a newer addition alongside the original `vcs`.
+The Cairo verifier (`stwo_cairo_verifier/crates/verifier_core`) does not support a
+preprocessed tree lifted to a height of its own, matching the
+circuit prover.
 
 ### DIVERGENCE-007: Security Parameter Defaults
 
