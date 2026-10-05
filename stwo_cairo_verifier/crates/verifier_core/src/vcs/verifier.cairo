@@ -11,7 +11,7 @@ pub struct MerkleVerifier<impl H: MerkleHasher> {
     pub root: H::Hash,
     // The height of the Merkle tree.
     //
-    // The height can be computed as log_blowup_factor + max log degree bound of the columns.
+    // The height is log_blowup_factor + the log degree bound of the commitment scheme.
     pub tree_height: u32,
     // The number of committed columns.
     pub n_committed_columns: u32,

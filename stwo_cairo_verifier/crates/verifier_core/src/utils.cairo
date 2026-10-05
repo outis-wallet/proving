@@ -198,7 +198,7 @@ pub type LogDegreeBoundSpan<T> = Span<T>;
 /// bound `degree_bound`.
 /// The indices in each tree are 0-based.
 ///
-pub type ColumnsIndicesByLogDegreeBound = LogDegreeBoundSpan<Span<usize>>;
+pub type ColumnsIndicesByLogDegreeBound = LogDegreeBoundSpan<ColumnSpan<usize>>;
 
 /// Given a span of column log degree bounds, Return a span of the column indices grouped by their
 /// log degree bound.
@@ -210,7 +210,9 @@ pub type ColumnsIndicesByLogDegreeBound = LogDegreeBoundSpan<Span<usize>>;
 /// # Returns
 ///
 /// * `columns_by_log_degree_bound`: A span where the i'th element is a span of the column indices
-/// of size 2**i.
+/// of size 2**i. It's guaranteed that
+///     `columns_by_log_degree_bound.len() == log_degree_bound_by_column.max() + 1`,
+/// and that its last entry is a non-empty span.
 pub fn group_columns_by_log_degree_bound(
     log_degree_bound_by_column: ColumnSpan<u32>,
 ) -> ColumnsIndicesByLogDegreeBound {
@@ -246,7 +248,7 @@ pub fn group_columns_by_log_degree_bound(
 /// indices with degree bound `log_degree_bound` in the tree `tree`.
 /// The indices in each tree are 0-based.
 ///
-pub type ColumnsIndicesPerTreeByLogDegreeBound = LogDegreeBoundSpan<TreeSpan<Span<usize>>>;
+pub type ColumnsIndicesPerTreeByLogDegreeBound = LogDegreeBoundSpan<TreeSpan<ColumnSpan<usize>>>;
 
 /// Pads all the trees in `columns_by_log_degree_bound_per_tree` to the length of the longest tree
 /// and transposes the arrays from [tree][log_degree_bound][column] to

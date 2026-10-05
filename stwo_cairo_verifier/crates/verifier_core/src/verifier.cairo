@@ -42,9 +42,6 @@ pub trait Air<T> {
 ///
 /// - `proof`: the STARK proof to verify.
 /// - `air`: AIR instance defining the constraints for the statement being proven.
-/// -  log_degree_bound`: log2 upper bound on the degree of the of the trace after lifting.
-///    The log degree bound of the composition polynomial after the splitting must be less than or
-///    equal to this value.
 /// - `composition_commitment`: commitment to the composition polynomial sent by the prover.
 /// - `commitment_scheme`: verifier-side state for the polynomial commitment scheme used by the
 ///    proof, the commitment scheme already holds the commitments for the preprocessed trace, trace,
@@ -56,7 +53,6 @@ pub trait Air<T> {
 pub fn verify<A, +Air<A>, +Drop<A>>(
     proof: StarkProof,
     air: A,
-    log_trace_degree_bound: u32,
     composition_commitment: Hash,
     mut commitment_scheme: CommitmentSchemeVerifier,
     params: FriParams,
@@ -64,6 +60,7 @@ pub fn verify<A, +Air<A>, +Drop<A>>(
     min_security_bits: u32,
 ) {
     let StarkProof { commitment_scheme_proof } = proof;
+    let log_trace_degree_bound = commitment_scheme.log_degree_bound;
     let oods_proof_of_work = commitment_scheme_proof.oods_proof_of_work;
 
     params.validate(min_security_bits);
@@ -114,10 +111,7 @@ pub fn verify<A, +Air<A>, +Drop<A>>(
         VerificationError::OodsNotMatching,
     );
 
-    commitment_scheme
-        .verify_values(
-            ood_point, commitment_scheme_proof, params, ref channel, log_trace_degree_bound,
-        );
+    commitment_scheme.verify_values(ood_point, commitment_scheme_proof, params, ref channel);
 }
 
 fn circle_double_x(x: QM31) -> QM31 {

@@ -52,7 +52,7 @@ pub fn verify_circuit(proof: CircuitProof, circuit_hash: Hash) {
 
     // The FRI parameters are the circuit's hardcoded ones.
     CIRCUIT_FRI_PARAMS.mix_into(ref channel);
-    let mut commitment_scheme = CommitmentSchemeVerifierImpl::new();
+    let mut commitment_scheme = CommitmentSchemeVerifierImpl::new(TRACE_LOG_DEGREE_BOUND);
 
     // Unpack commitments.
     let commitments: @Box<[Hash; 4]> = stark_proof
@@ -125,7 +125,6 @@ pub fn verify_circuit(proof: CircuitProof, circuit_hash: Hash) {
     verify(
         stark_proof,
         circuit_air,
-        TRACE_LOG_DEGREE_BOUND,
         composition_commitment,
         commitment_scheme,
         CIRCUIT_FRI_PARAMS,
