@@ -65,6 +65,21 @@ mod BlakeTest {
             .verify(queries_position, queried_values, decommitment);
     }
 
+    /// Verification must reject a decommitment whose hash witness is missing a hash.
+    #[test]
+    #[should_panic(expected: "Merkle Verification Error: Witness Too Short")]
+    fn test_witness_too_short_fail() {
+        let test_values = prepare_verifier_values();
+        // Same as `test_verifier`, without the last witness hash.
+        let decommitment = MerkleDecommitment::<
+            Blake2sMerkleHasher,
+        > { hash_witness: array![*test_values[1], *test_values[2], *test_values[3]].span() };
+        let queries_position = array![4].span();
+        let queried_values = array![m31(0), m31(2), m31(4)].span();
+        MerkleVerifier { root: *test_values[0], tree_height: 4, n_committed_columns: 3 }
+            .verify(queries_position, queried_values, decommitment);
+    }
+
     /// Verification must reject a query position outside the tree.
     #[test]
     #[should_panic(expected: "Merkle Verification Error: Not All Merkle Nodes Were Consumed")]

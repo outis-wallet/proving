@@ -77,7 +77,7 @@ pub trait MerkleVerifierTrait<impl H: MerkleHasher> {
 }
 
 impl MerkleVerifierImpl<
-    impl H: MerkleHasher, +Clone<H::Hash>, +Drop<H::Hash>, +PartialEq<H::Hash>,
+    impl H: MerkleHasher, +Copy<H::Hash>, +Drop<H::Hash>, +PartialEq<H::Hash>,
 > of MerkleVerifierTrait<H> {
     /// Verifies openings of a Merkle commitment at positions given by `query_positions`. Expects
     /// a Merkle commitment to a collection of column vectors of the same length, whose leaves
@@ -137,10 +137,10 @@ impl MerkleVerifierImpl<
             if parity == 1 {
                 // If `child_position` is odd, we know that the sibling was not calculated before.
                 // Consume the hash_witness.
-                let parent_hash = H::hash_node(
-                    Some((hash_witness.pop_front().unwrap().clone(), child_hash.clone())),
-                    array![].span(),
-                );
+                let sibling_hash = *hash_witness
+                    .pop_front()
+                    .unwrap_or_else(|| panic!("{}", MerkleVerificationError::WitnessTooShort));
+                let parent_hash = H::hash_node(Some((sibling_hash, child_hash)), array![].span());
                 positions_and_hashes.append((parent_position, parent_hash));
                 continue;
             }
@@ -152,23 +152,20 @@ impl MerkleVerifierImpl<
             let sibling_hash = if let Some((maybe_sibling_position, maybe_sibling_hash)) =
                 positions_and_hashes
                 .span()
-                .first() {
-                if *maybe_sibling_position == child_position + 1 {
-                    // Consume the buffer.
-                    let _ = positions_and_hashes.pop_front();
-                    maybe_sibling_hash
-                } else {
-                    // Consume the hash_witness.
-                    hash_witness.pop_front().unwrap()
-                }
+                .first()
+                && *maybe_sibling_position == child_position
+                + 1 {
+                // Consume the buffer.
+                let _ = positions_and_hashes.pop_front();
+                *maybe_sibling_hash
             } else {
                 // Consume the hash_witness.
-                hash_witness.pop_front().unwrap()
+                *hash_witness
+                    .pop_front()
+                    .unwrap_or_else(|| panic!("{}", MerkleVerificationError::WitnessTooShort))
             };
 
-            let parent_hash = H::hash_node(
-                Some((child_hash.clone(), sibling_hash.clone())), array![].span(),
-            );
+            let parent_hash = H::hash_node(Some((child_hash, sibling_hash)), array![].span());
             positions_and_hashes.append((parent_position, parent_hash));
         };
 
