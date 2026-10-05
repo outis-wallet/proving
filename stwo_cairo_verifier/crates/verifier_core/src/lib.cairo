@@ -13,7 +13,6 @@ mod fields_test;
 
 pub mod fri;
 #[cfg(test)]
-#[cfg(not(feature: "poseidon252_verifier"))]
 mod fri_test;
 
 pub mod pcs;
