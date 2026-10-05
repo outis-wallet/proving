@@ -59,6 +59,7 @@ fn shared_target(definition: &RegistryDefinition) -> (ComponentSizes, Preprocess
     let cairo_params = definition.cairo_params();
     let circuits_builder = CircuitsBuilder {
         cairo_preprocessed_trace_variant: cairo_params.preprocessed_trace,
+        cairo_roots_cache: Default::default(),
         leaf_program: load_program(&definition.program),
         cairo_fri_params: cairo_params.fri_params,
         circuit_fri_params: definition.circuit_fri_params(),

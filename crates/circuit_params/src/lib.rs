@@ -6,16 +6,21 @@
 //! The `circuit-params` binary uses these to emit the registry (see `main.rs`); tests use them to
 //! derive its circuits' shape without committing anything.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
 
 use circuit_cairo_verifier::statement::MEMORY_VALUES_LIMBS;
+use circuit_cairo_verifier::utils::load_program;
 use circuit_cairo_verifier::verify::{NON_QUERY_INFO_LEAK, build_cairo_verifier_circuit};
 use circuit_common::finalize::{
     ComponentSizes, compute_padded_sizes, pad_to_targets, raw_component_sizes,
 };
 use circuit_common::preprocessed::{PreprocessedCircuit, layout_from_component_sizes};
-use circuit_registry::LogSizes;
+use circuit_prover::circuit_hash::circuit_hash_and_preprocessed_root;
+use circuit_registry::{
+    CircuitProofConfig, CircuitRegistry, DigestHex, LeafVerifier, LogSizes, Multiverifier,
+};
 use circuit_verifier::multiverifier::{
     build_multiverifier_context_from_shared_config, shared_config,
 };
@@ -53,6 +58,8 @@ pub fn raw_and_padded_component_sizes(
 pub struct CircuitsBuilder {
     /// Preprocessed-trace variant of the verified Cairo proofs.
     pub cairo_preprocessed_trace_variant: PreProcessedTraceVariant,
+    /// The root of the Cairo preprocessed trace for each supported trace size.
+    pub cairo_roots_cache: BTreeMap<u32, HashValue<QM31>>,
     /// The program every leaf proof of these circuits attests to.
     pub leaf_program: Arc<[[M31; MEMORY_VALUES_LIMBS]]>,
     /// FRI params of the verified Cairo proofs.
@@ -73,14 +80,19 @@ impl CircuitsBuilder {
     /// Returns the preprocessed root of a verified Cairo proof of `trace_log_size` — the Cairo
     /// AIR's preprocessed trace, committed at `trace_log_size + log_blowup_factor`, which the leaf
     /// circuit then verifies against as a constant.
-    pub fn cairo_preprocessed_root(&self, trace_log_size: u32) -> HashValue<QM31> {
-        let log_blowup_factor = self.cairo_fri_params.log_blowup_factor;
-        generate_preprocessed_commitment_root::<Blake2sM31MerkleChannel>(
-            log_blowup_factor,
-            self.cairo_preprocessed_trace_variant,
-            trace_log_size + log_blowup_factor,
-        )
-        .into()
+    pub fn cairo_preprocessed_root(&mut self, trace_log_size: u32) -> HashValue<QM31> {
+        self.cairo_roots_cache
+            .entry(trace_log_size)
+            .or_insert_with(|| {
+                let log_blowup_factor = self.cairo_fri_params.log_blowup_factor;
+                generate_preprocessed_commitment_root::<Blake2sM31MerkleChannel>(
+                    log_blowup_factor,
+                    self.cairo_preprocessed_trace_variant,
+                    trace_log_size + log_blowup_factor,
+                )
+                .into()
+            })
+            .clone()
     }
 
     /// Builds the leaf verifier circuit topology for a verified Cairo proof of `trace_log_size`,
@@ -99,6 +111,113 @@ impl CircuitsBuilder {
         );
 
         build_cairo_verifier_circuit(&verifier_config)
+    }
+}
+
+pub fn circuits_builder_from_definition(definition: &RegistryDefinition) -> CircuitsBuilder {
+    let program = load_program(&definition.program);
+
+    // The definition's params, each read from the file the proving binaries run with.
+    let cairo_params: ProverParameters = definition.cairo_params();
+    let circuit_fri_params: FriParams = definition.circuit_fri_params();
+
+    CircuitsBuilder {
+        cairo_preprocessed_trace_variant: cairo_params.preprocessed_trace,
+        cairo_roots_cache: Default::default(),
+        leaf_program: program,
+        cairo_fri_params: cairo_params.fri_params,
+        circuit_fri_params,
+        add_zk_blinding: definition.add_zk_blinding,
+    }
+}
+
+/// Get the sizes of the Cairo verifying circuits for the given Cairo trace sizes.
+///
+/// Each leaf is dropped as soon as its sizes are read, so only one is ever in memory.
+pub fn leaf_sizes(
+    circuits_builder: &mut CircuitsBuilder,
+    trace_log_sizes: impl IntoIterator<Item = u32>,
+) -> BTreeMap<u32, (ComponentSizes, ComponentSizes)> {
+    trace_log_sizes
+        .into_iter()
+        .map(|trace_log_size| {
+            let cairo_root = circuits_builder.cairo_preprocessed_root(trace_log_size);
+            let context = circuits_builder.build_leaf_context(trace_log_size, cairo_root);
+            (trace_log_size, raw_and_padded_component_sizes(&context))
+        })
+        .collect()
+}
+
+pub fn create_registry_from_definition(definition: &RegistryDefinition) -> CircuitRegistry {
+    // The definition's params, each read from the file the proving binaries run with.
+    let cairo_params: ProverParameters = definition.cairo_params();
+    let circuit_fri_params: FriParams = definition.circuit_fri_params();
+
+    let mut circuits_builder = circuits_builder_from_definition(definition);
+    let trace_log_sizes = definition.min_trace_log_size..=definition.max_trace_log_size;
+
+    let leaf_sizes = leaf_sizes(&mut circuits_builder, trace_log_sizes.clone());
+
+    let circuit_log_blowup_factor = circuit_fri_params.log_blowup_factor;
+
+    let leaves_max_sizes = leaf_sizes
+        .values()
+        .map(|(_, padded)| padded.clone())
+        .reduce(|max_sizes, sizes| max_sizes.elementwise_max(&sizes))
+        .expect("the trace range is non-empty");
+    let (target_sizes, preprocessed_multiverifier) = padded_shared_target(
+        leaves_max_sizes,
+        circuit_fri_params,
+        definition.pad_to_component_log_sizes.as_ref(),
+    );
+
+    // All circuits are padded to `target_sizes` and proven with
+    // `circuit_log_blowup_factor`, so they share a single config.
+    const CONFIG_ID: &str = "default";
+    let circuit_proof_configs = BTreeMap::from([(
+        CONFIG_ID.to_string(),
+        CircuitProofConfig {
+            fri_params: circuit_fri_params,
+            component_log_sizes: (&target_sizes).into(),
+        },
+    )]);
+    // Rebuild each leaf circuit, pad it to the shared target and record the hashes
+    // that identify it.
+    let leaf_verifiers = trace_log_sizes
+        .clone()
+        .map(|trace_log_size| {
+            let cairo_root = circuits_builder.cairo_preprocessed_root(trace_log_size);
+            let context = circuits_builder.build_leaf_context(trace_log_size, cairo_root);
+            let (circuit_hash, preprocessed_root) = circuit_hash_and_preprocessed_root(
+                &padded_preprocessed_circuit(context, &target_sizes),
+                circuit_log_blowup_factor,
+            );
+            LeafVerifier {
+                config: CONFIG_ID.to_string(),
+                trace_log_size,
+                circuit_hash: DigestHex::from(circuit_hash.0),
+                preprocessed_root: DigestHex::from(preprocessed_root.0),
+                zk_blinding: definition.add_zk_blinding,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    // The multiverifier verifies two proofs of the leaf circuit, hence
+    // `input_configs = [CONFIG_ID, CONFIG_ID]`.
+    let (mv_circuit_hash, mv_preprocessed_root) =
+        circuit_hash_and_preprocessed_root(&preprocessed_multiverifier, circuit_log_blowup_factor);
+    let multiverifiers = vec![Multiverifier {
+        config: CONFIG_ID.to_string(),
+        input_configs: [CONFIG_ID.to_string(), CONFIG_ID.to_string()],
+        circuit_hash: DigestHex::from(mv_circuit_hash.0),
+        preprocessed_root: DigestHex::from(mv_preprocessed_root.0),
+    }];
+
+    CircuitRegistry {
+        cairo_prover_params: cairo_params,
+        circuit_proof_configs,
+        leaf_verifiers,
+        multiverifiers,
     }
 }
 
