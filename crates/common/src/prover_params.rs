@@ -44,8 +44,6 @@ pub struct ProverParameters {
 pub enum ChannelHash {
     /// Default variant, the fastest option.
     Blake2s,
-    /// A variant for Blake2s where modulo M31 is applied to every 32bits in the output.
-    Blake2sM31,
     /// A variant for recursive proof verification.
     /// Note that using `Poseidon252` results in a significant decrease in proving speed compared
     /// to `Blake2s` (because of the large field emulation)

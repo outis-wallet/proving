@@ -1,7 +1,7 @@
 use circuit_cairo_verifier::all_components::all_components;
 use stwo::core::fields::qm31::QM31;
 use stwo::core::poly::circle::CanonicCoset;
-use stwo::core::vcs_lifted::blake2_merkle::Blake2sM31MerkleChannel;
+use stwo::core::vcs_lifted::blake2_merkle::Blake2sMerkleChannel;
 use stwo::prover::CommitmentTreeProver;
 use stwo::prover::backend::simd::SimdBackend;
 use stwo::prover::mempool::BaseColumnPool;
@@ -47,7 +47,7 @@ fn check_privacy_recursion_circuit_preprocessed_root() {
     let preprocessed_trace_polys = SimdBackend::interpolate_columns(preprocessed_trace, &twiddles);
     let store_polynomials_coefficients = true;
     let base_column_pool = BaseColumnPool::<SimdBackend>::new();
-    let preprocessed_tree = CommitmentTreeProver::<SimdBackend, Blake2sM31MerkleChannel>::new(
+    let preprocessed_tree = CommitmentTreeProver::<SimdBackend, Blake2sMerkleChannel>::new(
         preprocessed_trace_polys,
         CIRCUIT_PCS_CONFIG.fri_params.log_blowup_factor,
         &twiddles,

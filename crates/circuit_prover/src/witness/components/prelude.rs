@@ -18,7 +18,7 @@ pub use rayon::iter::{
 pub use stwo::core::fields::m31::M31;
 pub use stwo::core::fields::qm31::{QM31, SecureField};
 pub use stwo::core::poly::circle::CanonicCoset;
-pub use stwo::core::vcs_lifted::blake2_merkle::Blake2sM31MerkleChannel;
+pub use stwo::core::vcs_lifted::blake2_merkle::Blake2sMerkleChannel;
 pub use stwo::prover::TreeBuilder;
 pub use stwo::prover::backend::Col;
 pub use stwo::prover::backend::simd::SimdBackend;

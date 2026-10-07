@@ -17,7 +17,7 @@ use stwo::core::proof_of_work::GrindOps;
 use stwo::core::utils::MaybeOwned;
 use stwo::core::vcs::blake2_hash::Blake2sHash;
 use stwo::core::vcs_lifted::MerkleHasherLifted;
-use stwo::core::vcs_lifted::blake2_merkle::{Blake2sM31MerkleChannel, Blake2sMerkleHasher};
+use stwo::core::vcs_lifted::blake2_merkle::{Blake2sMerkleChannel, Blake2sMerkleHasher};
 pub use stwo::prover::backend::simd::SimdBackend;
 pub use stwo::prover::mempool::BaseColumnPool;
 use stwo::prover::poly::circle::PolyOps;
@@ -41,7 +41,7 @@ pub fn prove_circuit_assignment(
     base_column_pool: &BaseColumnPool<SimdBackend>,
     pcs_config: PcsConfig,
 ) -> Result<CircuitProof<Blake2sMerkleHasher>, ProvingError> {
-    prove_circuit_assignment_with_channel::<Blake2sM31MerkleChannel>(
+    prove_circuit_assignment_with_channel::<Blake2sMerkleChannel>(
         values,
         preprocessed_circuit,
         base_column_pool,

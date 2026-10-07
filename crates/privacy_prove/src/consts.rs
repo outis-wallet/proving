@@ -19,7 +19,7 @@ pub const CAIRO_RUN_CONFIG: CairoRunConfig<'_> = CairoRunConfig {
 };
 
 pub const CAIRO_PROVER_PARAMS: ProverParameters = ProverParameters {
-    channel_hash: ChannelHash::Blake2sM31,
+    channel_hash: ChannelHash::Blake2s,
     fri_params: CAIRO_PCS_CONFIG.fri_params,
     preprocessed_trace: PreProcessedTraceVariant::CanonicalSmall,
     channel_salt: 0,

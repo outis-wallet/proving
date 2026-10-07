@@ -11,18 +11,14 @@ use crate::core::vcs::blake2_hash::{Blake2sHash, Blake2sHasher};
 pub const BLAKE_BYTES_PER_HASH: usize = 32;
 pub const FELTS_PER_HASH: usize = 8;
 
-pub type Blake2sChannel = Blake2sChannelGeneric<false>;
-/// Same as [Blake2sChannel], expect that the hash output is taken modulo M31::P.
-pub type Blake2sM31Channel = Blake2sChannelGeneric<true>;
-
 /// A channel that can be used to draw random elements from a [Blake2sHash] digest.
 #[derive(Default, Clone, Debug)]
-pub struct Blake2sChannelGeneric<const IS_M31_OUTPUT: bool> {
+pub struct Blake2sChannel {
     digest: Blake2sHash,
     n_draws: u32,
 }
 
-impl<const IS_M31_OUTPUT: bool> Blake2sChannelGeneric<IS_M31_OUTPUT> {
+impl Blake2sChannel {
     pub const POW_PREFIX: u32 = 0x12345678;
 
     pub const fn digest(&self) -> Blake2sHash {
@@ -40,7 +36,7 @@ impl<const IS_M31_OUTPUT: bool> Blake2sChannelGeneric<IS_M31_OUTPUT> {
     }
 }
 
-impl<const IS_M31_OUTPUT: bool> Channel for Blake2sChannelGeneric<IS_M31_OUTPUT> {
+impl Channel for Blake2sChannel {
     const BYTES_PER_HASH: usize = BLAKE_BYTES_PER_HASH;
 
     fn mix_felts(&mut self, felts: &[SecureField]) {

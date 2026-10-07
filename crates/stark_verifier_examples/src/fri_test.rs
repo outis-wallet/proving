@@ -13,14 +13,14 @@ use circuits_stark_verifier::select_queries::select_queries;
 use itertools::{chain, zip_eq};
 use num_traits::One;
 use rstest::rstest;
-use stwo::core::channel::{Blake2sM31Channel, Channel, MerkleChannel};
+use stwo::core::channel::{Blake2sChannel, Channel, MerkleChannel};
 use stwo::core::circle::Coset;
 use stwo::core::fields::m31::BaseField;
 use stwo::core::fields::qm31::{QM31, SecureField};
 use stwo::core::fri::{ExtendedFriProof, FriConfig, FriParams};
 use stwo::core::poly::circle::CircleDomain;
 use stwo::core::queries::Queries;
-use stwo::core::vcs_lifted::blake2_merkle::{Blake2sM31MerkleChannel, Blake2sMerkleHasher};
+use stwo::core::vcs_lifted::blake2_merkle::{Blake2sMerkleChannel, Blake2sMerkleHasher};
 use stwo::core::vcs_lifted::verifier::LOG_PACKED_LEAF_SIZE;
 use stwo::prover::backend::CpuBackend;
 use stwo::prover::backend::cpu::CpuCirclePoly;
@@ -93,14 +93,14 @@ fn test_fri_decommit_with_jumps(
     let circuit_fri_proof = circuit_fri_proof.guess(&mut context);
 
     // Compute the folding alphas.
-    let mut channel = Blake2sM31Channel::default();
+    let mut channel = Blake2sChannel::default();
     let proof_layer_commitments = chain!(
         [fri_proof.proof.first_layer.commitment],
         fri_proof.proof.inner_layers.iter().map(|layer| layer.commitment),
     );
     let alpha_values: Vec<_> = proof_layer_commitments
         .map(|commitment| {
-            Blake2sM31MerkleChannel::mix_root(&mut channel, commitment);
+            Blake2sMerkleChannel::mix_root(&mut channel, commitment);
             channel.draw_secure_felt()
         })
         .collect();
@@ -136,8 +136,8 @@ fn create_fri_proof(
     let config = FriParams::new(0, 0, log_blowup_factor, n_queries, fold_step as u32);
     let column = polynomial_evaluation(trace_log_size, log_blowup_factor);
     let twiddles = CpuBackend::precompute_twiddles(column.domain.half_coset);
-    let prover = FriProver::<CpuBackend, Blake2sM31MerkleChannel>::commit(
-        &mut Blake2sM31Channel::default(),
+    let prover = FriProver::<CpuBackend, Blake2sMerkleChannel>::commit(
+        &mut Blake2sChannel::default(),
         config,
         &column,
         &twiddles,

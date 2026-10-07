@@ -109,8 +109,7 @@ fn test_validate_rejects_low_security_bits() {
 #[cfg(not(feature: "poseidon252_verifier"))]
 #[test]
 /// The test data was generated using [`stwo::core::fri::tests::valid_proof_passes_verification`]
-/// on commit c66302ae7afaa09e6e9fe8a5039094100121d673.
-/// TODO: update commit counter.
+/// on commit 3f4033a1eaaea94b99d043a06147fb6270236406.
 fn valid_proof_passes_verification() {
     let config = FriParams {
         pow_bits: 0,

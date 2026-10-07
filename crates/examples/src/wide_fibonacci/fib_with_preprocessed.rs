@@ -82,13 +82,13 @@ mod tests {
     use itertools::Itertools;
     use num_traits::{One, Zero};
     use stwo::core::air::Component;
-    use stwo::core::channel::Blake2sM31Channel;
+    use stwo::core::channel::Blake2sChannel;
     use stwo::core::fields::m31::BaseField;
     use stwo::core::fields::qm31::SecureField;
     use stwo::core::fri::{FriConfig, FriParams};
     use stwo::core::pcs::{CommitmentSchemeVerifier, PcsConfig};
     use stwo::core::poly::circle::CanonicCoset;
-    use stwo::core::vcs_lifted::blake2_merkle::Blake2sM31MerkleChannel;
+    use stwo::core::vcs_lifted::blake2_merkle::Blake2sMerkleChannel;
     use stwo::core::verifier::verify;
     use stwo::prover::backend::Column;
     use stwo::prover::backend::simd::SimdBackend;
@@ -125,11 +125,9 @@ mod tests {
             );
 
             // Setup protocol.
-            let prover_channel = &mut Blake2sM31Channel::default();
-            let mut commitment_scheme = CommitmentSchemeProver::<
-                SimdBackend,
-                Blake2sM31MerkleChannel,
-            >::new(config, &twiddles);
+            let prover_channel = &mut Blake2sChannel::default();
+            let mut commitment_scheme =
+                CommitmentSchemeProver::<SimdBackend, Blake2sMerkleChannel>::new(config, &twiddles);
 
             // Preprocessed trace
             let mut tree_builder = commitment_scheme.tree_builder();
@@ -151,7 +149,7 @@ mod tests {
                 SecureField::zero(),
             );
 
-            let proof = prove::<SimdBackend, Blake2sM31MerkleChannel>(
+            let proof = prove::<SimdBackend, Blake2sMerkleChannel>(
                 &[&component],
                 prover_channel,
                 commitment_scheme,
@@ -159,9 +157,9 @@ mod tests {
             .unwrap();
 
             // Verify.
-            let verifier_channel = &mut Blake2sM31Channel::default();
+            let verifier_channel = &mut Blake2sChannel::default();
             let commitment_scheme =
-                &mut CommitmentSchemeVerifier::<Blake2sM31MerkleChannel>::new(config);
+                &mut CommitmentSchemeVerifier::<Blake2sMerkleChannel>::new(config);
 
             // Retrieve the expected column sizes in each commitment interaction, from the AIR.
             let sizes = component.trace_log_degree_bounds();
@@ -190,11 +188,9 @@ mod tests {
             );
 
             // Setup protocol.
-            let prover_channel = &mut Blake2sM31Channel::default();
-            let mut commitment_scheme = CommitmentSchemeProver::<
-                SimdBackend,
-                Blake2sM31MerkleChannel,
-            >::new(config, &twiddles);
+            let prover_channel = &mut Blake2sChannel::default();
+            let mut commitment_scheme =
+                CommitmentSchemeProver::<SimdBackend, Blake2sMerkleChannel>::new(config, &twiddles);
 
             // Preprocessed trace
             let mut tree_builder = commitment_scheme.tree_builder();
@@ -224,7 +220,7 @@ mod tests {
                 SecureField::zero(),
             );
 
-            let proof = prove::<SimdBackend, Blake2sM31MerkleChannel>(
+            let proof = prove::<SimdBackend, Blake2sMerkleChannel>(
                 &[&component],
                 prover_channel,
                 commitment_scheme,
@@ -232,9 +228,9 @@ mod tests {
             .unwrap();
 
             // Verify.
-            let verifier_channel = &mut Blake2sM31Channel::default();
+            let verifier_channel = &mut Blake2sChannel::default();
             let commitment_scheme =
-                &mut CommitmentSchemeVerifier::<Blake2sM31MerkleChannel>::new(config);
+                &mut CommitmentSchemeVerifier::<Blake2sMerkleChannel>::new(config);
 
             // Retrieve the expected column sizes in each commitment interaction, from the AIR.
             let sizes = component.trace_log_degree_bounds();
@@ -266,11 +262,9 @@ mod tests {
             );
 
             // Setup protocol.
-            let prover_channel = &mut Blake2sM31Channel::default();
-            let mut commitment_scheme = CommitmentSchemeProver::<
-                SimdBackend,
-                Blake2sM31MerkleChannel,
-            >::new(config, &twiddles);
+            let prover_channel = &mut Blake2sChannel::default();
+            let mut commitment_scheme =
+                CommitmentSchemeProver::<SimdBackend, Blake2sMerkleChannel>::new(config, &twiddles);
 
             // Preprocessed trace
             let mut tree_builder = commitment_scheme.tree_builder();
@@ -300,7 +294,7 @@ mod tests {
                 SecureField::zero(),
             );
 
-            let proof = prove::<SimdBackend, Blake2sM31MerkleChannel>(
+            let proof = prove::<SimdBackend, Blake2sMerkleChannel>(
                 &[&component],
                 prover_channel,
                 commitment_scheme,
@@ -308,9 +302,9 @@ mod tests {
             .unwrap();
 
             // Verify.
-            let verifier_channel = &mut Blake2sM31Channel::default();
+            let verifier_channel = &mut Blake2sChannel::default();
             let commitment_scheme =
-                &mut CommitmentSchemeVerifier::<Blake2sM31MerkleChannel>::new(config);
+                &mut CommitmentSchemeVerifier::<Blake2sMerkleChannel>::new(config);
 
             // Retrieve the expected column sizes in each commitment interaction, from the AIR.
             let mut sizes = component.trace_log_degree_bounds();

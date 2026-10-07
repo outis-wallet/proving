@@ -14,7 +14,7 @@ use stwo::core::poly::circle::CanonicCoset;
 #[cfg(feature = "prover")]
 use stwo::core::vcs::blake2_hash::Blake2sHash;
 #[cfg(feature = "prover")]
-use stwo::core::vcs_lifted::blake2_merkle::Blake2sM31MerkleChannel;
+use stwo::core::vcs_lifted::blake2_merkle::Blake2sMerkleChannel;
 #[cfg(feature = "prover")]
 use stwo::prover::CommitmentTreeProver;
 #[cfg(feature = "prover")]
@@ -545,7 +545,7 @@ impl PreprocessedCircuit {
         let preprocessed_trace = self.preprocessed_trace.get_trace::<SimdBackend>();
         let preprocessed_trace_polys =
             SimdBackend::interpolate_columns(preprocessed_trace, &twiddles);
-        let preprocessed_tree = CommitmentTreeProver::<SimdBackend, Blake2sM31MerkleChannel>::new(
+        let preprocessed_tree = CommitmentTreeProver::<SimdBackend, Blake2sMerkleChannel>::new(
             preprocessed_trace_polys,
             log_blowup_factor,
             &twiddles,

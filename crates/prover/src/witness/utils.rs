@@ -9,7 +9,7 @@ use stwo::core::channel::MerkleChannel;
 use stwo::core::fields::m31::M31;
 use stwo::core::pcs::{TreeSubspan, TreeVec};
 use stwo::core::utils::SliceExt;
-use stwo::core::vcs_lifted::blake2_merkle::{Blake2sM31MerkleChannel, Blake2sMerkleChannel};
+use stwo::core::vcs_lifted::blake2_merkle::Blake2sMerkleChannel;
 use stwo::prover::backend::simd::conversion::{Pack, Unpack};
 use stwo::prover::backend::simd::m31::{LOG_N_LANES, N_LANES, PackedBaseField, PackedM31};
 use stwo::prover::backend::{Backend, BackendForChannel};
@@ -168,7 +168,7 @@ pub fn export_circuit_cairo_verifier_preprocessed_roots() {
     let max_log_blowup_factor = 3;
 
     for log_blowup_factor in 1..=max_log_blowup_factor {
-        let root = generate_preprocessed_commitment_root::<Blake2sM31MerkleChannel>(
+        let root = generate_preprocessed_commitment_root::<Blake2sMerkleChannel>(
             log_blowup_factor,
             PreProcessedTraceVariant::CanonicalSmall,
             20 + log_blowup_factor,

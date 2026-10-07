@@ -47,7 +47,7 @@ use serde_json::from_str;
 use starknet_types_core::felt::Felt;
 use stwo::core::poly::circle::CanonicCoset;
 use stwo::core::utils::MaybeOwned;
-use stwo::core::vcs_lifted::blake2_merkle::Blake2sM31MerkleChannel;
+use stwo::core::vcs_lifted::blake2_merkle::Blake2sMerkleChannel;
 use stwo::prover::CommitmentTreeProver;
 use stwo::prover::backend::simd::SimdBackend;
 use stwo::prover::mempool::BaseColumnPool;
@@ -71,9 +71,9 @@ pub struct RecursiveProverPrecomputes {
     pub base_column_pool: BaseColumnPool<SimdBackend>,
     pub twiddles: TwiddleTree<SimdBackend>,
     pub cairo_preprocessed_trace: Arc<PreProcessedTrace>,
-    pub cairo_preprocessed_tree: CommitmentTreeProver<SimdBackend, Blake2sM31MerkleChannel>,
+    pub cairo_preprocessed_tree: CommitmentTreeProver<SimdBackend, Blake2sMerkleChannel>,
     pub cairo_verifier_config: CairoVerifierConfig,
-    pub circuit_preprocessed_tree: CommitmentTreeProver<SimdBackend, Blake2sM31MerkleChannel>,
+    pub circuit_preprocessed_tree: CommitmentTreeProver<SimdBackend, Blake2sMerkleChannel>,
     pub preprocessed_circuit: PreprocessedCircuit,
     pub circuit_config: CircuitConfig,
     pub proof_config: ProofConfig,
@@ -109,7 +109,7 @@ pub fn privacy_prove(pie: CairoPie) -> Result<PrivacyProofOutput, Box<dyn Error>
     let (prover_input, output_preimage) = run_privacy_bootloader(pie)?;
 
     info!("Generate the cairo proof");
-    let cairo_proof = prove_cairo::<Blake2sM31MerkleChannel>(prover_input, CAIRO_PROVER_PARAMS)?;
+    let cairo_proof = prove_cairo::<Blake2sMerkleChannel>(prover_input, CAIRO_PROVER_PARAMS)?;
     let FlatClaim { component_enable_bits, component_log_sizes: _, public_data: _ } =
         cairo_proof.claim.flatten_claim();
 
@@ -161,7 +161,7 @@ pub fn prepare_recursive_prover_precomputes()
     warm_pedersen_pp_trace(CAIRO_PROVER_PARAMS.preprocessed_trace);
     let cairo_preprocessed_trace_polys =
         SimdBackend::interpolate_columns(gen_trace(cairo_preprocessed_trace.clone()), &twiddles);
-    let cairo_preprocessed_tree = CommitmentTreeProver::<SimdBackend, Blake2sM31MerkleChannel>::new(
+    let cairo_preprocessed_tree = CommitmentTreeProver::<SimdBackend, Blake2sMerkleChannel>::new(
         cairo_preprocessed_trace_polys,
         CAIRO_PCS_CONFIG.fri_params.log_blowup_factor,
         &twiddles,
@@ -175,15 +175,14 @@ pub fn prepare_recursive_prover_precomputes()
         preprocessed_circuit.preprocessed_trace.get_trace::<SimdBackend>();
     let circuit_preprocessed_trace_polys =
         SimdBackend::interpolate_columns(circuit_preprocessed_trace, &twiddles);
-    let circuit_preprocessed_tree =
-        CommitmentTreeProver::<SimdBackend, Blake2sM31MerkleChannel>::new(
-            circuit_preprocessed_trace_polys,
-            CIRCUIT_FRI_CONFIG.params.log_blowup_factor,
-            &twiddles,
-            CIRCUIT_STORE_POLYNOMIALS_COEFFICIENTS,
-            circuit_config.config.preprocessed_lifting_log_size,
-            &base_column_pool,
-        );
+    let circuit_preprocessed_tree = CommitmentTreeProver::<SimdBackend, Blake2sMerkleChannel>::new(
+        circuit_preprocessed_trace_polys,
+        CIRCUIT_FRI_CONFIG.params.log_blowup_factor,
+        &twiddles,
+        CIRCUIT_STORE_POLYNOMIALS_COEFFICIENTS,
+        circuit_config.config.preprocessed_lifting_log_size,
+        &base_column_pool,
+    );
 
     Ok(Arc::new(RecursiveProverPrecomputes {
         base_column_pool,

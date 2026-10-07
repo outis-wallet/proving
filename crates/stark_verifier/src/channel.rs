@@ -52,10 +52,6 @@ impl Channel {
     }
 
     /// Mixes the given Merkle root into the channel's digest.
-    ///
-    /// Mirrors the out-of-circuit `Blake2sM31MerkleChannel::mix_root`: the current digest and the
-    /// root are concatenated as sixteen 32-bit words and hashed with the standard Blake2s, which
-    /// is then used as the new digest of the channel.
     pub fn mix_commitment(&mut self, context: &mut Context<impl IValue>, root: &HashValue<Var>) {
         // Sixteen message words: the eight raw digest words followed by the eight root words.
         let mut message = self.digest.to_vec();

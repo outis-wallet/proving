@@ -20,7 +20,7 @@ use stwo::core::fields::m31::M31;
 use stwo::core::fields::qm31::QM31;
 use stwo::core::fri::{FriConfig, FriParams};
 use stwo::core::pcs::PcsConfig;
-use stwo::core::vcs_lifted::blake2_merkle::{Blake2sM31MerkleChannel, Blake2sMerkleHasher};
+use stwo::core::vcs_lifted::blake2_merkle::{Blake2sMerkleChannel, Blake2sMerkleHasher};
 use stwo_cairo_common::preprocessed_columns::preprocessed_trace::{
     PreProcessedTraceVariant, SMALL_MAX_SEQUENCE_LOG_SIZE,
 };
@@ -108,7 +108,7 @@ fn all_opcode_components_context() -> FinalizedContext<QM31> {
             run_and_adapt(&compiled_program, ProgramType::Json, LayoutName::all_cairo_stwo, None)
                 .unwrap();
         let prover_params = ProverParameters {
-            channel_hash: ChannelHash::Blake2sM31,
+            channel_hash: ChannelHash::Blake2s,
             // Fold step = 4.
             fri_params: FriParams::new(26, 0, low_blowup_factor, 70, 4),
             preprocessed_trace: preprocessed_trace_variant,
@@ -118,7 +118,7 @@ fn all_opcode_components_context() -> FinalizedContext<QM31> {
             opt_n_id_to_big_components: None,
             lifting_size_policy: LiftingSizePolicy::Fixed(trace_log_size + low_blowup_factor),
         };
-        let cairo_proof = prove_cairo::<Blake2sM31MerkleChannel>(input, prover_params).unwrap();
+        let cairo_proof = prove_cairo::<Blake2sMerkleChannel>(input, prover_params).unwrap();
 
         let proof_file =
             OpenOptions::new().create(true).write(true).truncate(true).open(&proof_path).unwrap();

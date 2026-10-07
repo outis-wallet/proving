@@ -30,7 +30,7 @@ use circuits::ivalue::NoValue;
 use leaf_prover::prove_leaf::leaf_verifier_config;
 use stwo::core::fri::{FriConfig, FriParams};
 use stwo::core::pcs::PcsConfig;
-use stwo::core::vcs_lifted::blake2_merkle::Blake2sM31MerkleChannel;
+use stwo::core::vcs_lifted::blake2_merkle::Blake2sMerkleChannel;
 use stwo_cairo_common::preprocessed_columns::preprocessed_trace::PreProcessedTraceVariant;
 use stwo_cairo_common::prover_types::cpu::M31;
 use stwo_cairo_prover::prover::ProverParameters;
@@ -85,7 +85,7 @@ impl CircuitsBuilder {
             .entry(trace_log_size)
             .or_insert_with(|| {
                 let log_blowup_factor = self.cairo_fri_params.log_blowup_factor;
-                generate_preprocessed_commitment_root::<Blake2sM31MerkleChannel>(
+                generate_preprocessed_commitment_root::<Blake2sMerkleChannel>(
                     log_blowup_factor,
                     self.cairo_preprocessed_trace_variant,
                     trace_log_size + log_blowup_factor,

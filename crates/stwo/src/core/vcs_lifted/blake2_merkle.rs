@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::merkle_hasher::MerkleHasherLifted;
-use crate::core::channel::{Blake2sChannel, Blake2sM31Channel, MerkleChannel};
+use crate::core::channel::{Blake2sChannel, MerkleChannel};
 use crate::core::fields::m31::BaseField;
 use crate::core::vcs::blake2_hash::{Blake2sHash, Blake2sHasher};
 
@@ -38,21 +38,6 @@ impl MerkleChannel for Blake2sMerkleChannel {
     type H = Blake2sMerkleHasher;
 
     fn mix_root(channel: &mut Self::C, root: Blake2sHash) {
-        channel.update_digest(Blake2sHasher::concat_and_hash(&channel.digest(), &root));
-    }
-}
-
-/// A [`MerkleChannel`] that commits with the **standard** (non-`M31`-reduced) Blake2s Merkle
-/// hasher.  TODO: Remove and replace with the identical [Blake2sMerkleChannel].
-#[derive(Default)]
-pub struct Blake2sM31MerkleChannel;
-
-impl MerkleChannel for Blake2sM31MerkleChannel {
-    type C = Blake2sM31Channel;
-    type H = Blake2sMerkleHasher;
-
-    fn mix_root(channel: &mut Self::C, root: Blake2sHash) {
-        // Mix the digest into the channel.
         channel.update_digest(Blake2sHasher::concat_and_hash(&channel.digest(), &root));
     }
 }

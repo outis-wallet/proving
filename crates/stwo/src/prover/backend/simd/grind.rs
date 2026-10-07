@@ -8,7 +8,7 @@ use rayon::prelude::*;
 use tracing::{Level, span};
 
 use super::SimdBackend;
-use crate::core::channel::{Blake2sChannelGeneric, Channel, Keccak256Channel};
+use crate::core::channel::{Blake2sChannel, Channel, Keccak256Channel};
 use crate::core::fields::m31::P;
 use crate::core::proof_of_work::GrindOps;
 use crate::core::vcs::blake2_hash::Blake2sHasher;
@@ -19,10 +19,10 @@ use crate::prover::backend::simd::m31::N_LANES;
 // It must be <= 30 if we want to guarantee that the lowest 32 bits of the nonce are < 2^31 - 1.
 const GRIND_LOW_BITS: u32 = 20;
 
-impl<const IS_M31_OUTPUT: bool> GrindOps<Blake2sChannelGeneric<IS_M31_OUTPUT>> for SimdBackend {
+impl GrindOps<Blake2sChannel> for SimdBackend {
     /// Outputs the smallest nonce of the form `(a << 32) | b`, where `0 <= a < 2^31 - 1` and
     /// `0 <= b < 2^GRIND_LOW_BITS`.
-    fn grind(channel: &Blake2sChannelGeneric<IS_M31_OUTPUT>, pow_bits: u32) -> u64 {
+    fn grind(channel: &Blake2sChannel, pow_bits: u32) -> u64 {
         let _span = span!(Level::TRACE, "Simd Blake2s Grind", class = "Blake2s Grind");
 
         // TODO(first): support more than 32 bits.
@@ -31,7 +31,7 @@ impl<const IS_M31_OUTPUT: bool> GrindOps<Blake2sChannelGeneric<IS_M31_OUTPUT>> f
 
         // Compute the prefix digest H(POW_PREFIX, [0_u8; 12], digest, n_bits).
         let mut hasher = Blake2sHasher::default();
-        hasher.update(&Blake2sChannelGeneric::<IS_M31_OUTPUT>::POW_PREFIX.to_le_bytes());
+        hasher.update(&Blake2sChannel::POW_PREFIX.to_le_bytes());
         hasher.update(&[0_u8; 12]);
         hasher.update(&digest.0[..]);
         hasher.update(&pow_bits.to_le_bytes());
@@ -136,7 +136,7 @@ where
 
 // TODO: replace with an optimized SIMD implementation using parallel keccak permutations
 // (e.g. `keccak::parallel` `f1600x4`/`x8`), similar to the parallel + SIMD path used for
-// `Blake2sChannelGeneric` above.
+// `Blake2sChannel` above.
 impl GrindOps<Keccak256Channel> for SimdBackend {
     fn grind(channel: &Keccak256Channel, pow_bits: u32) -> u64 {
         let mut nonce = 0u64;

@@ -4,7 +4,7 @@ use circuits::ivalue::{IValue, qm31_from_u32s};
 use circuits::ops::Guess;
 use circuits::stats::Stats;
 use rstest::rstest;
-use stwo::core::channel::{Blake2sM31Channel, Channel as StwoChannel};
+use stwo::core::channel::{Blake2sChannel, Channel as StwoChannel};
 use stwo::core::fields::qm31::QM31;
 
 use super::Channel;
@@ -103,7 +103,7 @@ fn test_mix_u32s_matches_stwo() {
     let mut context = TraceContext::default();
     // A fresh circuit channel starts from a zero digest, matching stwo's default channel.
     let mut channel = Channel::new(&mut context);
-    let mut stwo_channel = Blake2sM31Channel::default();
+    let mut stwo_channel = Blake2sChannel::default();
 
     // Mixing twice also exercises the non-zero-digest path on the second call.
     for _ in 0..2 {
@@ -217,7 +217,7 @@ fn test_pow_regression(#[case] n_bits: u32, #[case] nonce: u32, #[case] success:
 }
 
 /// Verifies the full `claims_to_mix` pipeline: `unpack_qm31s_to_u32_words` followed by
-/// `channel.mix_u32s` produces the same channel state as stwo's `Blake2sM31Channel::mix_felts`.
+/// `channel.mix_u32s` produces the same channel state as stwo's `Blake2sChannel::mix_felts`.
 #[test]
 fn test_unpack_then_mix_u32s_matches_mix_felts() {
     use stwo::core::fields::m31::M31;
@@ -238,7 +238,7 @@ fn test_unpack_then_mix_u32s_matches_mix_felts() {
     let mut context = TraceContext::default();
     // Both channels start from a zero digest.
     let mut channel = Channel::new(&mut context);
-    let mut stwo_channel = Blake2sM31Channel::default();
+    let mut stwo_channel = Blake2sChannel::default();
 
     // Stwo prover-side: mix the felts directly.
     stwo_channel.mix_felts(&felts);

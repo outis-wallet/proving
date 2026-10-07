@@ -17,11 +17,11 @@ use circuits::utils::le_u32s_from_bytes;
 use circuits::wrappers::U32Wrapper;
 use expect_test::expect;
 use num_traits::{One, Zero};
-use stwo::core::channel::{Blake2sM31Channel, Channel};
+use stwo::core::channel::{Blake2sChannel, Channel};
 use stwo::core::fields::qm31::QM31;
 use stwo::core::pcs::CommitmentSchemeVerifier;
 use stwo::core::vcs::blake2_hash::Blake2sHash;
-use stwo::core::vcs_lifted::blake2_merkle::{Blake2sM31MerkleChannel, Blake2sMerkleHasher};
+use stwo::core::vcs_lifted::blake2_merkle::{Blake2sMerkleChannel, Blake2sMerkleHasher};
 
 use crate::circuit_air::circuit_components::CircuitComponents;
 use crate::circuit_hash::compute_circuit_hash;
@@ -220,11 +220,10 @@ fn stwo_verify(
     );
 
     let log_blowup_factor = pcs_config.fri_params.log_blowup_factor;
-    let verifier_channel = &mut Blake2sM31Channel::default();
+    let verifier_channel = &mut Blake2sChannel::default();
     verifier_channel.mix_felts(&[channel_salt.into()]);
     pcs_config.fri_params.mix_into(verifier_channel);
-    let commitment_scheme =
-        &mut CommitmentSchemeVerifier::<Blake2sM31MerkleChannel>::new(pcs_config);
+    let commitment_scheme = &mut CommitmentSchemeVerifier::<Blake2sMerkleChannel>::new(pcs_config);
 
     let [trace_log_sizes, interaction_log_sizes] = column_log_sizes_per_tree(&log_sizes);
 

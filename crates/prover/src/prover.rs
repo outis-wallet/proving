@@ -20,7 +20,7 @@ use stwo::core::pcs::utils::InvalidLiftingLogSizeError;
 use stwo::core::poly::circle::CanonicCoset;
 use stwo::core::proof_of_work::GrindOps;
 use stwo::core::utils::MaybeOwned;
-use stwo::core::vcs_lifted::blake2_merkle::{Blake2sM31MerkleChannel, Blake2sMerkleChannel};
+use stwo::core::vcs_lifted::blake2_merkle::Blake2sMerkleChannel;
 use stwo::core::vcs_lifted::merkle_hasher::MerkleHasherLifted;
 use stwo::prover::backend::BackendForChannel;
 use stwo::prover::backend::simd::SimdBackend;
@@ -404,15 +404,6 @@ pub fn create_and_serialize_proof(
     match proof_params.channel_hash {
         ChannelHash::Blake2s => {
             prove_verify_serialize::<Blake2sMerkleChannel>(
-                input,
-                verify,
-                &proof_path,
-                proof_format,
-                proof_params,
-            )?;
-        }
-        ChannelHash::Blake2sM31 => {
-            prove_verify_serialize::<Blake2sM31MerkleChannel>(
                 input,
                 verify,
                 &proof_path,
