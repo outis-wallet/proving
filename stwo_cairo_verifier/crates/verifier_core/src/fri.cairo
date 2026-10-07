@@ -20,6 +20,8 @@ pub const LOG_PACKED_LEAF_SIZE: u32 = 2;
 /// The range of supported FRI fold steps.
 const MIN_FOLD_STEP: u32 = 1;
 const MAX_FOLD_STEP: u32 = 4;
+/// The minimum number of proof-of-work bits before the FRI query phase.
+const MIN_POW_BITS: u32 = 20;
 
 #[derive(Drop, Serde, Copy, PartialEq)]
 pub struct FriParams {
@@ -56,6 +58,7 @@ pub impl FriParamsImpl of FriParamsTrait {
             "{}",
             FriVerificationError::LastLayerLogDegreeMustBeZero,
         );
+        assert!(*self.pow_bits >= MIN_POW_BITS, "{}", FriVerificationError::ProofOfWorkBitsTooLow);
     }
 
     fn mix_into(self: @FriParams, ref channel: Channel) {
@@ -613,6 +616,7 @@ pub enum FriVerificationError {
     ProofOfWork,
     SecurityBitsTooLow,
     InvalidFoldStep,
+    ProofOfWorkBitsTooLow,
 }
 
 impl FriVerificationErrorDisplay of core::fmt::Display<FriVerificationError> {
@@ -632,6 +636,9 @@ impl FriVerificationErrorDisplay of core::fmt::Display<FriVerificationError> {
             FriVerificationError::ProofOfWork => write!(f, "Proof Of Work verification failed"),
             FriVerificationError::SecurityBitsTooLow => write!(f, "Security bits are too low"),
             FriVerificationError::InvalidFoldStep => write!(f, "Unsupported FRI fold step"),
+            FriVerificationError::ProofOfWorkBitsTooLow => write!(
+                f, "Number of proof of work bits is too low",
+            ),
         }
     }
 }

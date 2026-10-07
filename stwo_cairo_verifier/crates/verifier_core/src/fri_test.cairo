@@ -30,7 +30,7 @@ fn test_security_bits() {
 fn test_validate_accepts_supported_fold_steps() {
     for fold_step in 1..5_u32 {
         let params = FriParams {
-            pow_bits: 0,
+            pow_bits: 20,
             log_blowup_factor: 1,
             log_last_layer_degree_bound: 0,
             n_queries: 1,
@@ -73,6 +73,19 @@ fn test_validate_rejects_non_zero_log_last_layer_degree_bound() {
         pow_bits: 0,
         log_blowup_factor: 1,
         log_last_layer_degree_bound: 1,
+        n_queries: 1,
+        fold_step: 1,
+    };
+    params.validate(min_security_bits: 0);
+}
+
+#[test]
+#[should_panic(expected: "Number of proof of work bits is too low")]
+fn test_validate_rejects_low_pow_bits() {
+    let params = FriParams {
+        pow_bits: 19,
+        log_blowup_factor: 1,
+        log_last_layer_degree_bound: 0,
         n_queries: 1,
         fold_step: 1,
     };

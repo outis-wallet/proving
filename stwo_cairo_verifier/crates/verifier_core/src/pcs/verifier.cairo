@@ -13,9 +13,6 @@ use crate::vcs::MerkleHasher;
 use crate::vcs::verifier::{MerkleDecommitment, MerkleVerifier, MerkleVerifierTrait};
 use crate::{ColumnSpan, Hash, TreeArray, TreeSpan, queries};
 
-/// Sanity check that the proof of work is not negligible.
-pub const MIN_POW_BITS: u32 = 20;
-
 /// Sampled mask values.
 ///
 /// Each column is sampled at one of the following point sets:
@@ -167,8 +164,6 @@ pub impl CommitmentSchemeVerifierImpl of CommitmentSchemeVerifierTrait {
         let mut fri_verifier = FriVerifierTrait::commit(
             ref channel, self.fri_params, fri_proof, self.log_degree_bound,
         );
-
-        assert!(self.fri_params.pow_bits >= MIN_POW_BITS);
 
         // Get FRI query positions. Gated by the query proof of work.
         fri_verifier.verify_proof_of_work(ref channel);
