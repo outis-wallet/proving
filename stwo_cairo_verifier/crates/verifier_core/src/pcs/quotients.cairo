@@ -16,7 +16,7 @@ use crate::poly::circle::{
     CanonicCosetImpl, CanonicCosetTrait, CircleDomainImpl, CircleEvaluationImpl,
 };
 use crate::utils::{
-    ArrayImpl as ArrayUtilImpl, ColumnsIndicesPerTreeByLogDegreeBound, SpanExTrait, SpanImpl,
+    ArrayImpl as ArrayUtilImpl, ColumnIndicesPerTreePerLogDegreeBound, SpanExTrait, SpanImpl,
     bit_reverse_index, pack_qm31,
 };
 use crate::{ColumnSpan, TreeArray, TreeSpan};
@@ -30,8 +30,8 @@ mod test;
 ///
 /// # Arguments
 ///
-/// * `column_indices_per_tree_by_degree_bound`: The column indices grouped by tree and by log
-/// degree bound.
+/// * `column_indices_per_tree_per_log_deg_bound`: `x[log_degree_bound][tree]` is the list of
+/// indices of the columns of `tree` with `log_degree_bound`.
 /// * `log_blowup_factor`: The FRI log blowup factor parameter.
 /// * `oods_point`: The OOD point.
 /// * `sample_values_per_column_per_tree`: OOD samples (only the eval) for each column in each tree.
@@ -41,7 +41,7 @@ mod test;
 /// * `queried_values_per_tree`: For each tree, contains all queried trace values.
 /// * `log_degree_bound`: The max log degree of a committed polynomial.
 pub fn fri_answers(
-    mut column_indices_per_tree_by_degree_bound: ColumnsIndicesPerTreeByLogDegreeBound,
+    mut column_indices_per_tree_per_log_deg_bound: ColumnIndicesPerTreePerLogDegreeBound,
     log_blowup_factor: u32,
     oods_point: CirclePoint<QM31>,
     sample_values_per_column_per_tree: SampledValues,
@@ -78,7 +78,7 @@ pub fn fri_answers(
     // at the end of each iteration.
     let mut periodicity_generator = trace_step;
 
-    for column_indices_per_tree_for_degree_bound in column_indices_per_tree_by_degree_bound {
+    for column_indices_per_tree_for_degree_bound in column_indices_per_tree_per_log_deg_bound {
         let (sample_batches, n_cols_per_tree) = sample_batches_for_degree_bound(
             column_indices_per_tree_for_degree_bound,
             samples_with_randomness,

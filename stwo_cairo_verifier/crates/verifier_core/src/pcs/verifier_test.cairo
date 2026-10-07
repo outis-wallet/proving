@@ -24,11 +24,11 @@ fn commit_tree(ref commitment_scheme: CommitmentSchemeVerifier, column_log_deg_b
 }
 
 #[test]
-fn test_column_indices_per_tree_by_degree_bound() {
+fn test_column_indices_per_tree_per_log_deg_bound() {
     let mut commitment_scheme = new_commitment_scheme(3);
     commit_tree(ref commitment_scheme, array![3, 1, 3].span());
     commit_tree(ref commitment_scheme, array![3, 2].span());
-    let res = commitment_scheme.column_indices_per_tree_by_degree_bound();
+    let res = commitment_scheme.column_indices_per_tree_per_log_deg_bound();
     assert_eq!(
         res,
         array![

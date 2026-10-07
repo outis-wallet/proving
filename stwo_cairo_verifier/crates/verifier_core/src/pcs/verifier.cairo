@@ -6,8 +6,8 @@ use crate::fields::qm31::{QM31, QM31Serde};
 use crate::fri::{FriParams, FriProof, FriVerifierTrait};
 use crate::pcs::quotients::fri_answers;
 use crate::utils::{
-    ArrayImpl, ColumnsIndicesByLogDegreeBound, ColumnsIndicesPerTreeByLogDegreeBound, DictImpl,
-    group_columns_by_log_degree_bound, pad_and_transpose_columns_by_log_deg_bound_per_tree,
+    ArrayImpl, ColumnIndicesPerLogDegreeBound, ColumnIndicesPerTreePerLogDegreeBound, DictImpl,
+    group_columns_by_log_degree_bound, pad_and_transpose_columns_per_log_deg_bound_per_tree,
 };
 use crate::vcs::MerkleHasher;
 use crate::vcs::verifier::{MerkleDecommitment, MerkleVerifier, MerkleVerifierTrait};
@@ -16,7 +16,6 @@ use crate::{ColumnSpan, Hash, TreeArray, TreeSpan, queries};
 /// Sampled mask values.
 ///
 /// Each column is sampled at one of the following point sets:
-/// - `[]` (indicating an unused preprocessed column)
 /// - `[oods_point]`
 /// - `[oods_point - g, oods_point]`
 ///   where `g` is the trace generator for that column.
@@ -69,9 +68,9 @@ pub struct CommitmentSchemeVerifier {
     /// For each tree, the indices of its columns grouped by log degree bound: entry `i` holds the
     /// indices of columns of log degree bound `i`.
     ///
-    /// Both `trees` and `columns_by_log_deg_bound_per_tree` are guaranteed
+    /// Both `trees` and `columns_per_log_deg_bound_per_tree` are guaranteed
     /// to always have the same length.
-    columns_by_log_deg_bound_per_tree: TreeArray<ColumnsIndicesByLogDegreeBound>,
+    columns_per_log_deg_bound_per_tree: TreeArray<ColumnIndicesPerLogDegreeBound>,
 }
 
 #[generate_trait]
@@ -85,16 +84,17 @@ pub impl CommitmentSchemeVerifierImpl of CommitmentSchemeVerifierTrait {
             log_degree_bound,
             fri_params,
             trees: array![],
-            columns_by_log_deg_bound_per_tree: array![],
+            columns_per_log_deg_bound_per_tree: array![],
         }
     }
 
-    /// Returns the column indices grouped by log degree bound (outer), then by tree (inner).
-    fn column_indices_per_tree_by_degree_bound(
+    /// Returns the column indices per tree, per log degree bound, i.e. for each log degree bound,
+    /// for each tree, a span of the column indices of that tree with that log degree bound.
+    fn column_indices_per_tree_per_log_deg_bound(
         self: @CommitmentSchemeVerifier,
-    ) -> ColumnsIndicesPerTreeByLogDegreeBound {
-        pad_and_transpose_columns_by_log_deg_bound_per_tree(
-            self.columns_by_log_deg_bound_per_tree.span(),
+    ) -> ColumnIndicesPerTreePerLogDegreeBound {
+        pad_and_transpose_columns_per_log_deg_bound_per_tree(
+            self.columns_per_log_deg_bound_per_tree.span(),
         )
     }
 
@@ -107,14 +107,14 @@ pub impl CommitmentSchemeVerifierImpl of CommitmentSchemeVerifierTrait {
     ///
     /// # Arguments
     /// * `commitment` - The Merkle root of the committed columns.
-    /// * `log_degree_bound_by_column` - The log degree bounds for each column in the commitment.
+    /// * `log_degree_bound_per_column` - The log degree bounds for each column in the commitment.
     /// The largest must equal `self.log_degree_bound` (i.e. all trees are lifted to
     /// `self.log_degree_bound`).
     /// * `channel` - The Fiat-Shamir channel used for mixing and randomness.
     fn commit(
         ref self: CommitmentSchemeVerifier,
         commitment: Hash,
-        log_degree_bound_by_column: ColumnSpan<u32>,
+        log_degree_bound_per_column: ColumnSpan<u32>,
         ref channel: Channel,
     ) {
         // Mix the commitment root into the Fiat-Shamir channel.
@@ -125,17 +125,17 @@ pub impl CommitmentSchemeVerifierImpl of CommitmentSchemeVerifierTrait {
                 MerkleVerifier {
                     root: commitment,
                     tree_height: self.log_degree_bound + self.fri_params.log_blowup_factor,
-                    n_committed_columns: log_degree_bound_by_column.len(),
+                    n_committed_columns: log_degree_bound_per_column.len(),
                 },
             );
-        let columns_by_log_deg_bound = group_columns_by_log_degree_bound(
-            log_degree_bound_by_column,
+        let columns_per_log_deg_bound = group_columns_by_log_degree_bound(
+            log_degree_bound_per_column,
         );
         assert!(
-            columns_by_log_deg_bound.len() == self.log_degree_bound + 1,
+            columns_per_log_deg_bound.len() == self.log_degree_bound + 1,
             "Max column log degree bound must equal the commitment scheme's log degree bound",
         );
-        self.columns_by_log_deg_bound_per_tree.append(columns_by_log_deg_bound);
+        self.columns_per_log_deg_bound_per_tree.append(columns_per_log_deg_bound);
     }
 
     /// Verifies that `proof.sampled_values` corresponds to the evaluations
@@ -177,7 +177,7 @@ pub impl CommitmentSchemeVerifierImpl of CommitmentSchemeVerifierTrait {
         }
         // Answer FRI queries.
         let fri_answers = fri_answers(
-            self.column_indices_per_tree_by_degree_bound(),
+            self.column_indices_per_tree_per_log_deg_bound(),
             self.fri_params.log_blowup_factor,
             oods_point,
             sampled_values,
