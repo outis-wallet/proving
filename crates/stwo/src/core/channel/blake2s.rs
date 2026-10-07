@@ -4,8 +4,8 @@ use itertools::Itertools;
 use std_shims::Vec;
 
 use super::Channel;
-use crate::core::fields::m31::{BaseField, P};
-use crate::core::fields::qm31::{SECURE_EXTENSION_DEGREE, SecureField};
+use crate::core::fields::m31::BaseField;
+use crate::core::fields::qm31::SecureField;
 use crate::core::vcs::blake2_hash::{Blake2sHash, Blake2sHasher};
 
 pub const BLAKE_BYTES_PER_HASH: usize = 32;
@@ -35,21 +35,8 @@ impl<const IS_M31_OUTPUT: bool> Blake2sChannelGeneric<IS_M31_OUTPUT> {
 
     /// Generates a uniform random vector of BaseField elements.
     fn draw_base_felts(&mut self) -> [BaseField; FELTS_PER_HASH] {
-        if IS_M31_OUTPUT {
-            let u32s: [u32; FELTS_PER_HASH] = self.draw_u32s().try_into().unwrap();
-            u32s.map(|x| BaseField::reduce(x as u64))
-        } else {
-            // Repeats hashing with an increasing counter until getting a good result.
-            // Retry probability for each round is ~ 2^(-28).
-            loop {
-                let u32s: [u32; FELTS_PER_HASH] = self.draw_u32s().try_into().unwrap();
-
-                // Retry if not all the u32 are in the range [0, 2P).
-                if u32s.iter().all(|x| *x < 2 * P) {
-                    return u32s.map(|x| BaseField::reduce(x as u64));
-                }
-            }
-        }
+        let u32s: [u32; FELTS_PER_HASH] = self.draw_u32s().try_into().unwrap();
+        u32s.map(|x| BaseField::reduce(x as u64))
     }
 }
 
@@ -85,30 +72,13 @@ impl<const IS_M31_OUTPUT: bool> Channel for Blake2sChannelGeneric<IS_M31_OUTPUT>
 
     fn draw_secure_felt(&mut self) -> SecureField {
         let felts: [BaseField; FELTS_PER_HASH] = self.draw_base_felts();
-        if IS_M31_OUTPUT {
-            SecureField::from_m31_array(array::from_fn(|i| {
-                felts[2 * i] + felts[2 * i + 1] + felts[2 * i + 1]
-            }))
-        } else {
-            SecureField::from_m31_array(felts[..SECURE_EXTENSION_DEGREE].try_into().unwrap())
-        }
+        SecureField::from_m31_array(array::from_fn(|i| {
+            felts[2 * i] + felts[2 * i + 1] + felts[2 * i + 1]
+        }))
     }
 
     fn draw_secure_felts(&mut self, n_felts: usize) -> Vec<SecureField> {
-        if IS_M31_OUTPUT {
-            iter::from_fn(|| Some(self.draw_secure_felt())).take(n_felts).collect()
-        } else {
-            let mut felts = iter::from_fn(|| Some(self.draw_base_felts())).flatten();
-            let secure_felts = iter::from_fn(|| {
-                Some(SecureField::from_m31_array([
-                    felts.next()?,
-                    felts.next()?,
-                    felts.next()?,
-                    felts.next()?,
-                ]))
-            });
-            secure_felts.take(n_felts).collect()
-        }
+        iter::from_fn(|| Some(self.draw_secure_felt())).take(n_felts).collect()
     }
 
     fn draw_u32s(&mut self) -> Vec<u32> {
@@ -172,7 +142,7 @@ mod tests {
         assert_eq!(channel.n_draws, 1);
 
         channel.draw_secure_felts(9);
-        assert_eq!(channel.n_draws, 6);
+        assert_eq!(channel.n_draws, 10);
     }
 
     #[test]

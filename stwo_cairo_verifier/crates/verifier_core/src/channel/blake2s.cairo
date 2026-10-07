@@ -5,7 +5,7 @@ use core::box::BoxImpl;
 use stwo_verifier_utils::BLAKE2S_256_INITIAL_STATE;
 use stwo_verifier_utils::blake2s::hash_u32s;
 use crate::SecureField;
-use crate::fields::m31::{M31, M31Trait};
+use crate::fields::m31::M31Trait;
 use crate::fields::qm31::QM31Trait;
 use crate::utils::{ArrayImpl, pow2_u64};
 use crate::vcs::blake2s_hasher::Blake2sHash;
@@ -111,23 +111,22 @@ pub impl Blake2sChannelImpl of ChannelTrait {
     }
 
     fn draw_secure_felt(ref self: Blake2sChannel) -> SecureField {
-        let [r0, r1, r2, r3, _, _, _, _] = draw_base_felts(ref self).unbox();
-        QM31Trait::from_fixed_array([r0, r1, r2, r3])
+        let [w0, w1, w2, w3, w4, w5, w6, w7] = draw_random_words(ref self).hash.unbox();
+        QM31Trait::from_fixed_array(
+            [
+                M31Trait::reduce_u64(w0.into() + 2 * w1.into()),
+                M31Trait::reduce_u64(w2.into() + 2 * w3.into()),
+                M31Trait::reduce_u64(w4.into() + 2 * w5.into()),
+                M31Trait::reduce_u64(w6.into() + 2 * w7.into()),
+            ],
+        )
     }
 
-    fn draw_secure_felts(ref self: Blake2sChannel, mut n_felts: usize) -> Array<SecureField> {
+    fn draw_secure_felts(ref self: Blake2sChannel, n_felts: usize) -> Array<SecureField> {
         let mut res = array![];
-
-        while n_felts != 0 {
-            let [r0, r1, r2, r3, r4, r5, r6, r7] = draw_base_felts(ref self).unbox();
-            res.append(QM31Trait::from_fixed_array([r0, r1, r2, r3]));
-            if n_felts == 1 {
-                break;
-            }
-            res.append(QM31Trait::from_fixed_array([r4, r5, r6, r7]));
-            n_felts -= 2;
+        for _ in 0..n_felts {
+            res.append(self.draw_secure_felt());
         }
-
         res
     }
 
@@ -182,25 +181,6 @@ fn check_leading_zeros(digest: Blake2sHash, n_bits: u32) -> bool {
 fn update_digest(ref channel: Blake2sChannel, new_digest: Blake2sHash) {
     channel.digest = new_digest;
     channel.n_draws = 0;
-}
-
-// TODO: Consider just returning secure felts.
-fn draw_base_felts(ref channel: Blake2sChannel) -> Box<[M31; 8]> {
-    loop {
-        let [w0, w1, w2, w3, w4, w5, w6, w7] = draw_random_words(ref channel).hash.unbox();
-
-        // Retry if not all the u32 are in the range [0, 2P).
-        const P2: u32 = 0x7FFFFFFF * 2;
-        if w0 < P2 && w1 < P2 && w2 < P2 && w3 < P2 && w4 < P2 && w5 < P2 && w6 < P2 && w7 < P2 {
-            break BoxImpl::new(
-                [
-                    M31Trait::reduce_u32(w0), M31Trait::reduce_u32(w1), M31Trait::reduce_u32(w2),
-                    M31Trait::reduce_u32(w3), M31Trait::reduce_u32(w4), M31Trait::reduce_u32(w5),
-                    M31Trait::reduce_u32(w6), M31Trait::reduce_u32(w7),
-                ],
-            );
-        }
-    }
 }
 
 fn draw_random_words(ref channel: Blake2sChannel) -> Blake2sHash {
