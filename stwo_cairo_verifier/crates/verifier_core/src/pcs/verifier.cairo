@@ -65,6 +65,8 @@ pub struct CommitmentSchemeProof {
 pub struct CommitmentSchemeVerifier {
     /// The largest log degree bound of a committed polynomial.
     pub(crate) log_degree_bound: u32,
+    /// The FRI parameters to verify against.
+    pub(crate) fri_params: FriParams,
     /// The Merkle verifiers of each Merkle tree.
     trees: TreeArray<MerkleVerifier<MerkleHasher>>,
     /// For each tree, the indices of its columns grouped by log degree bound: entry `i` holds the
@@ -77,9 +79,16 @@ pub struct CommitmentSchemeVerifier {
 
 #[generate_trait]
 pub impl CommitmentSchemeVerifierImpl of CommitmentSchemeVerifierTrait {
-    fn new(log_degree_bound: u32) -> CommitmentSchemeVerifier {
+    /// Creates a verifier with no committed trees.
+    ///
+    /// `fri_params` are not read from the proof; the caller supplies the canonical, hardcoded
+    /// parameters, so the prover cannot choose them. They are not validated here.
+    fn new(log_degree_bound: u32, fri_params: FriParams) -> CommitmentSchemeVerifier {
         CommitmentSchemeVerifier {
-            log_degree_bound, trees: array![], columns_by_log_deg_bound_per_tree: array![],
+            log_degree_bound,
+            fri_params,
+            trees: array![],
+            columns_by_log_deg_bound_per_tree: array![],
         }
     }
 
@@ -110,7 +119,6 @@ pub impl CommitmentSchemeVerifierImpl of CommitmentSchemeVerifierTrait {
         commitment: Hash,
         log_degree_bound_by_column: ColumnSpan<u32>,
         ref channel: Channel,
-        log_blowup_factor: u32,
     ) {
         // Mix the commitment root into the Fiat-Shamir channel.
         channel.mix_commitment(commitment);
@@ -119,7 +127,7 @@ pub impl CommitmentSchemeVerifierImpl of CommitmentSchemeVerifierTrait {
             .append(
                 MerkleVerifier {
                     root: commitment,
-                    tree_height: log_blowup_factor + self.log_degree_bound,
+                    tree_height: self.log_degree_bound + self.fri_params.log_blowup_factor,
                     n_committed_columns: log_degree_bound_by_column.len(),
                 },
             );
@@ -139,7 +147,6 @@ pub impl CommitmentSchemeVerifierImpl of CommitmentSchemeVerifierTrait {
         self: CommitmentSchemeVerifier,
         oods_point: CirclePoint<QM31>,
         proof: CommitmentSchemeProof,
-        fri_params: FriParams,
         ref channel: Channel,
     ) {
         let CommitmentSchemeProof {
@@ -158,10 +165,10 @@ pub impl CommitmentSchemeVerifierImpl of CommitmentSchemeVerifierTrait {
 
         // FRI commitment phase on OODS quotients.
         let mut fri_verifier = FriVerifierTrait::commit(
-            ref channel, fri_params, fri_proof, self.log_degree_bound,
+            ref channel, self.fri_params, fri_proof, self.log_degree_bound,
         );
 
-        assert!(fri_params.pow_bits >= MIN_POW_BITS);
+        assert!(self.fri_params.pow_bits >= MIN_POW_BITS);
 
         // Get FRI query positions. Gated by the query proof of work.
         fri_verifier.verify_proof_of_work(ref channel);
@@ -176,7 +183,7 @@ pub impl CommitmentSchemeVerifierImpl of CommitmentSchemeVerifierTrait {
         // Answer FRI queries.
         let fri_answers = fri_answers(
             self.column_indices_per_tree_by_degree_bound(),
-            fri_params.log_blowup_factor,
+            self.fri_params.log_blowup_factor,
             oods_point,
             sampled_values,
             random_coeff,

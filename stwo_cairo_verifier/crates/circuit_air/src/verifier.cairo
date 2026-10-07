@@ -52,7 +52,9 @@ pub fn verify_circuit(proof: CircuitProof, circuit_hash: Hash) {
 
     // The FRI parameters are the circuit's hardcoded ones.
     CIRCUIT_FRI_PARAMS.mix_into(ref channel);
-    let mut commitment_scheme = CommitmentSchemeVerifierImpl::new(TRACE_LOG_DEGREE_BOUND);
+    let mut commitment_scheme = CommitmentSchemeVerifierImpl::new(
+        TRACE_LOG_DEGREE_BOUND, CIRCUIT_FRI_PARAMS,
+    );
 
     // Unpack commitments.
     let commitments: @Box<[Hash; 4]> = stark_proof
@@ -72,22 +74,17 @@ pub fn verify_circuit(proof: CircuitProof, circuit_hash: Hash) {
     let [preprocessed_column_log_sizes, trace_log_sizes, interaction_trace_log_sizes] =
         column_log_sizes_per_tree();
 
-    let log_blowup_factor = CIRCUIT_FRI_PARAMS.log_blowup_factor;
-
     // Preprocessed trace. The preprocessed column log sizes are hardcoded. The preprocessed-trace
     // commitment itself is taken from the proof and exposed in the verification output; binding it
     // to the expected circuit topology is the responsibility of whoever consumes that output.
-    commitment_scheme
-        .commit(
-            preprocessed_commitment, preprocessed_column_log_sizes, ref channel, log_blowup_factor,
-        );
+    commitment_scheme.commit(preprocessed_commitment, preprocessed_column_log_sizes, ref channel);
 
     // Mix the circuit hash and the claim into the channel.
     channel.mix_commitment(circuit_hash);
     claim.mix_into(ref channel);
 
     // Commit the trace.
-    commitment_scheme.commit(trace_commitment, trace_log_sizes, ref channel, log_blowup_factor);
+    commitment_scheme.commit(trace_commitment, trace_log_sizes, ref channel);
 
     // Interaction proof of work.
     assert!(
@@ -108,12 +105,7 @@ pub fn verify_circuit(proof: CircuitProof, circuit_hash: Hash) {
     // Interaction trace.
     interaction_claim.mix_into(ref channel);
     commitment_scheme
-        .commit(
-            interaction_trace_commitment,
-            interaction_trace_log_sizes,
-            ref channel,
-            log_blowup_factor,
-        );
+        .commit(interaction_trace_commitment, interaction_trace_log_sizes, ref channel);
 
     // The circuit commits all trees at the lifted height of its largest extended domain (largest
     // preprocessed column log size + log_blowup_factor). `verify` expects the trace's log degree
@@ -127,7 +119,6 @@ pub fn verify_circuit(proof: CircuitProof, circuit_hash: Hash) {
         circuit_air,
         composition_commitment,
         commitment_scheme,
-        CIRCUIT_FRI_PARAMS,
         ref channel,
         SECURITY_BITS,
     );
