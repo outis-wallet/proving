@@ -38,24 +38,24 @@
       "config": "default",
       "trace_log_size": 20,
       "preprocessed_root": [
-        "0x2f30d607",
-        "0x107e59ae",
-        "0xfaa899c5",
-        "0xb5833e79",
-        "0x3075373a",
-        "0xb2d6859c",
-        "0x0cd2a8cf",
-        "0x0c73aac6"
+        "0xdba04ac3",
+        "0x0d83453b",
+        "0x31af91a9",
+        "0xd0b20acd",
+        "0x490e6fbf",
+        "0x09ac8fad",
+        "0x9a55f847",
+        "0xb853f5f4"
       ],
       "circuit_hash": [
-        "0x7987d651",
-        "0xb0871546",
-        "0xff444835",
-        "0x774854ca",
-        "0xe4fda900",
-        "0x69e19194",
-        "0x51b07daa",
-        "0x7fa40e25"
+        "0x2b400432",
+        "0xee516f8a",
+        "0xf0093233",
+        "0xcdb72b58",
+        "0x61214094",
+        "0x2e546afb",
+        "0xe9251376",
+        "0xe2681089"
       ],
       "zk_blinding": false
     }
@@ -68,24 +68,24 @@
         "default"
       ],
       "preprocessed_root": [
-        "0xaac5d2e9",
-        "0xaf4334f5",
-        "0x813ac6b4",
-        "0x4779842d",
-        "0xd9c3a55e",
-        "0x9a55abb2",
-        "0x92da5c92",
-        "0x324afd46"
+        "0x0be8234c",
+        "0x05d04995",
+        "0xa93b4269",
+        "0x4279c63d",
+        "0x2eef5ed6",
+        "0xd556b1ac",
+        "0x65de9a9f",
+        "0x2920716d"
       ],
       "circuit_hash": [
-        "0xfdf39b98",
-        "0xa5e7fa5b",
-        "0x5dce1468",
-        "0xab19ae3f",
-        "0x41e8304f",
-        "0x96a88c50",
-        "0x7002c4c0",
-        "0xe129f4f4"
+        "0x401cb8bd",
+        "0xd156fe2a",
+        "0xc17dbaeb",
+        "0x83458bd0",
+        "0xa9e53b95",
+        "0x7a1cac1c",
+        "0x98ccbc4c",
+        "0x94f2fe30"
       ]
     }
   ]

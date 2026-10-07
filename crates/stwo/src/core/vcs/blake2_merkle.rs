@@ -6,8 +6,8 @@ use crate::core::fields::m31::BaseField;
 use crate::core::vcs::MerkleHasher;
 
 pub type Blake2sMerkleHasher = Blake2sMerkleHasherGeneric<false>;
-/// Same as [Blake2sMerkleHasher], expect that the hash output is taken modulo M31::P.
-pub type Blake2sM31MerkleHasher = Blake2sMerkleHasherGeneric<true>;
+/// Same as [Blake2sMerkleHasher]. TODO: Remove and replace with [Blake2sMerkleHasher].
+pub type Blake2sM31MerkleHasher = Blake2sMerkleHasherGeneric<false>;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Default, Deserialize, Serialize)]
 pub struct Blake2sMerkleHasherGeneric<const IS_M31_OUTPUT: bool>;

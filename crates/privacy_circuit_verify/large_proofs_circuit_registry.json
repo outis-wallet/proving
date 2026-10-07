@@ -38,24 +38,24 @@
       "config": "default",
       "trace_log_size": 25,
       "preprocessed_root": [
-        "0xc341568c",
-        "0x4aa6bebb",
-        "0x7517e871",
-        "0xa26114d3",
-        "0x1658221e",
-        "0x945a1409",
-        "0xc0b6cf57",
-        "0x01762943"
+        "0x38ce7e58",
+        "0x42afaf4f",
+        "0x13d271c9",
+        "0xe5b5b320",
+        "0x3dcc453e",
+        "0xc6eb9abe",
+        "0x5c00e2b2",
+        "0xb1d47fad"
       ],
       "circuit_hash": [
-        "0xaaaee0da",
-        "0x7400f73f",
-        "0x27a75506",
-        "0x3ebfe100",
-        "0xbcf76a2f",
-        "0xcd42b2c1",
-        "0x10cb2d2a",
-        "0x2b7164c3"
+        "0xd585d266",
+        "0x6cfd530f",
+        "0xcdffb96d",
+        "0xeb9aaec9",
+        "0xc217da2a",
+        "0xf6720057",
+        "0x5ea43126",
+        "0x09b8b224"
       ],
       "zk_blinding": true
     },
@@ -63,24 +63,24 @@
       "config": "default",
       "trace_log_size": 26,
       "preprocessed_root": [
-        "0x898b44af",
-        "0x0501a6ee",
-        "0x733cbbc7",
-        "0xc8a32525",
-        "0x1a34481e",
-        "0xf28ffc7a",
-        "0x177bf8a6",
-        "0x8d10e19d"
+        "0xfadce29d",
+        "0x52b85379",
+        "0x71cfb549",
+        "0x7a6daefd",
+        "0x272052c9",
+        "0xc4b5066a",
+        "0xf06773f8",
+        "0x8b4362f7"
       ],
       "circuit_hash": [
-        "0x7a342503",
-        "0xe2f24f7a",
-        "0xd915d52e",
-        "0xe423cebe",
-        "0xdfdec6a9",
-        "0x0b0f19ec",
-        "0x3357ab7d",
-        "0x6a498b46"
+        "0xf0aa3a74",
+        "0x13369f37",
+        "0x05f080ea",
+        "0xd7b6bd0a",
+        "0x30f39183",
+        "0xe5595b8f",
+        "0x59cac893",
+        "0x34abc121"
       ],
       "zk_blinding": true
     },
@@ -88,24 +88,24 @@
       "config": "default",
       "trace_log_size": 27,
       "preprocessed_root": [
-        "0xf846899c",
-        "0xfdcedcc1",
-        "0xde422d18",
-        "0xec0d392b",
-        "0xd721f86d",
-        "0xdba8bf9b",
-        "0x88b41580",
-        "0xa0536b80"
+        "0x7c62c606",
+        "0x9ae8fc24",
+        "0x9abf60f6",
+        "0x19aac520",
+        "0x82901852",
+        "0x8f28135d",
+        "0x0cafd5f2",
+        "0x748f8807"
       ],
       "circuit_hash": [
-        "0x7f19b124",
-        "0x3bccf645",
-        "0x838c4638",
-        "0xe068acb1",
-        "0x8b799a2d",
-        "0x3ba1c1e2",
-        "0xaa8de012",
-        "0x8302a483"
+        "0xb422fdb4",
+        "0x1bd7b0dc",
+        "0x7cd328b8",
+        "0x7fb1d715",
+        "0xcd9aa0bd",
+        "0x7224eb2f",
+        "0xa5381b70",
+        "0xc0cb107e"
       ],
       "zk_blinding": true
     },
@@ -113,24 +113,24 @@
       "config": "default",
       "trace_log_size": 28,
       "preprocessed_root": [
-        "0xd1771eab",
-        "0xa8a18ecc",
-        "0x9ff3a0f9",
-        "0x63e83233",
-        "0x12606f8c",
-        "0x632d573f",
-        "0x5ac83af3",
-        "0xdaea09c2"
+        "0x501bd031",
+        "0xbe3bdaba",
+        "0x72bf7b6a",
+        "0xdd782f22",
+        "0x4532ad04",
+        "0x8678967b",
+        "0xca05247f",
+        "0x5678d0d5"
       ],
       "circuit_hash": [
-        "0xe21f1bf3",
-        "0x48a02f8d",
-        "0x248b5498",
-        "0x2f903f2e",
-        "0x118108b8",
-        "0x6f7a8beb",
-        "0xb37d9c65",
-        "0x390a4179"
+        "0x514f6c38",
+        "0x14713fd3",
+        "0x32ea04d4",
+        "0x701d758f",
+        "0xa00c1e15",
+        "0x596ff9c0",
+        "0x296b0ded",
+        "0xfaf7578f"
       ],
       "zk_blinding": true
     },
@@ -138,24 +138,24 @@
       "config": "default",
       "trace_log_size": 29,
       "preprocessed_root": [
-        "0xd88fff15",
-        "0x1ab34ae1",
-        "0xd5bef5c1",
-        "0x2215af47",
-        "0x31a61f39",
-        "0xe035b8ba",
-        "0x7ea9fcf1",
-        "0xd6af7c50"
+        "0x6eb554f4",
+        "0xa42a59bd",
+        "0x8420a10e",
+        "0x8905d7be",
+        "0xdb90ebb6",
+        "0x6f60e41f",
+        "0xfe7a6857",
+        "0x9cdc13f2"
       ],
       "circuit_hash": [
-        "0xaa93cb0e",
-        "0x55225671",
-        "0xed15f77e",
-        "0x1c7cc5ca",
-        "0xf3b0cc25",
-        "0x5502692b",
-        "0xa4c4e596",
-        "0x40b740c1"
+        "0x5eab47d6",
+        "0x141b1053",
+        "0xced5fb58",
+        "0xb7890fd5",
+        "0x8318877d",
+        "0x258259ec",
+        "0x6e3abaca",
+        "0x1efb0525"
       ],
       "zk_blinding": true
     }
@@ -168,24 +168,24 @@
         "default"
       ],
       "preprocessed_root": [
-        "0xfe8df240",
-        "0x74047c15",
-        "0x50314456",
-        "0xf8c74d36",
-        "0x7609d8ce",
-        "0x8570d9ee",
-        "0x0fffa063",
-        "0xfc0e35e5"
+        "0xbf20a5e2",
+        "0x87d650e8",
+        "0xd7b2960f",
+        "0xbcdfb61b",
+        "0x4f70ae27",
+        "0xd557ffd5",
+        "0x31b1d3fc",
+        "0xea3c5d90"
       ],
       "circuit_hash": [
-        "0xe31e6d2b",
-        "0x2a961079",
-        "0x26c815ea",
-        "0xa3164139",
-        "0x5bc118c6",
-        "0xfb8fba6b",
-        "0xaea773fb",
-        "0xa4b47ee9"
+        "0x182728b3",
+        "0x4191af9d",
+        "0x86cbd29f",
+        "0x35703fda",
+        "0x2a348907",
+        "0x12a222c4",
+        "0x45e4b7b7",
+        "0x7882b93a"
       ]
     }
   ]

@@ -1,6 +1,6 @@
 use std::fmt;
 
-use circuits::blake::{HashValue, ReducedHashValue};
+use circuits::blake::HashValue;
 use circuits::wrappers::M31Wrapper;
 use circuits_stark_verifier::fri_proof::{
     FriCommitProof, FriConfig, FriParams, FriProof, FriWitness, compute_all_fold_steps,
@@ -65,12 +65,6 @@ impl CircuitDeserialize for QM31 {
 impl<T: CircuitDeserialize, const N: usize> CircuitDeserialize for [T; N] {
     fn deserialize(data: &mut &[u8]) -> DeserializeResult<Self> {
         deserialize_vec(data, N)?.try_into().map_err(|_| DeserializeError::NotEnoughData)
-    }
-}
-
-impl CircuitDeserialize for ReducedHashValue<QM31> {
-    fn deserialize(data: &mut &[u8]) -> DeserializeResult<Self> {
-        Ok(ReducedHashValue(QM31::deserialize(data)?, QM31::deserialize(data)?))
     }
 }
 

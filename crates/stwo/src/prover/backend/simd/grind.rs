@@ -11,9 +11,9 @@ use super::SimdBackend;
 use crate::core::channel::{Blake2sChannelGeneric, Channel, Keccak256Channel};
 use crate::core::fields::m31::P;
 use crate::core::proof_of_work::GrindOps;
-use crate::core::vcs::blake2_hash::Blake2sHasherGeneric;
+use crate::core::vcs::blake2_hash::Blake2sHasher;
 use crate::prover::backend::simd::blake2s::hash_16;
-use crate::prover::backend::simd::m31::{N_LANES, PackedM31};
+use crate::prover::backend::simd::m31::N_LANES;
 
 // Note: GRIND_LOW_BITS is a cap on how much extra time we need to wait for all threads to finish.
 // It must be <= 30 if we want to guarantee that the lowest 32 bits of the nonce are < 2^31 - 1.
@@ -30,7 +30,7 @@ impl<const IS_M31_OUTPUT: bool> GrindOps<Blake2sChannelGeneric<IS_M31_OUTPUT>> f
         let digest = channel.digest();
 
         // Compute the prefix digest H(POW_PREFIX, [0_u8; 12], digest, n_bits).
-        let mut hasher = Blake2sHasherGeneric::<IS_M31_OUTPUT>::default();
+        let mut hasher = Blake2sHasher::default();
         hasher.update(&Blake2sChannelGeneric::<IS_M31_OUTPUT>::POW_PREFIX.to_le_bytes());
         hasher.update(&[0_u8; 12]);
         hasher.update(&digest.0[..]);
@@ -40,11 +40,11 @@ impl<const IS_M31_OUTPUT: bool> GrindOps<Blake2sChannelGeneric<IS_M31_OUTPUT>> f
 
         #[cfg(not(feature = "parallel"))]
         let res = (0..)
-            .find_map(|hi| grind_blake::<IS_M31_OUTPUT>(prefixed_digest, hi, pow_bits))
+            .find_map(|hi| grind_blake(prefixed_digest, hi, pow_bits))
             .expect("Grind failed to find a solution.");
 
         #[cfg(feature = "parallel")]
-        let res = parallel_grind(prefixed_digest, pow_bits, grind_blake::<IS_M31_OUTPUT>);
+        let res = parallel_grind(prefixed_digest, pow_bits, grind_blake);
 
         assert!(
             ((res >> 32) as u32) < P,
@@ -58,7 +58,7 @@ impl<const IS_M31_OUTPUT: bool> GrindOps<Blake2sChannelGeneric<IS_M31_OUTPUT>> f
     }
 }
 
-fn grind_blake<const IS_M31_OUTPUT: bool>(digest: &[u32], hi: u32, pow_bits: u32) -> Option<u64> {
+fn grind_blake(digest: &[u32], hi: u32, pow_bits: u32) -> Option<u64> {
     const DIGEST_SIZE: usize = std::mem::size_of::<[u32; 8]>();
     const NONCE_SIZE: usize = std::mem::size_of::<u64>();
     let zero: u32x16 = u32x16::splat(0);
@@ -77,8 +77,7 @@ fn grind_blake<const IS_M31_OUTPUT: bool>(digest: &[u32], hi: u32, pow_bits: u32
             _ => zero,
         });
         let res = hash_16(msgs, (DIGEST_SIZE + NONCE_SIZE) as u64);
-        let res0 = if IS_M31_OUTPUT { PackedM31::reduce_simd(res[0]).into_simd() } else { res[0] };
-        let success_mask = res0.trailing_zeros().simd_ge(pow_bits);
+        let success_mask = res[0].trailing_zeros().simd_ge(pow_bits);
         if success_mask.any() {
             let i = success_mask.to_array().iter().position(|&x| x).unwrap();
             return Some(((hi as u64) << 32) + low as u64 + i as u64);

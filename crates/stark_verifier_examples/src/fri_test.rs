@@ -1,4 +1,5 @@
 use circuits::context::TraceContext;
+use circuits::extract_bits::extract_bits;
 use circuits::ops::Guess;
 use circuits::simd::Simd;
 use circuits::test_utils::simd_from_u32s;
@@ -61,7 +62,8 @@ fn test_fri_decommit_with_jumps(
 
     // Compute FRI input.
     let input = simd_from_u32s(&mut context, query_indices.iter().map(|x| *x as u32).collect());
-    let queries = select_queries(&mut context, &input, log_evaluation_domain_size as usize);
+    let bits = extract_bits(&mut context, &input, log_evaluation_domain_size);
+    let queries = select_queries(&mut context, bits);
     let fri_input: Vec<_> = query_indices
         .iter()
         .map(|query| context.constant(fri_proof.aux.first_layer.all_values[0][query]))

@@ -19,7 +19,7 @@ use crate::fri::{fri_commit, fri_decommit, mix_fri_params};
 use crate::merkle::decommit_eval_domain_samples;
 use crate::oods::{collect_oods_responses, compute_fri_input, extract_expected_composition_eval};
 use crate::proof::{Proof, ProofConfig};
-use crate::select_queries::{get_query_selection_input_from_channel, select_queries};
+use crate::select_queries::{get_query_bits_from_channel, select_queries};
 use crate::statement::{EvaluateArgs, OodsSamples, Statement};
 
 /// Number of bits used to represent a component log-size in the packed claim format.
@@ -89,7 +89,8 @@ pub fn verify<Value: IValue>(
 
     channel.pow(context, config.n_interaction_pow_bits, proof.interaction_pow_nonce);
     // Pick the interaction elements.
-    let [interaction_z, interaction_alpha] = channel.draw_two_qm31s(context);
+    let interaction_z = channel.draw_qm31(context);
+    let interaction_alpha = channel.draw_qm31(context);
     context.debug_info.insert("interaction_z".into(), interaction_z);
     context.debug_info.insert("interaction_alpha".into(), interaction_alpha);
 
@@ -177,10 +178,13 @@ pub fn verify<Value: IValue>(
     channel.pow(context, config.fri.params.pow_bits, proof.fri.pow_nonce);
 
     // Select queries.
-    let query_selection_input =
-        get_query_selection_input_from_channel(context, &mut channel, config.n_queries());
-    let queries =
-        select_queries(context, &query_selection_input, config.log_evaluation_domain_size());
+    let bits = get_query_bits_from_channel(
+        context,
+        &mut channel,
+        config.n_queries(),
+        config.log_evaluation_domain_size(),
+    );
+    let queries = select_queries(context, bits);
 
     // Check decommitment of trace queries.
     let bits = queries.bits.iter().map(|simd| Simd::unpack(context, simd)).collect_vec();

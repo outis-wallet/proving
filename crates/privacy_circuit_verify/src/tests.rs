@@ -60,7 +60,7 @@ fn check_privacy_recursion_circuit_preprocessed_root() {
         u32::from_le_bytes(root_hash.0[i * 4..i * 4 + 4].try_into().unwrap())
     });
 
-    assert_eq!(raw_words, PRIVACY_RECURSION_CIRCUIT_PREPROCESSED_ROOT,);
+    assert_eq!(raw_words, PRIVACY_RECURSION_CIRCUIT_PREPROCESSED_ROOT);
 }
 
 #[test]

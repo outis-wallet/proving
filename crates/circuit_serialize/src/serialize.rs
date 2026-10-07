@@ -1,4 +1,4 @@
-use circuits::blake::{HashValue, ReducedHashValue};
+use circuits::blake::HashValue;
 use circuits::wrappers::M31Wrapper;
 use circuits_stark_verifier::fri_proof::{FriCommitProof, FriProof, FriWitness};
 use circuits_stark_verifier::merkle::{AuthPath, AuthPaths};
@@ -76,14 +76,6 @@ impl<T: CircuitSerialize, const N: usize> CircuitSerialize for [T; N] {
 impl<T: CircuitSerialize> CircuitSerialize for Vec<T> {
     fn serialize(&self, output: &mut Vec<u8>) {
         self.as_slice().serialize(output);
-    }
-}
-
-impl CircuitSerialize for ReducedHashValue<QM31> {
-    fn serialize(&self, output: &mut Vec<u8>) {
-        let Self(a, b) = self;
-        a.serialize(output);
-        b.serialize(output);
     }
 }
 
