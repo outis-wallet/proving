@@ -14,7 +14,7 @@ use crate::utils::{OptionImpl, SpanExTrait, bit_reverse_index, pow2};
 use crate::vcs::MerkleHasher;
 use crate::vcs::verifier::{MerkleDecommitment, MerkleVerifier, MerkleVerifierTrait};
 
-/// Log of the number of QM31 evaluations packed into a single Merkle leaf when `fold_step > 1`.
+/// Log of the number of QM31 evaluations packed into a single Merkle leaf.
 pub const LOG_PACKED_LEAF_SIZE: u32 = 2;
 
 /// The range of supported FRI fold steps.
@@ -113,7 +113,7 @@ pub impl FriVerifierImpl of FriVerifierTrait {
             domain: FriLayerDomain::Circle(commitment_domain),
             folding_alpha: channel.draw_secure_felt(),
             proof: @first_layer_proof,
-            // The circle-to-line fold is always equal to `config.fold_step`.
+            // The circle-to-line fold is always equal to `params.fold_step`.
             fold_step: params.fold_step,
         };
         let mut layers = array![first_layer];
@@ -133,7 +133,7 @@ pub impl FriVerifierImpl of FriVerifierTrait {
                 // last layer degree bound.
                 let remaining = layer_log_bound - params.log_last_layer_degree_bound;
                 assert!(
-                    MIN_FOLD_STEP <= remaining && remaining <= params.fold_step,
+                    1 <= remaining && remaining <= params.fold_step,
                     "{}",
                     FriVerificationError::InvalidNumFriLayers,
                 );
@@ -181,11 +181,16 @@ pub impl FriVerifierImpl of FriVerifierTrait {
     /// The query positions are in bit-reversed order: position q refers to the domain point at
     /// bit_reverse_index(q).
     fn decommit(self: FriVerifier, queries: Queries, first_layer_query_evals: Span<QM31>) {
-        let (last_layer_queries, last_layer_query_evals) = decommit_layers(
-            @self, queries, first_layer_query_evals,
-        );
+        let mut layer_queries = queries;
+        let mut layer_query_evals = first_layer_query_evals;
+        for layer in self.layers.span() {
+            let fold_preimage_evals = layer
+                .verify(queries: layer_queries, evals_at_queries: layer_query_evals);
+            layer_queries = layer_queries.fold(*layer.fold_step);
+            layer_query_evals = layer.fold(fold_preimage_evals).span();
+        }
 
-        decommit_last_layer(self, last_layer_queries, last_layer_query_evals)
+        decommit_last_layer(self, layer_queries, layer_query_evals)
     }
 
     /// Verifies the query proof of work and mixes the nonce into the channel.
@@ -208,25 +213,6 @@ pub impl FriVerifierImpl of FriVerifierTrait {
         let n_queries = *self.params.n_queries;
         QueriesImpl::generate(ref channel, query_domain_log_size, n_queries)
     }
-}
-
-/// Verifies the decommitments of all layers.
-///
-/// Returns the queries and query evaluations needed for verifying the last FRI layer.
-fn decommit_layers(
-    verifier: @FriVerifier, queries: Queries, first_layer_query_evals: Span<QM31>,
-) -> (Queries, Span<QM31>) {
-    let mut layer_queries = queries;
-    let mut layer_query_evals = first_layer_query_evals;
-
-    for layer in verifier.layers.span() {
-        let fold_preimage_evals = layer
-            .verify(queries: layer_queries, evals_at_queries: layer_query_evals);
-        layer_queries = layer_queries.fold(*layer.fold_step);
-        layer_query_evals = layer.fold(fold_preimage_evals).span();
-    }
-
-    (layer_queries, layer_query_evals)
 }
 
 /// Verifies the last layer.
@@ -355,9 +341,7 @@ impl FriLayerVerifierImpl of FriLayerVerifierTrait {
             };
         }
 
-        // Traces of size < 4 are not supported.
-        assert!(column_log_size >= LOG_PACKED_LEAF_SIZE);
-        let leaf_log_size: u32 = if *self.fold_step > 1 {
+        let leaf_log_size: u32 = if *self.fold_step >= LOG_PACKED_LEAF_SIZE {
             LOG_PACKED_LEAF_SIZE
         } else {
             0
