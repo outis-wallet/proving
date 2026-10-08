@@ -57,7 +57,7 @@ use stwo_cairo_adapter::ProverInput;
 use stwo_cairo_adapter::adapter::adapt;
 use stwo_cairo_common::preprocessed_columns::preprocessed_trace::PreProcessedTrace;
 use stwo_cairo_prover::prover::{
-    LiftingSizePolicy, prove_cairo, prove_cairo_with_precompute, warm_pedersen_pp_trace,
+    LiftingSizePolicy, prove_cairo_with_precompute, warm_pedersen_pp_trace,
 };
 use stwo_cairo_prover::witness::preprocessed_trace::gen_trace;
 use tempfile::NamedTempFile;
@@ -98,36 +98,6 @@ fn build_privacy_proof_output(
     let proof = chain!(header.serialize(), compressed_proof).collect();
 
     Ok(PrivacyProofOutput { proof, output_preimage })
-}
-
-/// Runs the program and generates a proof for it with params, bootloader and output format suitable
-/// for the privacy circuit verifier.
-pub fn privacy_prove(pie: CairoPie) -> Result<PrivacyProofOutput, Box<dyn Error>> {
-    let _span = span!(Level::INFO, "privacy_prove").entered();
-
-    info!("Run privacy bootloader and get the prover input and output preimage");
-    let (prover_input, output_preimage) = run_privacy_bootloader(pie)?;
-
-    info!("Generate the cairo proof");
-    let cairo_proof = prove_cairo::<Blake2sMerkleChannel>(prover_input, CAIRO_PROVER_PARAMS)?;
-    let FlatClaim { component_enable_bits, component_log_sizes: _, public_data: _ } =
-        cairo_proof.claim.flatten_claim();
-
-    info!("Prepare the proof for the circuit verifier");
-    let (proof, serialized_aux_data) =
-        prepare_cairo_proof_for_circuit_verifier(&cairo_proof, &component_enable_bits);
-
-    info!("Serialize and compress the proof and public data");
-    let mut proof_bytes: Vec<u8> = vec![];
-    proof.serialize(&mut proof_bytes);
-    let serialized_aux_bytes: Vec<u8> =
-        serialized_aux_data.iter().flat_map(|x| x.0.to_le_bytes()).collect();
-    let combined_bytes: Vec<u8> = chain!(serialized_aux_bytes, proof_bytes).collect();
-    build_privacy_proof_output(
-        combined_bytes,
-        &PRIVACY_RECURSION_CIRCUIT_PREPROCESSED_ROOT,
-        output_preimage,
-    )
 }
 
 pub fn prepare_recursive_prover_precomputes()

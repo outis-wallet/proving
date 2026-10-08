@@ -128,7 +128,7 @@ pub mod slow_tests {
     use privacy_prove::{prepare_recursive_prover_precomputes, privacy_recursive_prove};
     use tracing_subscriber::fmt;
 
-    use crate::consts::{CAIRO_PROOF_UNCOMPRESSED_BYTES, RECURSIVE_PROOF_UNCOMPRESSED_BYTES};
+    use crate::consts::RECURSIVE_PROOF_UNCOMPRESSED_BYTES;
     use crate::{PRIVACY_RECURSION_CIRCUIT_PREPROCESSED_ROOT, get_proof_config};
 
     #[test]
@@ -155,25 +155,6 @@ pub mod slow_tests {
         )
         .unwrap();
         assert!(serialized_proof.is_empty());
-    }
-
-    #[test]
-    fn check_max_cairo_proof_uncompressed_size() {
-        let _ = fmt().with_max_level(tracing::Level::INFO).try_init();
-
-        let project_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let pie_path = project_dir.join("../privacy_prove/test_data/privacy_tx_cairo_pie.zip");
-        let pie = CairoPie::read_zip_file(&pie_path).unwrap();
-        let proof_output = privacy_prove::privacy_prove(pie).unwrap();
-
-        let (_header, compressed_proof) = crate::split_proof_header(&proof_output.proof).unwrap();
-        let proof_bytes = zstd::decode_all(compressed_proof).unwrap();
-        assert_eq!(
-            proof_bytes.len(),
-            CAIRO_PROOF_UNCOMPRESSED_BYTES,
-            "Update CAIRO_PROOF_UNCOMPRESSED_BYTES in consts.rs to {}",
-            proof_bytes.len()
-        );
     }
 
     #[test]
