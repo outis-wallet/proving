@@ -1,7 +1,7 @@
 use stwo_constraint_framework::{CommonLookupElements, LookupElementsTrait};
 use stwo_verifier_core::N_TREES;
 use stwo_verifier_core::channel::{Channel, ChannelTrait};
-use stwo_verifier_core::fields::qm31::{QM31, QM31Serde, QM31Trait};
+use stwo_verifier_core::fields::qm31::{QM31, QM31Serde};
 use stwo_verifier_core::vcs::blake2s_hasher::Blake2sHash;
 use stwo_verifier_utils::zip_eq::zip_eq;
 use crate::multiverifier_consts::{COMPONENT_LOG_SIZES, PREPROCESSED_COLUMN_LOG_SIZES};
@@ -26,14 +26,8 @@ pub struct CircuitClaim {
 
 #[generate_trait]
 pub impl CircuitClaimImpl of CircuitClaimTrait {
-    /// Mixes the outputs in the circuit's wire encoding, matching what the prover mixes.
     fn mix_into(self: @CircuitClaim, ref channel: Channel) {
-        let mut wire_values = array![];
-        for value in @self.output_digest.hash.unbox() {
-            let [lo, hi] = output_limbs(*value);
-            wire_values.append(QM31Trait::from_fixed_array([lo, hi, Zero::zero(), Zero::zero()]));
-        }
-        channel.mix_felts(wire_values.span());
+        channel.mix_u32s(self.output_digest.hash.unbox().span());
     }
 }
 

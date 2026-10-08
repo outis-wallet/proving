@@ -216,8 +216,8 @@ fn test_pow_regression(#[case] n_bits: u32, #[case] nonce: u32, #[case] success:
     }
 }
 
-/// Verifies the full `claims_to_mix` pipeline: `unpack_qm31s_to_u32_words` followed by
-/// `channel.mix_u32s` produces the same channel state as stwo's `Blake2sChannel::mix_felts`.
+/// Verifies that `unpack_qm31s_to_u32_words` followed by `channel.mix_u32s` produces the same
+/// channel state as stwo's `Blake2sChannel::mix_felts`.
 #[test]
 fn test_unpack_then_mix_u32s_matches_mix_felts() {
     use stwo::core::fields::m31::M31;

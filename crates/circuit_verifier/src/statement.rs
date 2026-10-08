@@ -1,5 +1,5 @@
 use circuit_common::N_RESERVED;
-use circuits::blake::{HashValue, unpack_qm31s_to_u32_words};
+use circuits::blake::HashValue;
 use circuits::context::{Context, U_VAR_IDX, Var};
 use circuits::eval;
 use circuits::ivalue::IValue;
@@ -87,10 +87,9 @@ impl<Value: IValue> CircuitStatement<Value> {
 }
 
 impl<Value: IValue> Statement<Value> for CircuitStatement<Value> {
-    fn claims_to_mix(&self, context: &mut Context<Value>) -> Vec<Vec<U32Wrapper<Var>>> {
-        let circuit_hash_words = self.circuit_hash.iter().copied().collect_vec();
-        let output_words =
-            unpack_qm31s_to_u32_words(context, self.output_digest.iter().map(|word| *word.get()));
+    fn claims_to_mix(&self, _context: &mut Context<Value>) -> Vec<Vec<U32Wrapper<Var>>> {
+        let circuit_hash_words = self.circuit_hash.to_vec();
+        let output_words = self.output_digest.to_vec();
         vec![circuit_hash_words, output_words]
     }
 

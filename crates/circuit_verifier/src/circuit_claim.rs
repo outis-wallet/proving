@@ -2,7 +2,7 @@ use std::iter::repeat_n;
 
 use circuits::blake::BLAKE2S_DIGEST_N_WORDS;
 use circuits::context::{U_VALUE, U_VAR_IDX};
-use circuits::ivalue::NoValue;
+use circuits::ivalue::{IValue, NoValue};
 use itertools::Itertools;
 use num_traits::Zero;
 use stwo::core::channel::Channel;
@@ -28,8 +28,8 @@ impl CircuitClaim {
     pub fn mix_into(&self, channel: &mut impl Channel) {
         let Self { output_values } = self;
 
-        // mix the output values into the channel.
-        channel.mix_felts(output_values);
+        let output_words = output_values.iter().map(|value| value.unpack_u32()).collect_vec();
+        channel.mix_u32s(&output_words);
     }
 }
 
