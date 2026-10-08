@@ -44,7 +44,7 @@ fn test_validate_accepts_supported_fold_steps() {
 #[should_panic(expected: "Unsupported FRI fold step")]
 fn test_validate_rejects_zero_fold_step() {
     let params = FriParams {
-        pow_bits: 0,
+        pow_bits: 20,
         log_blowup_factor: 1,
         log_last_layer_degree_bound: 0,
         n_queries: 1,
@@ -57,7 +57,7 @@ fn test_validate_rejects_zero_fold_step() {
 #[should_panic(expected: "Unsupported FRI fold step")]
 fn test_validate_rejects_too_large_fold_step() {
     let params = FriParams {
-        pow_bits: 0,
+        pow_bits: 20,
         log_blowup_factor: 1,
         log_last_layer_degree_bound: 0,
         n_queries: 1,
@@ -70,7 +70,7 @@ fn test_validate_rejects_too_large_fold_step() {
 #[should_panic(expected: "Last layer log degree must be zero")]
 fn test_validate_rejects_non_zero_log_last_layer_degree_bound() {
     let params = FriParams {
-        pow_bits: 0,
+        pow_bits: 20,
         log_blowup_factor: 1,
         log_last_layer_degree_bound: 1,
         n_queries: 1,
@@ -96,7 +96,7 @@ fn test_validate_rejects_low_pow_bits() {
 #[should_panic(expected: "Security bits are too low")]
 fn test_validate_rejects_low_security_bits() {
     let params = FriParams {
-        pow_bits: 10,
+        pow_bits: 20,
         log_blowup_factor: 1,
         log_last_layer_degree_bound: 0,
         n_queries: 5,
@@ -112,7 +112,7 @@ fn test_validate_rejects_low_security_bits() {
 /// on commit 3f4033a1eaaea94b99d043a06147fb6270236406.
 fn valid_proof_passes_verification() {
     let config = FriParams {
-        pow_bits: 0,
+        pow_bits: 20,
         log_last_layer_degree_bound: 0,
         log_blowup_factor: 2,
         n_queries: 1,
@@ -162,7 +162,7 @@ fn valid_proof_passes_verification() {
 #[should_panic]
 fn proof_with_invalid_inner_layer_evaluation_fails_verification() {
     let config = FriParams {
-        pow_bits: 0,
+        pow_bits: 20,
         log_last_layer_degree_bound: 0,
         log_blowup_factor: 2,
         n_queries: 1,
@@ -228,7 +228,7 @@ fn proof_with_invalid_inner_layer_evaluation_fails_verification() {
 #[should_panic(expected: "Invalid number of FRI layers")]
 fn proof_with_added_layer_fails_verification() {
     let config = FriParams {
-        pow_bits: 0,
+        pow_bits: 20,
         log_last_layer_degree_bound: 1,
         log_blowup_factor: 2,
         n_queries: 1,
@@ -292,7 +292,7 @@ fn proof_with_added_layer_fails_verification() {
 #[should_panic(expected: "Invalid number of FRI layers")]
 fn proof_with_removed_layer_fails_verification() {
     let config = FriParams {
-        pow_bits: 0,
+        pow_bits: 20,
         log_last_layer_degree_bound: 0,
         log_blowup_factor: 2,
         n_queries: 1,
@@ -353,7 +353,7 @@ fn proof_with_removed_layer_fails_verification() {
 #[should_panic(expected: "Invalid last layer degree")]
 fn proof_with_invalid_last_layer_degree_fails_verification() {
     let config = FriParams {
-        pow_bits: 0,
+        pow_bits: 20,
         log_last_layer_degree_bound: 0,
         log_blowup_factor: 2,
         n_queries: 1,
@@ -416,7 +416,7 @@ fn proof_with_invalid_last_layer_degree_fails_verification() {
 #[should_panic(expected: "Invalid last layer evaluations")]
 fn proof_with_invalid_last_layer_fails_verification() {
     let config = FriParams {
-        pow_bits: 0,
+        pow_bits: 20,
         log_last_layer_degree_bound: 0,
         log_blowup_factor: 2,
         n_queries: 3,
@@ -487,7 +487,7 @@ fn proof_with_invalid_last_layer_fails_verification() {
 #[should_panic(expected: "assertion failed: `queries.log_domain_size == column_log_size`.")]
 fn decommit_queries_on_invalid_domain_fails_verification() {
     let config = FriParams {
-        pow_bits: 0,
+        pow_bits: 20,
         log_last_layer_degree_bound: 0,
         log_blowup_factor: 2,
         n_queries: 3,
@@ -603,7 +603,7 @@ fn test_fold_coset_step_2() {
 fn valid_proof_with_fold_step_2_passes_verification() {
     // fold_step=2, log_degree=6, log_blowup=2
     let config = FriParams {
-        pow_bits: 0,
+        pow_bits: 20,
         log_last_layer_degree_bound: 0,
         log_blowup_factor: 2,
         n_queries: 3,
@@ -657,7 +657,7 @@ fn valid_proof_with_fold_step_2_passes_verification() {
 fn valid_proof_with_fold_step_3_passes_verification() {
     // fold_step=3, log_degree=7, log_blowup=2
     let config = FriParams {
-        pow_bits: 0,
+        pow_bits: 20,
         log_last_layer_degree_bound: 0,
         log_blowup_factor: 2,
         n_queries: 3,
