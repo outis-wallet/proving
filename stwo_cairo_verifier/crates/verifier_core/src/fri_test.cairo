@@ -1,17 +1,12 @@
-#[cfg(not(feature: "poseidon252_verifier"))]
 use crate::channel::Channel;
 use crate::circle::{CirclePointIndexImpl, CirclePointM31Impl, CosetImpl};
 use crate::fields::Invertible;
-use crate::fields::qm31::qm31_const;
-use crate::fri::{FriParams, FriParamsTrait, fold_coset};
-#[cfg(not(feature: "poseidon252_verifier"))]
-use crate::fri::{FriVerifierImpl, FriVerifierTrait};
+use crate::fields::qm31::{QM31, qm31_const};
+use crate::fri::{FriParams, FriParamsTrait, FriVerifierImpl, FriVerifierTrait, fold_coset};
 use crate::poly::circle::CircleEvaluationImpl;
 use crate::poly::line::{LineDomainImpl, LineDomainTrait};
 use crate::poly::utils::fri_fold;
-#[cfg(not(feature: "poseidon252_verifier"))]
-use crate::queries::Queries;
-use crate::queries::QueriesImpl;
+use crate::queries::{Queries, QueriesImpl};
 use crate::utils::bit_reverse_index;
 
 #[test]
@@ -105,24 +100,39 @@ fn test_validate_rejects_low_security_bits() {
     params.validate(min_security_bits: params.security_bits() + 1);
 }
 
-// The proof data uses Blake2s Merkle hashes and the Blake2s channel.
-#[cfg(not(feature: "poseidon252_verifier"))]
-#[test]
-/// The test data was generated using [`stwo::core::fri::tests::valid_proof_passes_verification`]
-/// on commit 3f4033a1eaaea94b99d043a06147fb6270236406.
-fn valid_proof_passes_verification() {
+/// Runs the FRI verifier on a serialized proof.
+fn verify_fri_proof(
+    fold_step: u32,
+    column_log_bound: u32,
+    query_positions: Span<usize>,
+    query_evals: Span<QM31>,
+    mut proof_data: Span<felt252>,
+) {
     let config = FriParams {
         pow_bits: 20,
         log_last_layer_degree_bound: 0,
         log_blowup_factor: 2,
-        n_queries: 1,
-        fold_step: 1,
+        n_queries: query_positions.len(),
+        fold_step,
     };
-    let column_log_bound = 4;
-    let column_log_size = column_log_bound + config.log_blowup_factor;
-    let queries = Queries { positions: array![5].span(), log_domain_size: column_log_size };
+    let queries = Queries {
+        positions: query_positions, log_domain_size: column_log_bound + config.log_blowup_factor,
+    };
+    let proof = Serde::deserialize(ref proof_data).unwrap();
+    let mut channel: Channel = Default::default();
+    let verifier = FriVerifierImpl::commit(ref channel, config, proof, column_log_bound);
+
+    verifier.decommit(queries, query_evals);
+}
+
+// The proof data uses Blake2s Merkle hashes and the Blake2s channel.
+/// The test data was generated using [`stwo::core::fri::tests::valid_proof_passes_verification`]
+/// on commit 3f4033a1eaaea94b99d043a06147fb6270236406.
+#[cfg(not(feature: "poseidon252_verifier"))]
+#[test]
+fn valid_blake_proof_passes_verification() {
     let query_evals = array![qm31_const::<1242514872, 0, 0, 0>()].span();
-    let mut proof_data = array![
+    let proof_data = array![
         1, 1381744584, 0, 0, 0, 5, 4013379, 1620929195, 196343493, 1455531721, 881800319, 973958561,
         515015194, 2957237480, 1739168948, 1822972178, 137215804, 3065987771, 790119596, 2647928575,
         2106646785, 2836027847, 1844229270, 1959818569, 117777213, 1466604405, 2536025723,
@@ -148,11 +158,13 @@ fn valid_proof_passes_verification() {
         1685799574, 1, 789084854, 62863346, 20517901, 1065457186, 0, 0,
     ]
         .span();
-    let proof = Serde::deserialize(ref proof_data).unwrap();
-    let mut channel: Channel = Default::default();
-    let verifier = FriVerifierImpl::commit(ref channel, config, proof, column_log_bound);
-
-    verifier.decommit(queries, query_evals);
+    verify_fri_proof(
+        fold_step: 1,
+        column_log_bound: 4,
+        query_positions: array![5].span(),
+        :query_evals,
+        :proof_data,
+    );
 }
 
 
@@ -160,20 +172,10 @@ fn valid_proof_passes_verification() {
 #[cfg(not(feature: "poseidon252_verifier"))]
 #[test]
 #[should_panic]
-fn proof_with_invalid_inner_layer_evaluation_fails_verification() {
-    let config = FriParams {
-        pow_bits: 20,
-        log_last_layer_degree_bound: 0,
-        log_blowup_factor: 2,
-        n_queries: 1,
-        fold_step: 1,
-    };
-    let column_log_bound = 6;
-    let column_log_size = column_log_bound + config.log_blowup_factor;
-    let queries = Queries { positions: array![5].span(), log_domain_size: column_log_size };
+fn blake_proof_with_invalid_inner_layer_evaluation_fails_verification() {
     let query_evals = array![qm31_const::<511282811, 0, 0, 0>()].span();
     // The proof is missing the first element of the second layer's fri witness.
-    let mut proof_data = array![
+    let proof_data = array![
         1, 297706028, 0, 0, 0, 7, 2630196203, 2702520654, 1385922681, 202920142, 3292993882,
         3904654697, 1685185838, 4074913318, 2689362261, 1544844228, 815539921, 1084863242,
         3296088483, 847102984, 1499328643, 598075978, 1341622493, 3509590667, 3944602181,
@@ -215,18 +217,20 @@ fn proof_with_invalid_inner_layer_evaluation_fails_verification() {
         2247494017, 66158984, 1047253858, 1, 538128631, 406819237, 1581832704, 478042654, 0, 0,
     ]
         .span();
-    let proof = Serde::deserialize(ref proof_data).unwrap();
-    let mut channel: Channel = Default::default();
-    let verifier = FriVerifierImpl::commit(ref channel, config, proof, column_log_bound);
-
-    verifier.decommit(queries, query_evals);
+    verify_fri_proof(
+        fold_step: 1,
+        column_log_bound: 6,
+        query_positions: array![5].span(),
+        :query_evals,
+        :proof_data,
+    );
 }
 
 // The proof data uses Blake2s Merkle hashes and the Blake2s channel.
 #[cfg(not(feature: "poseidon252_verifier"))]
 #[test]
 #[should_panic(expected: "Invalid number of FRI layers")]
-fn proof_with_added_layer_fails_verification() {
+fn blake_proof_with_added_layer_fails_verification() {
     let config = FriParams {
         pow_bits: 20,
         log_last_layer_degree_bound: 1,
@@ -290,7 +294,7 @@ fn proof_with_added_layer_fails_verification() {
 #[cfg(not(feature: "poseidon252_verifier"))]
 #[test]
 #[should_panic(expected: "Invalid number of FRI layers")]
-fn proof_with_removed_layer_fails_verification() {
+fn blake_proof_with_removed_layer_fails_verification() {
     let config = FriParams {
         pow_bits: 20,
         log_last_layer_degree_bound: 0,
@@ -351,7 +355,7 @@ fn proof_with_removed_layer_fails_verification() {
 #[cfg(not(feature: "poseidon252_verifier"))]
 #[test]
 #[should_panic(expected: "Invalid last layer degree")]
-fn proof_with_invalid_last_layer_degree_fails_verification() {
+fn blake_proof_with_invalid_last_layer_degree_fails_verification() {
     let config = FriParams {
         pow_bits: 20,
         log_last_layer_degree_bound: 0,
@@ -414,24 +418,14 @@ fn proof_with_invalid_last_layer_degree_fails_verification() {
 #[cfg(not(feature: "poseidon252_verifier"))]
 #[test]
 #[should_panic(expected: "Invalid last layer evaluations")]
-fn proof_with_invalid_last_layer_fails_verification() {
-    let config = FriParams {
-        pow_bits: 20,
-        log_last_layer_degree_bound: 0,
-        log_blowup_factor: 2,
-        n_queries: 3,
-        fold_step: 1,
-    };
-    let column_log_bound = 6;
-    let column_log_size = column_log_bound + config.log_blowup_factor;
-    let queries = Queries { positions: array![1, 7, 8].span(), log_domain_size: column_log_size };
+fn blake_proof_with_invalid_last_layer_fails_verification() {
     let query_evals = array![
         qm31_const::<1208798379, 0, 0, 0>(), qm31_const::<1086480365, 0, 0, 0>(),
         qm31_const::<1362010196, 0, 0, 0>(),
     ]
         .span();
     // The last layer polynomial has a wrong coefficient.
-    let mut proof_data = array![
+    let proof_data = array![
         3, 13485189, 0, 0, 0, 526587957, 0, 0, 0, 84215338, 0, 0, 0, 8, 1372005470, 2709444601,
         8660353, 1197912763, 2097669106, 2565886625, 3187301120, 2744122786, 3843412106, 3506252054,
         3475164404, 3127603343, 538602610, 3044620856, 3000376916, 1682533385, 1523268079,
@@ -474,18 +468,20 @@ fn proof_with_invalid_last_layer_fails_verification() {
         406819237, 1581832704, 478042654, 0, 0,
     ]
         .span();
-    let proof = Serde::deserialize(ref proof_data).unwrap();
-    let mut channel: Channel = Default::default();
-    let mut verifier = FriVerifierImpl::commit(ref channel, config, proof, column_log_bound);
-
-    verifier.decommit(queries, query_evals);
+    verify_fri_proof(
+        fold_step: 1,
+        column_log_bound: 6,
+        query_positions: array![1, 7, 8].span(),
+        :query_evals,
+        :proof_data,
+    );
 }
 
 // The proof data uses Blake2s Merkle hashes and the Blake2s channel.
 #[cfg(not(feature: "poseidon252_verifier"))]
 #[test]
 #[should_panic(expected: "assertion failed: `queries.log_domain_size == column_log_size`.")]
-fn decommit_queries_on_invalid_domain_fails_verification() {
+fn blake_proof_decommit_queries_on_invalid_domain_fails_verification() {
     let config = FriParams {
         pow_bits: 20,
         log_last_layer_degree_bound: 0,
@@ -600,24 +596,14 @@ fn test_fold_coset_step_2() {
 // The proof data uses Blake2s Merkle hashes and the Blake2s channel.
 #[cfg(not(feature: "poseidon252_verifier"))]
 #[test]
-fn valid_proof_with_fold_step_2_passes_verification() {
+fn valid_blake_proof_with_fold_step_2_passes_verification() {
     // fold_step=2, log_degree=6, log_blowup=2
-    let config = FriParams {
-        pow_bits: 20,
-        log_last_layer_degree_bound: 0,
-        log_blowup_factor: 2,
-        n_queries: 3,
-        fold_step: 2,
-    };
-    let column_log_bound = 6;
-    let column_log_size = column_log_bound + config.log_blowup_factor;
-    let queries = Queries { positions: array![5, 13, 29].span(), log_domain_size: column_log_size };
     let query_evals = array![
         qm31_const::<511282811, 0, 0, 0>(), qm31_const::<470390767, 0, 0, 0>(),
         qm31_const::<47322177, 0, 0, 0>(),
     ]
         .span();
-    let mut proof_data = array![
+    let proof_data = array![
         9, 297706028, 0, 0, 0, 526587957, 0, 0, 0, 1086480365, 0, 0, 0, 887149807, 0, 0, 0,
         1244485275, 0, 0, 0, 225426223, 0, 0, 0, 570559554, 0, 0, 0, 1197955246, 0, 0, 0, 92328666,
         0, 0, 0, 7, 1912005594, 484565788, 2607270932, 1694920157, 3144812033, 236570198,
@@ -644,34 +630,25 @@ fn valid_proof_with_fold_step_2_passes_verification() {
         893927007, 26192966, 2058732455, 0, 0,
     ]
         .span();
-    let proof = Serde::deserialize(ref proof_data).unwrap();
-    let mut channel: Channel = Default::default();
-    let verifier = FriVerifierImpl::commit(ref channel, config, proof, column_log_bound);
-
-    verifier.decommit(queries, query_evals);
+    verify_fri_proof(
+        fold_step: 2,
+        column_log_bound: 6,
+        query_positions: array![5, 13, 29].span(),
+        :query_evals,
+        :proof_data,
+    );
 }
 
 // The proof data uses Blake2s Merkle hashes and the Blake2s channel.
 #[cfg(not(feature: "poseidon252_verifier"))]
 #[test]
-fn valid_proof_with_fold_step_3_passes_verification() {
-    // fold_step=3, log_degree=7, log_blowup=2
-    let config = FriParams {
-        pow_bits: 20,
-        log_last_layer_degree_bound: 0,
-        log_blowup_factor: 2,
-        n_queries: 3,
-        fold_step: 3,
-    };
-    let column_log_bound = 7;
-    let column_log_size = column_log_bound + config.log_blowup_factor;
-    let queries = Queries { positions: array![5, 13, 29].span(), log_domain_size: column_log_size };
+fn valid_blake_proof_with_fold_step_3_passes_verification() {
     let query_evals = array![
         qm31_const::<100138915, 0, 0, 0>(), qm31_const::<104451492, 0, 0, 0>(),
         qm31_const::<1650612966, 0, 0, 0>(),
     ]
         .span();
-    let mut proof_data = array![
+    let proof_data = array![
         21, 732469866, 0, 0, 0, 452114753, 0, 0, 0, 2039640754, 0, 0, 0, 1367825410, 0, 0, 0,
         240032070, 0, 0, 0, 720546967, 0, 0, 0, 700720940, 0, 0, 0, 911650718, 0, 0, 0, 1374755971,
         0, 0, 0, 864291553, 0, 0, 0, 614763083, 0, 0, 0, 1326935754, 0, 0, 0, 6186364, 0, 0, 0,
@@ -697,9 +674,239 @@ fn valid_proof_with_fold_step_3_passes_verification() {
         4270199970, 3096266166, 2646107550, 1, 234932928, 817435799, 1885838128, 681581160, 0, 0,
     ]
         .span();
-    let proof = Serde::deserialize(ref proof_data).unwrap();
-    let mut channel: Channel = Default::default();
-    let verifier = FriVerifierImpl::commit(ref channel, config, proof, column_log_bound);
+    verify_fri_proof(
+        fold_step: 3,
+        column_log_bound: 7,
+        query_positions: array![5, 13, 29].span(),
+        :query_evals,
+        :proof_data,
+    );
+}
 
-    verifier.decommit(queries, query_evals);
+/// Returns the serialized FRI proof of the `valid_poseidon_*` test with the given `fold_step`,
+/// generated with `stwo::prover::fri::FriProver` over `Poseidon252MerkleChannel` on commit
+/// 05379de7834e24114f5938410661e9c9eef3637d. To reproduce the proofs, add this test as
+/// `crates/cairo-serialize/tests/print_poseidon_fri_proofs.rs` and run
+/// `cargo test -p stwo-cairo-serialize -F stwo/prover print_poseidon_fri_proofs -- --nocapture`:
+///
+/// ```rust
+/// #[test]
+/// fn print_poseidon_fri_proofs() {
+///     use starknet_ff::FieldElement;
+///     use stwo::core::channel::Poseidon252Channel;
+///     use stwo::core::circle::Coset;
+///     use stwo::core::fields::m31::BaseField;
+///     use stwo::core::fields::qm31::SecureField;
+///     use stwo::core::fri::FriParams;
+///     use stwo::core::poly::circle::CircleDomain;
+///     use stwo::core::queries::Queries;
+///     use stwo::core::vcs_lifted::poseidon252_merkle::Poseidon252MerkleChannel;
+///     use stwo::prover::backend::CpuBackend;
+///     use stwo::prover::backend::cpu::CpuCirclePoly;
+///     use stwo::prover::fri::FriProver;
+///     use stwo::prover::poly::circle::{PolyOps, SecureEvaluation};
+///     use stwo_cairo_serialize::CairoSerialize;
+///
+///     const LOG_BLOWUP_FACTOR: u32 = 2;
+///     for (log_degree, fold_step, positions) in
+///         [(4, 1, vec![5]), (6, 2, vec![5, 13, 29]), (7, 3, vec![5, 13, 29])]
+///     {
+///         let poly = CpuCirclePoly::new(vec![BaseField::from(1); 1 << log_degree]);
+///         let domain = CircleDomain::new(Coset::half_odds(log_degree + LOG_BLOWUP_FACTOR - 1));
+///         let values = poly.evaluate(domain).into_iter().map(SecureField::from).collect();
+///         let column = SecureEvaluation::new(domain, values);
+///         let twiddles = CpuBackend::precompute_twiddles(domain.half_coset);
+///         let queries = Queries::new(&positions, domain.log_size());
+///         let params = FriParams::new(0, 0, LOG_BLOWUP_FACTOR, queries.len(), fold_step);
+///         let prover = FriProver::<CpuBackend, Poseidon252MerkleChannel>::commit(
+///             &mut Poseidon252Channel::default(),
+///             params,
+///             &column,
+///             &twiddles,
+///         );
+///         let mut proof_data: Vec<FieldElement> = vec![];
+///         prover.decommit_on_queries(&queries, 0).proof.serialize(&mut proof_data);
+///         let query_evals = queries.positions.iter().map(|&p| column.at(p)).collect::<Vec<_>>();
+///         println!("fold_step {fold_step}:");
+///         println!("query_evals: {query_evals:?}");
+///         println!(
+///             "proof_data: {}",
+///             proof_data.iter().map(|f| f.to_string()).collect::<Vec<_>>().join(", ")
+///         );
+///     }
+/// }
+/// ```
+#[cfg(feature: "poseidon252_verifier")]
+fn poseidon_proof_data(fold_step: u32) -> Span<felt252> {
+    if fold_step == 1 {
+        array![
+            1, 1381744584, 0, 0, 0, 5,
+            2512652454923073106243299573833693231893137239718019713848018480313917932644,
+            3552118420623730098975578225191175411802007107739819776904262539997081798751,
+            1003860790823454740485218237783075533539696261396070424414429656291808202131,
+            1291911338767610318155727417785394176273731011771076285417485892873256202840,
+            374843879022568405454768707096861686974182987774376872874778806323235368428,
+            2420317178590088231024279185773535490647110602806595357581980774979308353259, 3, 1,
+            1064486599, 821845911, 1752108937, 562378792, 4,
+            2405247190766821724300892335167242257743487156756992676330674581278629033428,
+            848362384862711868274054462960038712358086524039060337424620711294696711018,
+            137497701752025940179096880679665855476387077454204541548984766910994394681,
+            119728115098690386543491113630735041670738340175921116875731150173295257806,
+            859100294239894100590951323766914910507744922293669934650837497639431069987, 1,
+            106891341, 1187547049, 1067118844, 696728201, 3,
+            1717383085400749397195575045062096143704927934359816238854763290937250699449,
+            1957130336598319316460037115546738641382675087231394755057685687783404901614,
+            2296839884952273115772130322466757393041467742159898461767009870063265386212,
+            3277560332590220901718417278988589233109634326995205172455862958385318732654, 1,
+            671539456, 3552042, 1268493253, 1057841018, 2,
+            1058242733407300185147353341953430998289501214360677404132129380535184243991,
+            1008187986873259965584327883710299800542480823953545967609004830428503093221,
+            2234602466864470498759670367649421498598809430323396346240413513068046362044, 1,
+            436478140, 281665519, 18524657, 447576576, 0, 0,
+        ]
+            .span()
+    } else if fold_step == 2 {
+        array![
+            9, 297706028, 0, 0, 0, 526587957, 0, 0, 0, 1086480365, 0, 0, 0, 887149807, 0, 0, 0,
+            1244485275, 0, 0, 0, 225426223, 0, 0, 0, 570559554, 0, 0, 0, 1197955246, 0, 0, 0,
+            92328666, 0, 0, 0, 7,
+            1797364910116480741723096716930348396882759935426009860923051497867757960463,
+            2701346342748528128662503617157953909219860153025000028817214175552239128511,
+            2004758254400025970505615935382202322322002217170292181111214103778977752324,
+            2870659892942681423544250885784458535767887070229605752580007670426848885517,
+            2677762891439707968703624738666252211584686216229596188016100772209742685451,
+            1542110507248946053129511224466987361778807992450403369701399287209307147024,
+            3235290310443681247625381105640552687237882500704072557684269791150292962725,
+            2038175704438139058714169546105867951588939506333050670696154126507275641510, 2, 5,
+            1519514186, 948347225, 1909034753, 913754228, 647259086, 120134589, 1520082385,
+            339579056, 590074662, 1520637046, 551043742, 1973499291, 1111425105, 893965834,
+            459363977, 1864348178, 1097779097, 651335687, 297263051, 593414244, 3,
+            1972426437227692585933378130419642788066054788824883857045962322951006779557,
+            3016159914720731321374999794802831042298806092055574430259886264261395353240,
+            3265746711784578982085557068596017107391655711831600255051980323124372347680,
+            587222274856016730274373857516242979908783553541347595225618024808308265181, 2,
+            610548665, 106494986, 984613978, 558768257, 916617922, 1102767235, 215424365,
+            1278442910, 2,
+            2435258099540861345863108866576489835623192480668503478572409356553307731468,
+            3171416325423535606035710584389200296742061677916956598823916209349753564933,
+            2337689268463572367890601210230772203283358149414543115589217545798413671648, 1,
+            1207761995, 1238816664, 631778252, 1708083321, 0, 0,
+        ]
+            .span()
+    } else if fold_step == 3 {
+        array![
+            21, 732469866, 0, 0, 0, 452114753, 0, 0, 0, 2039640754, 0, 0, 0, 1367825410, 0, 0, 0,
+            240032070, 0, 0, 0, 720546967, 0, 0, 0, 700720940, 0, 0, 0, 911650718, 0, 0, 0,
+            1374755971, 0, 0, 0, 864291553, 0, 0, 0, 614763083, 0, 0, 0, 1326935754, 0, 0, 0,
+            6186364, 0, 0, 0, 1788563034, 0, 0, 0, 1940650761, 0, 0, 0, 1799307543, 0, 0, 0,
+            1772752980, 0, 0, 0, 1497337158, 0, 0, 0, 1762897780, 0, 0, 0, 216543244, 0, 0, 0,
+            1457252653, 0, 0, 0, 5,
+            1848457534085032105419288218165617984287996296255546688107868393326524779742,
+            1929330632781474742363063683926246537825856457434694497402266860978046379753,
+            887887677893409296086016327201305298000322218657084798607792716612074516731,
+            1239012534396965856345181653494870971612566036823204580728353830887841647474,
+            905064838035962394249490315870163047047269917980077374082195064793407132380,
+            2672527632737250366249851823561254745555088130004223222112051329235005998917, 2, 5,
+            725426721, 422905364, 464770740, 324680962, 1520387020, 75993804, 1630361841, 443584802,
+            936158860, 946320537, 38606095, 992387766, 1636975314, 782420916, 1347538020, 975959873,
+            142767051, 187733000, 427296731, 1337863528, 3,
+            2544018316967729691034257060867031583018721284516739684937995413525863081104,
+            2053289778836264659023535220520516639685946632617487298709935631824774543848,
+            922191717618744617339764664909080111878136966038708919088986971283890293578,
+            1914962027967823741067956562020363172334920812591254080707578682225983740634, 1,
+            715001814, 629349387, 1343404938, 1501435960, 2,
+            424608992246559925810465442861449945139818084258565095825785879946693878109,
+            1943144015341948169184251214230269221562961990391344557584149492754076399651,
+            2009341937433147736954962559376144010377911043101651037118854753724963830065, 1,
+            1940492053, 1314789416, 641258035, 642862316, 0, 0,
+        ]
+            .span()
+    } else {
+        panic!("No Poseidon252 FRI test vector for fold step {}", fold_step)
+    }
+}
+
+/// Same as `valid_blake_proof_passes_verification`, with Poseidon252 Merkle hashes and channel.
+#[cfg(feature: "poseidon252_verifier")]
+#[test]
+fn valid_poseidon_proof_passes_verification() {
+    verify_fri_proof(
+        fold_step: 1,
+        column_log_bound: 4,
+        query_positions: array![5].span(),
+        query_evals: array![qm31_const::<1242514872, 0, 0, 0>()].span(),
+        proof_data: poseidon_proof_data(fold_step: 1),
+    );
+}
+
+/// Same as `valid_blake_proof_with_fold_step_2_passes_verification`, with Poseidon252 Merkle
+/// hashes and channel.
+#[cfg(feature: "poseidon252_verifier")]
+#[test]
+fn valid_poseidon_proof_with_fold_step_2_passes_verification() {
+    let query_evals = array![
+        qm31_const::<511282811, 0, 0, 0>(), qm31_const::<470390767, 0, 0, 0>(),
+        qm31_const::<47322177, 0, 0, 0>(),
+    ]
+        .span();
+    verify_fri_proof(
+        fold_step: 2,
+        column_log_bound: 6,
+        query_positions: array![5, 13, 29].span(),
+        :query_evals,
+        proof_data: poseidon_proof_data(fold_step: 2),
+    );
+}
+
+/// Same as `valid_blake_proof_with_fold_step_3_passes_verification`, with Poseidon252 Merkle
+/// hashes and channel.
+#[cfg(feature: "poseidon252_verifier")]
+#[test]
+fn valid_poseidon_proof_with_fold_step_3_passes_verification() {
+    let query_evals = array![
+        qm31_const::<100138915, 0, 0, 0>(), qm31_const::<104451492, 0, 0, 0>(),
+        qm31_const::<1650612966, 0, 0, 0>(),
+    ]
+        .span();
+    verify_fri_proof(
+        fold_step: 3,
+        column_log_bound: 7,
+        query_positions: array![5, 13, 29].span(),
+        :query_evals,
+        proof_data: poseidon_proof_data(fold_step: 3),
+    );
+}
+
+/// Same as `valid_poseidon_proof_passes_verification`, with a wrong query evaluation.
+#[cfg(feature: "poseidon252_verifier")]
+#[test]
+#[should_panic(expected: "Merkle Verification Error: Root Mismatch")]
+fn poseidon_proof_with_invalid_query_evaluation_fails_verification() {
+    verify_fri_proof(
+        fold_step: 1,
+        column_log_bound: 4,
+        query_positions: array![5].span(),
+        query_evals: array![qm31_const::<1242514873, 0, 0, 0>()].span(),
+        proof_data: poseidon_proof_data(fold_step: 1),
+    );
+}
+
+/// Same as `valid_poseidon_proof_with_fold_step_3_passes_verification`, with a wrong query
+/// evaluation.
+#[cfg(feature: "poseidon252_verifier")]
+#[test]
+#[should_panic(expected: "Merkle Verification Error: Root Mismatch")]
+fn poseidon_proof_with_fold_step_3_and_invalid_query_evaluation_fails_verification() {
+    let query_evals = array![
+        qm31_const::<100138915, 0, 0, 0>(), qm31_const::<104451492, 0, 0, 0>(),
+        qm31_const::<1650612967, 0, 0, 0>(),
+    ]
+        .span();
+    verify_fri_proof(
+        fold_step: 3,
+        column_log_bound: 7,
+        query_positions: array![5, 13, 29].span(),
+        :query_evals,
+        proof_data: poseidon_proof_data(fold_step: 3),
+    );
 }
