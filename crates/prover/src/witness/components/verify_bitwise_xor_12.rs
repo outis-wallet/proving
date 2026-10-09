@@ -6,7 +6,7 @@ use cairo_air::components::verify_bitwise_xor_12::{
     Claim, EXPAND_BITS, InteractionClaim, LIMB_BITS, LOG_SIZE, N_MULT_COLUMNS,
 };
 use cairo_air::relations::VERIFY_BITWISE_XOR_12_RELATION_ID;
-use itertools::{Itertools, chain};
+use itertools::Itertools;
 
 use crate::witness::prelude::*;
 
@@ -124,12 +124,18 @@ impl InteractionClaimGenerator {
                         )
                     };
 
-                    let p0: PackedQM31 = common_lookup_elements.combine(
-                        &chain!([VERIFY_BITWISE_XOR_12_RELATION_ID.into()], v0).collect_vec(),
-                    );
-                    let p1: PackedQM31 = common_lookup_elements.combine(
-                        &chain!([VERIFY_BITWISE_XOR_12_RELATION_ID.into()], v1).collect_vec(),
-                    );
+                    let p0: PackedQM31 = common_lookup_elements.combine(&[
+                        VERIFY_BITWISE_XOR_12_RELATION_ID.into(),
+                        v0[0],
+                        v0[1],
+                        v0[2],
+                    ]);
+                    let p1: PackedQM31 = common_lookup_elements.combine(&[
+                        VERIFY_BITWISE_XOR_12_RELATION_ID.into(),
+                        v1[0],
+                        v1[1],
+                        v1[2],
+                    ]);
                     writer.write_frac(p0 * (-mults1) + p1 * (-mults0), p1 * p0);
                 },
             );

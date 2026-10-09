@@ -2,7 +2,7 @@
 #![allow(dead_code)]
 use std::simd::u32x16;
 
-use itertools::{Itertools, chain};
+use itertools::Itertools;
 
 use crate::circuit_air::components::verify_bitwise_xor_12::{
     Claim, EXPAND_BITS, InteractionClaim, LIMB_BITS, LOG_SIZE, N_MULT_COLUMNS,
@@ -119,8 +119,8 @@ impl InteractionClaimGenerator {
                         )
                     };
 
-                    let vals0: Vec<PackedM31> = chain!([relation_id], v0).collect_vec();
-                    let vals1: Vec<PackedM31> = chain!([relation_id], v1).collect_vec();
+                    let vals0: [PackedM31; 4] = [relation_id, v0[0], v0[1], v0[2]];
+                    let vals1: [PackedM31; 4] = [relation_id, v1[0], v1[1], v1[2]];
                     let p0: PackedQM31 = common_lookup_elements.combine(&vals0);
                     let p1: PackedQM31 = common_lookup_elements.combine(&vals1);
                     writer.write_frac(p0 * (-mults1) + p1 * (-mults0), p1 * p0);

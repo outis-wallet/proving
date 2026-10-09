@@ -1,7 +1,7 @@
 # Outis's branch of StarkWare's prover
 
 This is `starkware-libs/proving` at `2b495a36`, the revision the sequencer's
-`PRIVACY-0.14.4-RC.0` pins, plus four commits. The changes make the whole Starknet transaction
+`PRIVACY-0.14.4-RC.0` pins, plus five commits. The changes make the whole Starknet transaction
 proof small enough in memory for phones and browsers (wasm32, 4 GiB). They are used by
 [outis-wallet/prover](https://github.com/outis-wallet/prover), and run on outis.cash/prover and
 in the Outis Prover apps.
@@ -16,9 +16,11 @@ Proofs are byte-identical to the upstream prover's for the same input.
 | Striped commitment: stripe-0 residency on both legs (s2) | Each committed column keeps only its first stripe; the rest is re-evaluated when read. About 5.9 GiB down to 2.5 GiB on the provably.fast benchmark proof | Outis, after ryun1's public description of the approach on the provably.fast research graph |
 | Build and run on wasm32-unknown-unknown | No file system, no sonic-rs, 32-bit `usize`, real memory for reserved capacity | Outis |
 | Android: the large-block cache maps with Linux's MAP_ANONYMOUS | `target_os = "android"` took macOS's flag | Outis |
+| Witness: no heap Vec per row in the logup combines | `verify_bitwise_xor_12` (Cairo and circuit) and `memory_id_to_big` combined each row's values through a fresh `Vec`. On wasm32 every allocation takes one global spin lock, so the parallel loop serialized on it | Outis |
 
 Of the non-trivial lines these commits add, about 2,600 come from the frontier, about 830 are
-ours (the striped prover and its port to `2b495a36`), and about 50 are the wasm and Android fixes.
+ours (the striped prover and its port to `2b495a36`), about 50 are the wasm and Android fixes, and
+about 25 remove the per-row allocations.
 
 ## Following upstream
 
@@ -45,6 +47,7 @@ Apache-2.0, as upstream (`LICENSE`). The files changed from `2b495a36`:
 - `crates/circuit_prover/src/witness/components/prelude.rs`
 - `crates/circuit_prover/src/witness/components/qm31_ops.rs`
 - `crates/circuit_prover/src/witness/components/triple_xor.rs`
+- `crates/circuit_prover/src/witness/components/verify_bitwise_xor_12.rs`
 - `crates/circuit_prover/src/witness/components/verify_bitwise_xor_4.rs`
 - `crates/circuit_prover/src/witness/components/verify_bitwise_xor_7.rs`
 - `crates/circuit_prover/src/witness/components/verify_bitwise_xor_8.rs`
@@ -62,6 +65,7 @@ Apache-2.0, as upstream (`LICENSE`). The files changed from `2b495a36`:
 - `crates/prover/src/prover.rs`
 - `crates/prover/src/witness/components/blake_round_sigma.rs`
 - `crates/prover/src/witness/components/cube_252.rs`
+- `crates/prover/src/witness/components/memory_id_to_big.rs`
 - `crates/prover/src/witness/components/partial_ec_mul_window_bits_18.rs`
 - `crates/prover/src/witness/components/partial_ec_mul_window_bits_9.rs`
 - `crates/prover/src/witness/components/pedersen_aggregator_window_bits_18.rs`
@@ -77,6 +81,7 @@ Apache-2.0, as upstream (`LICENSE`). The files changed from `2b495a36`:
 - `crates/prover/src/witness/components/range_check_4_4_4_4.rs`
 - `crates/prover/src/witness/components/range_check_7_2_5.rs`
 - `crates/prover/src/witness/components/range_check_9_9.rs`
+- `crates/prover/src/witness/components/verify_bitwise_xor_12.rs`
 - `crates/prover/src/witness/components/verify_bitwise_xor_4.rs`
 - `crates/prover/src/witness/components/verify_bitwise_xor_7.rs`
 - `crates/prover/src/witness/components/verify_bitwise_xor_8.rs`

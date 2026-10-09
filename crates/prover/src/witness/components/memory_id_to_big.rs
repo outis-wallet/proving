@@ -482,9 +482,11 @@ impl InteractionClaimGenerator {
                     big_components_values[i - 1][vec_row]
                 }
             });
-            let denom: PackedQM31 = common_lookup_elements.combine(
-                &chain!([MEMORY_ID_TO_BIG_RELATION_ID.into()], id_and_value).collect_vec(),
-            );
+            let values: [PackedM31; 1 + FELT252_N_WORDS + MEMORY_ID_SIZE] =
+                std::array::from_fn(|i| {
+                    if i == 0 { MEMORY_ID_TO_BIG_RELATION_ID.into() } else { id_and_value[i - 1] }
+                });
+            let denom: PackedQM31 = common_lookup_elements.combine(&values);
             col_gen.write_frac(vec_row, (-big_multiplicities[vec_row]).into(), denom);
         }
         col_gen.finalize_col();
@@ -555,9 +557,11 @@ impl InteractionClaimGenerator {
                         self.small_values[i - 1][vec_row]
                     }
                 });
-            let denom: PackedQM31 = common_lookup_elements.combine(
-                &chain!([MEMORY_ID_TO_BIG_RELATION_ID.into()], id_and_value).collect_vec(),
-            );
+            let values: [PackedM31; 1 + N_M31_IN_SMALL_FELT252 + MEMORY_ID_SIZE] =
+                std::array::from_fn(|i| {
+                    if i == 0 { MEMORY_ID_TO_BIG_RELATION_ID.into() } else { id_and_value[i - 1] }
+                });
+            let denom: PackedQM31 = common_lookup_elements.combine(&values);
             col_gen.write_frac(vec_row, (-self.small_multiplicities[vec_row]).into(), denom);
         }
         col_gen.finalize_col();
