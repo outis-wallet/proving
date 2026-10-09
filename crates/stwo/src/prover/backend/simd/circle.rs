@@ -31,7 +31,7 @@ use crate::prover::backend::{Col, Column, CpuBackend};
 use crate::prover::fri::FriOps;
 use crate::prover::mempool::BaseColumnPool;
 use crate::prover::poly::BitReversedOrder;
-use crate::prover::poly::circle::{CircleCoefficients, CircleEvaluation, PolyOps};
+use crate::prover::poly::circle::{CircleCoefficients, CircleEvaluation, PolyOps, domain_eval};
 use crate::prover::poly::twiddles::TwiddleTree;
 use crate::prover::secure_column::SecureColumnByCoords;
 
@@ -395,6 +395,54 @@ impl PolyOps for SimdBackend {
         pool: &BaseColumnPool<Self>,
     ) -> CircleCoefficients<Self> {
         interpolate_ex(eval, twiddles, Some(pool))
+    }
+
+    fn part_twiddles(
+        domain: CircleDomain,
+        log_parts: u32,
+        part: usize,
+        twiddles: &TwiddleTree<Self>,
+    ) -> TwiddleTree<Self> {
+        // The part's FFT layers are slices of the domain's: the slices `evaluate_into` hands the
+        // FFT of each subdomain, a part being a run of consecutive subdomains. They are laid out
+        // as `domain_line_twiddles_from_tree` reads a tree: the layer of size `2^i` at
+        // `[len - 2^(i + 1), len - 2^i)`.
+        let log_size = domain.log_size() - log_parts;
+        let part_domain = domain_eval::part_domain(domain, log_parts, part);
+        if log_size < MIN_FFT_LOG_SIZE {
+            return domain_eval::part_twiddles_by_precompute(domain, log_parts, part);
+        }
+        let layers = domain_line_twiddles_from_tree(domain, &twiddles.twiddles);
+        let len = 1 << (log_size - 1);
+        let mut part_twiddles = vec![0; len];
+        for (layer, twiddles) in layers.iter().enumerate().take(log_size as usize - 1) {
+            let size = 1 << (log_size - 2 - layer as u32);
+            let start = len - 2 * size;
+            part_twiddles[start..start + size]
+                .copy_from_slice(&twiddles[part * size..(part + 1) * size]);
+        }
+        TwiddleTree {
+            root_coset: part_domain.half_coset,
+            twiddles: part_twiddles,
+            itwiddles: vec![],
+        }
+    }
+
+    fn eval_at_domain_indices(
+        poly: &CircleCoefficients<Self>,
+        domain: CircleDomain,
+        indices: &[usize],
+    ) -> Vec<BaseField> {
+        if poly.log_size() <= domain_eval::LOG_GROUP_COEFFS {
+            return domain_eval::eval_at_domain_indices_by_points(poly, domain, indices);
+        }
+        domain_eval::eval_at_domain_indices(
+            poly.log_size(),
+            &poly.coeffs.data,
+            |point| Self::generate_evaluation_mappings(point, poly.log_size()),
+            domain,
+            indices,
+        )
     }
 
     fn eval_at_point(

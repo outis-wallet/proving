@@ -32,6 +32,12 @@ pub struct SimdDomainEvaluator<'a> {
     pub domain_log_size: u32,
     pub eval_domain_log_size: u32,
     pub logup: LogupAtRow<Self>,
+    /// The index in the evaluation domain of the first row of `trace_eval`: nonzero when the
+    /// columns hold one part of the evaluation domain (see [`Self::in_part`]).
+    pub row_base: usize,
+    /// If not empty, the columns on every part of the evaluation domain, `trace_eval` being those
+    /// on the part of `vec_row` (see [`Self::in_part`]).
+    pub parts: &'a [TreeVec<Vec<&'a CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>>],
 }
 impl<'a> SimdDomainEvaluator<'a> {
     pub fn new(
@@ -56,7 +62,22 @@ impl<'a> SimdDomainEvaluator<'a> {
             domain_log_size,
             eval_domain_log_size: eval_log_size,
             logup: LogupAtRow::new(INTERACTION_TRACE_IDX, claimed_sum, log_size),
+            row_base: 0,
+            parts: &[],
         }
+    }
+
+    /// Sets the columns to hold the evaluation domain in parts of the trace domain's size: `parts`
+    /// holds the columns on every part, and `trace_eval` those on the part of the rows from
+    /// `row_base` on, which `vec_row` then indexes. A row at an offset reads its part's columns.
+    pub const fn in_part(
+        mut self,
+        row_base: usize,
+        parts: &'a [TreeVec<Vec<&'a CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>>],
+    ) -> Self {
+        self.row_base = row_base;
+        self.parts = parts;
+        self
     }
 
     /// Emit a pair's relation in Horner form, avoiding one secure-field product.
@@ -107,12 +128,17 @@ impl EvalAtRow for SimdDomainEvaluator<'_> {
             // at the bit-reversed natural order index at an offset.
             VeryPackedBaseField::from_array(std::array::from_fn(|i| {
                 let row_index = offset_bit_reversed_circle_domain_index(
-                    (self.vec_row << (LOG_N_LANES + LOG_N_VERY_PACKED_ELEMS)) + i,
+                    self.row_base + (self.vec_row << (LOG_N_LANES + LOG_N_VERY_PACKED_ELEMS)) + i,
                     self.domain_log_size,
                     self.eval_domain_log_size,
                     off,
                 );
-                self.trace_eval[interaction][col_index].at(row_index)
+                if self.parts.is_empty() {
+                    return self.trace_eval[interaction][col_index].at(row_index);
+                }
+                let part = row_index >> self.domain_log_size;
+                self.parts[part][interaction][col_index]
+                    .at(row_index - (part << self.domain_log_size))
             }))
         })
     }

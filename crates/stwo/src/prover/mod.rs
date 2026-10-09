@@ -7,7 +7,7 @@ use crate::core::fields::qm31::{SECURE_EXTENSION_DEGREE, SecureField};
 use crate::core::pcs::utils::InvalidLiftingLogSizeError;
 use crate::core::proof::{ExtendedStarkProof, StarkProof};
 use crate::core::verifier::PREPROCESSED_TRACE_IDX;
-use crate::prover::backend::BackendForChannel;
+use crate::prover::backend::{BackendForChannel, Column};
 
 mod air;
 pub use air::component_prover::{ComponentProver, ComponentProvers, Poly, Trace};
@@ -53,11 +53,22 @@ pub fn prove_ex<B: BackendForChannel<MC>, MC: MerkleChannel>(
     let span1 =
         span!(Level::INFO, "Generation", class = "CompositionPolynomialGeneration").entered();
 
-    let composition_poly = component_provers.compute_composition_polynomial(
+    // A column that holds only its first stripe (see `CommitmentTreeProver::new_striped`) holds
+    // less than constraint evaluation reads: each component then evaluates the rest part by part,
+    // and the components run one at a time, so that only one component's parts are held at once.
+    let log_blowup_factor = commitment_scheme.config.fri_config.log_blowup_factor;
+    let evaluation_mode = component_provers.evaluation_mode(log_blowup_factor);
+    let one_component_at_a_time = trace
+        .polys
+        .iter()
+        .flatten()
+        .any(|poly| poly.evals.values.len() < poly.evals.domain.size());
+    let composition_poly = component_provers.compute_composition_polynomial_in_mode(
         random_coeff,
         &trace,
         commitment_scheme.twiddles,
-        commitment_scheme.config.fri_config.log_blowup_factor,
+        evaluation_mode,
+        one_component_at_a_time,
     );
     span1.exit();
 

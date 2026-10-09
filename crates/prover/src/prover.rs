@@ -196,6 +196,7 @@ where
         interaction_generator,
         prover_params,
         pcs_config,
+        false,
     )
 }
 
@@ -239,6 +240,7 @@ where
         interaction_generator,
         prover_params,
         pcs_config,
+        true,
     )
 }
 
@@ -252,6 +254,7 @@ fn prove_cairo_common<'a, MC: MerkleChannel>(
     interaction_generator: CairoInteractionClaimGenerator,
     prover_params: ProverParameters,
     pcs_config: PcsConfig,
+    bounded_memory: bool,
 ) -> Result<CairoProof<MC::H>, ProvingError>
 where
     SimdBackend: BackendForChannel<MC>,
@@ -281,6 +284,12 @@ where
     );
     if store_polynomials_coefficients {
         commitment_scheme.set_store_polynomials_coefficients();
+    }
+    // The prover with precomputes, which a long-lived prover runs proof after proof, trades time
+    // for memory: every committed column keeps only its first stripe, and what else is read of it
+    // is evaluated from that stripe. `prove_cairo` keeps every evaluation.
+    if bounded_memory {
+        commitment_scheme.set_stripe_residency();
     }
 
     // Add the preprocessed trace commitment that was computed earlier to the commitment scheme.

@@ -65,9 +65,7 @@ use stwo_cairo_prover::witness::preprocessed_trace::gen_trace;
 use tempfile::NamedTempFile;
 use tracing::{Level, info, span};
 
-use crate::consts::{
-    CAIRO_PROVER_PARAMS, CAIRO_RUN_CONFIG, CIRCUIT_STORE_POLYNOMIALS_COEFFICIENTS,
-};
+use crate::consts::{CAIRO_PROVER_PARAMS, CAIRO_RUN_CONFIG};
 
 /// The precomputes of a prover process.
 ///
@@ -182,6 +180,7 @@ pub fn prepare_recursive_prover_precomputes()
     let _span = span!(Level::INFO, "prepare_privacy_recursiveprover_precomputes").entered();
 
     let cairo_verifier_config = get_cairo_verifier_config()?;
+    // The preprocessed circuit is built below, concurrently with the Cairo side.
     let circuit_config =
         get_recursive_circuit_config(&PRIVACY_RECURSION_CIRCUIT_PREPROCESSED_ROOT)?;
     let proof_config = get_proof_config(&PRIVACY_RECURSION_CIRCUIT_PREPROCESSED_ROOT)?;
@@ -223,12 +222,12 @@ pub fn prepare_recursive_prover_precomputes()
                 info!("Prepare the cairo prover preprocessed tree");
                 let cairo_preprocessed_trace_polys =
                     SimdBackend::interpolate_columns(cairo_preprocessed_evals, &twiddles);
+                // Committed as the Cairo prover commits its own trees: only the first stripe stays.
                 let cairo_preprocessed_tree =
-                    CommitmentTreeProver::<SimdBackend, Blake2sM31MerkleChannel>::new(
+                    CommitmentTreeProver::<SimdBackend, Blake2sM31MerkleChannel>::new_striped(
                         cairo_preprocessed_trace_polys,
                         CAIRO_PCS_CONFIG.fri_config.log_blowup_factor,
                         &twiddles,
-                        CAIRO_PROVER_PARAMS.store_polynomials_coefficients,
                         cairo_lifting_log_size,
                         &base_column_pool,
                     );
@@ -249,11 +248,11 @@ pub fn prepare_recursive_prover_precomputes()
             let circuit_preprocessed_trace = preprocessed_trace.get_trace::<SimdBackend>();
             let circuit_preprocessed_trace_polys =
                 SimdBackend::interpolate_columns(circuit_preprocessed_trace, &twiddles);
-            CommitmentTreeProver::<SimdBackend, Blake2sM31MerkleChannel>::new(
+            // Committed as the circuit prover commits its own trees: only the first stripe stays.
+            CommitmentTreeProver::<SimdBackend, Blake2sM31MerkleChannel>::new_striped(
                 circuit_preprocessed_trace_polys,
                 CIRCUIT_FRI_CONFIG.log_blowup_factor,
                 &twiddles,
-                CIRCUIT_STORE_POLYNOMIALS_COEFFICIENTS,
                 preprocessed_lifting_log_size,
                 &base_column_pool,
             )

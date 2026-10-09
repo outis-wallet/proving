@@ -1,8 +1,10 @@
+pub(crate) mod domain_eval;
 mod evaluation;
 mod ops;
 mod poly;
 mod secure_poly;
 
+pub use domain_eval::part_domain;
 pub use evaluation::{CircleEvaluation, CosetSubEvaluation};
 pub use ops::PolyOps;
 pub use poly::CircleCoefficients;

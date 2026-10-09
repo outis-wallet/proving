@@ -134,6 +134,10 @@ where
         base_column_pool,
     );
 
+    // Every committed column keeps only its first stripe; what else is read of it is evaluated from
+    // that stripe.
+    commitment_scheme.set_stripe_residency();
+
     // Grab the preprocessed root for the circuit hash before it is consumed by `commit_tree` below.
     let preprocessed_root: Blake2sHash = preprocessed_tree.commitment.root().into();
 

@@ -107,6 +107,145 @@ impl<B: MerkleOpsLifted<H>, H: MerkleHasherLifted> MerkleProverLifted<B, H> {
         self.decommit_impl(query_positions, columns, true)
     }
 
+    /// [`Self::decommit`] for columns that are not held in full: `value_at(column, index)` is the
+    /// value of column `column`, of log size `column_log_sizes[column]`, at `index`, and is asked
+    /// only for the indices that the queried rows, and the leaves the omitted layers are
+    /// recomputed from, read (see [`Self::decommit_indices`]). The result is the one
+    /// [`Self::decommit`] returns for the full columns.
+    pub fn decommit_from_values(
+        &self,
+        query_positions: &[usize],
+        column_log_sizes: &[u32],
+        value_at: impl Fn(usize, usize) -> BaseField + Sync,
+    ) -> (ColumnVec<Vec<BaseField>>, ExtendedMerkleDecommitmentLifted<H>) {
+        let mut decommitment = MerkleDecommitmentLifted::<H>::default();
+        let mut all_node_values: Vec<HashMap<usize, <H as MerkleHasherLifted>::Hash>> = vec![];
+
+        let max_log_size = self.layers.len() - 1;
+        let index_in = |log_size: u32, position: usize| {
+            let shift = max_log_size - log_size as usize;
+            (position >> (shift + 1) << 1) + (position & 1)
+        };
+        let queried_values: ColumnVec<Vec<BaseField>> = column_log_sizes
+            .iter()
+            .enumerate()
+            .map(|(column, &log_size)| {
+                query_positions
+                    .iter()
+                    .map(|&pos| value_at(column, index_in(log_size, pos)))
+                    .collect()
+            })
+            .collect();
+
+        let mut prev_layer_queries: Vec<usize> =
+            query_positions.iter().copied().sorted().dedup().collect();
+        let n_omitted_layers =
+            self.layers.iter().rev().take_while(|layer| layer.is_empty()).count();
+        let mut omitted_layers: Vec<HashMap<usize, H::Hash>> = vec![];
+        if n_omitted_layers > 0 && !prev_layer_queries.is_empty() {
+            // The leaves of the aligned blocks around the queries, hashed as the verifier hashes a
+            // leaf: the row's values in the order of increasing column log size.
+            let sorted_columns =
+                (0..column_log_sizes.len()).sorted_by_key(|&c| column_log_sizes[c]).collect_vec();
+            let leaf_positions =
+                Self::omitted_leaf_positions(&prev_layer_queries, n_omitted_layers);
+            let leaves: Vec<H::Hash> = parallel_iter!(&leaf_positions)
+                .map(|&position| {
+                    let row = sorted_columns
+                        .iter()
+                        .map(|&c| value_at(c, index_in(column_log_sizes[c], position)))
+                        .collect_vec();
+                    let mut hasher = H::default();
+                    hasher.update_leaf(&row);
+                    hasher.finalize()
+                })
+                .collect();
+            omitted_layers.push(HashMap::from_iter(leaf_positions.iter().copied().zip(leaves)));
+            for level in 1..n_omitted_layers {
+                let prev = &omitted_layers[level - 1];
+                let nodes = prev
+                    .keys()
+                    .map(|position| position >> 1)
+                    .sorted()
+                    .dedup()
+                    .map(|position| {
+                        let children = (prev[&(2 * position)], prev[&(2 * position + 1)]);
+                        (position, H::hash_children(children))
+                    })
+                    .collect();
+                omitted_layers.push(nodes);
+            }
+        }
+
+        for layer_log_size in (0..self.layers.len() - 1).rev() {
+            let mut all_node_values_for_layer =
+                HashMap::<usize, <H as MerkleHasherLifted>::Hash>::new();
+            let mut curr_layer_queries: Vec<usize> = vec![];
+            let prev_layer_hashes = self.layers.get(layer_log_size + 1).unwrap();
+            let prev_layer_level = max_log_size - (layer_log_size + 1);
+            let prev_layer_hash_at = |index: usize| {
+                if prev_layer_level < n_omitted_layers {
+                    omitted_layers[prev_layer_level][&index]
+                } else {
+                    prev_layer_hashes.at(index)
+                }
+            };
+            for queries_chunk in prev_layer_queries.as_slice().chunk_by(|a, b| a ^ 1 == *b) {
+                let first = queries_chunk[0];
+                if queries_chunk.len() == 1 {
+                    decommitment.hash_witness.push(prev_layer_hash_at(first ^ 1))
+                }
+                let curr_index = first >> 1;
+                curr_layer_queries.push(curr_index);
+                all_node_values_for_layer
+                    .insert(2 * curr_index, prev_layer_hash_at(2 * curr_index));
+                all_node_values_for_layer
+                    .insert(2 * curr_index + 1, prev_layer_hash_at(2 * curr_index + 1));
+            }
+            prev_layer_queries = curr_layer_queries;
+            all_node_values.push(all_node_values_for_layer);
+        }
+        (
+            queried_values,
+            ExtendedMerkleDecommitmentLifted {
+                decommitment,
+                aux: MerkleDecommitmentLiftedAux { all_node_values },
+            },
+        )
+    }
+
+    /// The indices of a column of log size `log_size` that [`Self::decommit_from_values`] reads for
+    /// `query_positions`, sorted and deduplicated.
+    pub fn decommit_indices(&self, query_positions: &[usize], log_size: u32) -> Vec<usize> {
+        let max_log_size = self.layers.len() - 1;
+        let shift = max_log_size - log_size as usize;
+        let queries: Vec<usize> = query_positions.iter().copied().sorted().dedup().collect();
+        let n_omitted_layers =
+            self.layers.iter().rev().take_while(|layer| layer.is_empty()).count();
+        let positions = if n_omitted_layers > 0 && !queries.is_empty() {
+            Self::omitted_leaf_positions(&queries, n_omitted_layers)
+        } else {
+            queries
+        };
+        positions
+            .into_iter()
+            .map(|position| (position >> (shift + 1) << 1) + (position & 1))
+            .sorted()
+            .dedup()
+            .collect()
+    }
+
+    /// For sorted and deduplicated `query_positions`, the leaves of the aligned blocks of
+    /// `1 << n_omitted` leaves around them, as [`Self::recompute_omitted_layers`] reads them.
+    fn omitted_leaf_positions(query_positions: &[usize], n_omitted: usize) -> Vec<usize> {
+        query_positions
+            .iter()
+            .map(|position| position >> n_omitted)
+            .dedup()
+            .flat_map(|block| (block << n_omitted)..((block + 1) << n_omitted))
+            .collect()
+    }
+
     fn decommit_impl(
         &self,
         query_positions: &[usize],

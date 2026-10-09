@@ -14,9 +14,9 @@ use stwo::prover::backend::simd::SimdBackend;
 use stwo::prover::backend::simd::column::VeryPackedSecureColumnByCoords;
 use stwo::prover::backend::simd::m31::LOG_N_LANES;
 use stwo::prover::backend::simd::very_packed_m31::{LOG_N_VERY_PACKED_ELEMS, VeryPackedBaseField};
-use stwo::prover::backend::{Backend, CpuBackend};
+use stwo::prover::backend::{Backend, Column, CpuBackend};
 use stwo::prover::poly::BitReversedOrder;
-use stwo::prover::poly::circle::CircleEvaluation;
+use stwo::prover::poly::circle::{CircleEvaluation, PolyOps, part_domain};
 use stwo::prover::secure_column::SecureColumnByCoords;
 use stwo::prover::{ComponentProver, DomainEvaluationAccumulator, EvaluationMode, Poly, Trace};
 use tracing::{Level, span};
@@ -32,6 +32,8 @@ struct ConstraintQuotientInputs<'a, B: Backend> {
     trace_domain: CanonicCoset,
     trace: TreeVec<Vec<Cow<'a, CircleEvaluation<B, BaseField, BitReversedOrder>>>>,
     denom_inv: Vec<BaseField>,
+    /// The component's committed columns, in the order of `trace`.
+    polys: TreeVec<Vec<&'a Poly<B>>>,
 }
 
 /// Prepares trace evaluations: borrows directly (subdomain) or extends to eval domain.
@@ -49,6 +51,10 @@ fn get_trace_columns<'a, B: Backend>(
             //
             // Ideally we'd slice to just those indices, but the type system requires
             // borrowing the entire evaluation.
+            //
+            // A committed column may hold only a prefix of those (see
+            // `CommitmentTreeProver::retain_prefixes`); the SIMD evaluation then evaluates the rest
+            // part by part, see `evaluate_in_parts`.
             component_polys.map_cols(|c| Cow::Borrowed(&c.evals))
         }
         EvaluationMode::ExtendToEvalDomain => {
@@ -87,6 +93,7 @@ fn get_constraint_quotient_inputs<'a, E: FrameworkEval, B: Backend>(
         .iter()
         .map(|idx| &trace.polys[PREPROCESSED_TRACE_IDX][*idx])
         .collect();
+    let polys = component_polys.as_cols_ref().map_cols(|poly| **poly);
 
     let eval_domain = match mode {
         EvaluationMode::SubDomain { log_expansion } => {
@@ -105,7 +112,74 @@ fn get_constraint_quotient_inputs<'a, E: FrameworkEval, B: Backend>(
         .collect_vec();
     bit_reverse(&mut denom_inv);
 
-    ConstraintQuotientInputs { eval_domain, trace_domain, trace, denom_inv }
+    ConstraintQuotientInputs { eval_domain, trace_domain, trace, denom_inv, polys }
+}
+
+/// The columns of a component on part `part` of its constraint evaluation domain split into parts
+/// of the size of its trace domain, for columns that hold only a prefix of the evaluation domain
+/// (see `CommitmentTreeProver::retain_prefixes`): part 0 is borrowed (every committed column holds
+/// at least its own size), a further part a column holds is copied out, and the others are
+/// evaluated from the column's coefficients. In bit-reversed order, part `part` of the evaluation
+/// domain, the first `2^log_n_parts` parts of the committed domain, is the part `part` of the
+/// committed domain split into parts of the column's size.
+fn trace_part<'a>(
+    trace: &'a TreeVec<Vec<Cow<'a, CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>>>,
+    polys: &TreeVec<Vec<&Poly<SimdBackend>>>,
+    trace_domain: CanonicCoset,
+    part: usize,
+) -> TreeVec<Vec<Cow<'a, CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>>> {
+    let part_size = trace_domain.size();
+    let committed_log_size = polys
+        .iter()
+        .flatten()
+        .map(|poly| poly.evals.domain.log_size())
+        .dedup()
+        .exactly_one()
+        .unwrap_or_else(|_| panic!("a component's columns have the size of its trace domain"));
+    let committed_domain = CanonicCoset::new(committed_log_size).circle_domain();
+    let domain = part_domain(committed_domain, committed_log_size - trace_domain.log_size(), part);
+    let twiddles = SimdBackend::precompute_twiddles(domain.half_coset);
+    // The interpolation twiddles of the first part, from which a column that holds only its first
+    // stripe (see `CommitmentTreeProver::new_striped`) is interpolated again.
+    let first_part = part_domain(committed_domain, committed_log_size - trace_domain.log_size(), 0);
+    let stripe_twiddles = (part > 0).then(|| SimdBackend::precompute_twiddles(first_part.half_coset));
+    let evaluate = |(column, poly): (
+        &'a Cow<'a, CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>,
+        &&Poly<SimdBackend>,
+    )| {
+        let held = column.values.len();
+        if part == 0 {
+            assert!(held >= part_size, "a committed column holds at least its own size");
+            return Cow::Borrowed(column.as_ref());
+        }
+        if held >= (part + 1) * part_size {
+            let values = column.values.to_cpu()[part * part_size..(part + 1) * part_size].to_vec();
+            return Cow::Owned(CircleEvaluation::new(domain, values.into_iter().collect()));
+        }
+        let evaluation = match &poly.coeffs {
+            Some(coeffs) => coeffs.evaluate_with_twiddles(domain, &twiddles),
+            None => poly
+                .stripe_coefficients(stripe_twiddles.as_ref().unwrap())
+                .evaluate_with_twiddles(domain, &twiddles),
+        };
+        Cow::Owned(evaluation)
+    };
+    TreeVec(
+        trace
+            .iter()
+            .zip(polys.iter())
+            .map(|(columns, polys)| {
+                #[cfg(feature = "parallel")]
+                {
+                    columns.par_iter().zip(polys.par_iter()).map(evaluate).collect()
+                }
+                #[cfg(not(feature = "parallel"))]
+                {
+                    columns.iter().zip(polys.iter()).map(evaluate).collect()
+                }
+            })
+            .collect(),
+    )
 }
 
 impl<E: FrameworkEval + Sync> ComponentProver<SimdBackend> for FrameworkComponent<E> {
@@ -118,7 +192,7 @@ impl<E: FrameworkEval + Sync> ComponentProver<SimdBackend> for FrameworkComponen
             return;
         }
 
-        let ConstraintQuotientInputs { eval_domain, trace_domain, trace, denom_inv } =
+        let ConstraintQuotientInputs { eval_domain, trace_domain, trace, denom_inv, polys } =
             get_constraint_quotient_inputs(self, trace, evaluation_accumulator.evaluation_mode());
 
         let [mut accum] =
@@ -128,8 +202,10 @@ impl<E: FrameworkEval + Sync> ComponentProver<SimdBackend> for FrameworkComponen
         let _span =
             span!(Level::INFO, "Constraint point-wise eval", class = "ConstraintEval").entered();
 
+        let holds_eval_domain = trace.iter().flatten().all(|c| c.values.len() >= eval_domain.size());
         // Fall back to CPU if the trace is too small.
         if trace_domain.log_size() < LOG_N_LANES + LOG_N_VERY_PACKED_ELEMS {
+            assert!(holds_eval_domain, "a small committed column holds the evaluation domain");
             let trace_cols = trace.as_cols_ref().map_cols(|c| c.to_cpu());
             let trace_cols = trace_cols.as_cols_ref();
             *accum.col = SecureColumnByCoords::from_cpu(accumulate_pointwise_cpu(
@@ -146,50 +222,93 @@ impl<E: FrameworkEval + Sync> ComponentProver<SimdBackend> for FrameworkComponen
 
         let col = unsafe { VeryPackedSecureColumnByCoords::transform_under_mut(accum.col) };
 
-        let range = 0..(1 << (eval_domain.log_size() - LOG_N_LANES - LOG_N_VERY_PACKED_ELEMS));
-
-        #[cfg(not(feature = "parallel"))]
-        let iter = range.step_by(CHUNK_SIZE).zip(col.chunks_mut(CHUNK_SIZE));
-
-        #[cfg(feature = "parallel")]
-        let iter = range.into_par_iter().step_by(CHUNK_SIZE).zip(col.par_chunks_mut(CHUNK_SIZE));
-
         // Define any `self` values outside the loop to prevent the compiler thinking there is a
         // `Sync` requirement on `Self`.
         let self_eval = &self.eval;
         let self_claimed_sum = self.claimed_sum;
-        // The column references are the same for every row; build them once.
-        let trace_cols = trace.as_cols_ref().map_cols(|c| c.as_ref());
-        let trace_cols = &trace_cols;
+        let random_coeff_powers = &accum.random_coeff_powers;
 
-        iter.for_each(|(chunk_idx, mut chunk)| {
-            for idx_in_chunk in 0..CHUNK_SIZE {
-                let vec_row = chunk_idx * CHUNK_SIZE + idx_in_chunk;
-                // Evaluate constrains at row.
-                let eval = SimdDomainEvaluator::new(
-                    trace_cols,
-                    vec_row,
-                    &accum.random_coeff_powers,
-                    trace_domain.log_size(),
-                    eval_domain.log_size(),
-                    self_eval.log_size(),
-                    self_claimed_sum,
-                );
-                let row_res = self_eval.evaluate(eval).row_res;
+        // Evaluates the `n_vec_rows` vector rows of the evaluation domain from `vec_start` on, which
+        // the columns of `trace_cols` hold from their first row on; `parts` are the columns on
+        // every part of the evaluation domain if it is evaluated in parts.
+        type Columns<'c> =
+            TreeVec<Vec<&'c CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>>;
+        let mut evaluate_rows =
+            |trace_cols: &Columns<'_>, vec_start: usize, n_vec_rows: usize, parts: &[Columns<'_>]| {
+                let range = vec_start..vec_start + n_vec_rows;
+                let row_base = vec_start << (LOG_N_LANES + LOG_N_VERY_PACKED_ELEMS);
 
-                // Finalize row.
-                unsafe {
-                    let row_denom_inv = VeryPackedBaseField::broadcast(
-                        denom_inv[vec_row
-                            >> (trace_domain.log_size() - LOG_N_LANES - LOG_N_VERY_PACKED_ELEMS)],
-                    );
-                    chunk.set_packed(
-                        idx_in_chunk,
-                        chunk.packed_at(idx_in_chunk) + row_res * row_denom_inv,
-                    )
-                }
+                #[cfg(not(feature = "parallel"))]
+                let iter = range
+                    .step_by(CHUNK_SIZE)
+                    .zip(col.chunks_mut(CHUNK_SIZE).skip(vec_start / CHUNK_SIZE));
+
+                #[cfg(feature = "parallel")]
+                let iter = range
+                    .into_par_iter()
+                    .step_by(CHUNK_SIZE)
+                    .zip(col.par_chunks_mut(CHUNK_SIZE).skip(vec_start / CHUNK_SIZE));
+
+                iter.for_each(|(chunk_idx, mut chunk)| {
+                    for idx_in_chunk in 0..CHUNK_SIZE {
+                        let vec_row = chunk_idx * CHUNK_SIZE + idx_in_chunk;
+                        // Evaluate constrains at row.
+                        let eval = SimdDomainEvaluator::new(
+                            trace_cols,
+                            vec_row - vec_start,
+                            random_coeff_powers,
+                            trace_domain.log_size(),
+                            eval_domain.log_size(),
+                            self_eval.log_size(),
+                            self_claimed_sum,
+                        )
+                        .in_part(row_base, parts);
+                        let row_res = self_eval.evaluate(eval).row_res;
+
+                        // Finalize row.
+                        unsafe {
+                            let row_denom_inv = VeryPackedBaseField::broadcast(
+                                denom_inv[vec_row
+                                    >> (trace_domain.log_size()
+                                        - LOG_N_LANES
+                                        - LOG_N_VERY_PACKED_ELEMS)],
+                            );
+                            chunk.set_packed(
+                                idx_in_chunk,
+                                chunk.packed_at(idx_in_chunk) + row_res * row_denom_inv,
+                            )
+                        }
+                    }
+                });
+            };
+
+        if holds_eval_domain {
+            // The column references are the same for every row; build them once.
+            let trace_cols = trace.as_cols_ref().map_cols(|c| c.as_ref());
+            evaluate_rows(
+                &trace_cols,
+                0,
+                1 << (eval_domain.log_size() - LOG_N_LANES - LOG_N_VERY_PACKED_ELEMS),
+                &[],
+            );
+        } else {
+            // Columns that hold only a prefix of the evaluation domain: their evaluations on the
+            // other parts of the trace domain's size are evaluated, the first part being the prefix
+            // every column holds, and the domain is evaluated part by part.
+            let n_parts = 1 << (eval_domain.log_size() - trace_domain.log_size());
+            let part_traces = {
+                let _span = span!(Level::INFO, "Constraint part extension").entered();
+                (0..n_parts).map(|part| trace_part(&trace, &polys, trace_domain, part)).collect_vec()
+            };
+            let parts = part_traces
+                .iter()
+                .map(|part_trace| part_trace.as_cols_ref().map_cols(|c| c.as_ref()))
+                .collect_vec();
+            let n_vec_rows = 1 << (trace_domain.log_size() - LOG_N_LANES - LOG_N_VERY_PACKED_ELEMS);
+            for (part, trace_cols) in parts.iter().enumerate() {
+                evaluate_rows(trace_cols, part * n_vec_rows, n_vec_rows, &parts);
             }
-        });
+        }
     }
 }
 
@@ -203,8 +322,12 @@ impl<E: FrameworkEval + Sync> ComponentProver<CpuBackend> for FrameworkComponent
             return;
         }
 
-        let ConstraintQuotientInputs { eval_domain, trace_domain, trace, denom_inv } =
+        let ConstraintQuotientInputs { eval_domain, trace_domain, trace, denom_inv, .. } =
             get_constraint_quotient_inputs(self, trace, evaluation_accumulator.evaluation_mode());
+        assert!(
+            trace.iter().flatten().all(|c| c.values.len() >= eval_domain.size()),
+            "a committed column does not hold the constraint evaluation subdomain"
+        );
 
         let [mut accum] =
             evaluation_accumulator.columns([(eval_domain.log_size(), self.n_constraints())]);

@@ -63,6 +63,28 @@ pub trait PolyOps: ColumnOps<BaseField> + ColumnOps<SecureField> + Sized {
         iter.map(|eval| Self::interpolate_pooled(eval, twiddles, pool)).collect()
     }
 
+    /// Twiddles with which [`Self::evaluate_into`] evaluates on the part `part` of `domain` split
+    /// into `1 << log_parts` parts (see [`super::domain_eval::part_domain`]); `twiddles` are the
+    /// twiddles [`Self::evaluate_into`] takes for `domain`.
+    fn part_twiddles(
+        domain: CircleDomain,
+        log_parts: u32,
+        part: usize,
+        _twiddles: &TwiddleTree<Self>,
+    ) -> TwiddleTree<Self> {
+        super::domain_eval::part_twiddles_by_precompute(domain, log_parts, part)
+    }
+
+    /// Evaluates the polynomial at the points of `domain` at the bit-reversed positions `indices`:
+    /// the values that [`Self::evaluate`] on `domain` holds there.
+    fn eval_at_domain_indices(
+        poly: &CircleCoefficients<Self>,
+        domain: CircleDomain,
+        indices: &[usize],
+    ) -> Vec<BaseField> {
+        super::domain_eval::eval_at_domain_indices_by_points(poly, domain, indices)
+    }
+
     /// Evaluates the polynomial at a single point.
     /// Used by the [`CircleCoefficients::eval_at_point()`] function.
     fn eval_at_point(

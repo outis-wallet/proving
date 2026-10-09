@@ -9,9 +9,11 @@ use crate::core::pcs::TreeVec;
 use crate::core::poly::circle::CircleDomain;
 use crate::prover::CirclePoint;
 use crate::prover::air::accumulation::{DomainEvaluationAccumulator, EvaluationMode};
-use crate::prover::backend::Backend;
+use crate::prover::backend::{Backend, Column};
 use crate::prover::poly::BitReversedOrder;
-use crate::prover::poly::circle::{CircleCoefficients, CircleEvaluation, SecureCirclePoly};
+use crate::prover::poly::circle::{
+    CircleCoefficients, CircleEvaluation, SecureCirclePoly, part_domain,
+};
 use crate::prover::poly::twiddles::TwiddleTree;
 use crate::prover::secure_column::SecureColumnByCoords;
 
@@ -67,6 +69,23 @@ impl<B: Backend> Poly<B> {
         }
     }
 
+    /// The domain of the evaluations the column holds: its whole domain, or, for a column that
+    /// holds only its first stripe (see `CommitmentTreeProver::new_striped`), that stripe.
+    pub fn stripe_domain(&self) -> CircleDomain {
+        let log_parts = self.evals.domain.log_size() - self.evals.values.len().ilog2();
+        part_domain(self.evals.domain, log_parts, 0)
+    }
+
+    /// The coefficients, interpolated from the evaluations the column holds (see
+    /// [`Self::stripe_domain`]); `twiddles` are the ones of the stripe domain's half coset.
+    pub fn stripe_coefficients(&self, twiddles: &TwiddleTree<B>) -> CircleCoefficients<B> {
+        let evals = CircleEvaluation::<B, BaseField, BitReversedOrder>::new(
+            self.stripe_domain(),
+            self.evals.values.clone(),
+        );
+        B::interpolate(evals, twiddles)
+    }
+
     pub fn get_evaluation_on_domain(
         &self,
         domain: CircleDomain,
@@ -99,10 +118,35 @@ impl<B: Backend> ComponentProvers<'_, B> {
         twiddles: &TwiddleTree<B>,
         log_blowup_factor: u32,
     ) -> SecureCirclePoly<B> {
-        let total_constraints: usize = self.components.iter().map(|c| c.n_constraints()).sum();
+        let evaluation_mode = self.evaluation_mode(log_blowup_factor);
+        self.compute_composition_polynomial_in_mode(
+            random_coeff,
+            trace,
+            twiddles,
+            evaluation_mode,
+            false,
+        )
+    }
+
+    /// The evaluation mode [`Self::compute_composition_polynomial`] infers from the components.
+    pub fn evaluation_mode(&self, log_blowup_factor: u32) -> EvaluationMode {
         let components: Vec<&dyn Component> =
             self.components.iter().map(|c| *c as &dyn Component).collect();
-        let evaluation_mode = EvaluationMode::infer(&components, log_blowup_factor);
+        EvaluationMode::infer(&components, log_blowup_factor)
+    }
+
+    /// [`Self::compute_composition_polynomial`] in the given evaluation mode, the components one
+    /// at a time if `one_component_at_a_time`. The composition polynomial is the same in every
+    /// mode that applies.
+    pub fn compute_composition_polynomial_in_mode(
+        &self,
+        random_coeff: SecureField,
+        trace: &Trace<'_, B>,
+        twiddles: &TwiddleTree<B>,
+        evaluation_mode: EvaluationMode,
+        one_component_at_a_time: bool,
+    ) -> SecureCirclePoly<B> {
+        let total_constraints: usize = self.components.iter().map(|c| c.n_constraints()).sum();
         let max_log_size = self.components().composition_log_degree_bound();
 
         // Each component accumulates into the column of its evaluation domain's size, with the
@@ -150,8 +194,13 @@ impl<B: Backend> ComponentProvers<'_, B> {
         };
         #[cfg(not(feature = "parallel"))]
         let group_results: Vec<_> = groups.iter().map(run_group).collect();
+        // A component that evaluates its columns holds those evaluations while it runs: with
+        // `one_component_at_a_time` the groups go one after the other, so that only one
+        // component's evaluations are held at a time. A component's evaluation is parallel itself.
         #[cfg(feature = "parallel")]
-        let group_results: Vec<_> = {
+        let group_results: Vec<_> = if one_component_at_a_time {
+            groups.iter().map(run_group).collect()
+        } else {
             use rayon::prelude::*;
             groups.par_iter().map(run_group).collect()
         };
