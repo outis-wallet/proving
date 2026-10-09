@@ -914,9 +914,10 @@ const HUGE_PAGE: usize = 1 << 21;
 const PROT_READ: core::ffi::c_int = 1;
 const PROT_WRITE: core::ffi::c_int = 2;
 const MAP_PRIVATE: core::ffi::c_int = 2;
-#[cfg(target_os = "linux")]
+// Android is Linux underneath: its target_os is "android", but the flag is Linux's.
+#[cfg(any(target_os = "linux", target_os = "android"))]
 const MAP_ANONYMOUS: core::ffi::c_int = 0x20;
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
 const MAP_ANONYMOUS: core::ffi::c_int = 0x1000;
 
 /// The idle blocks, as addresses in per-class slots, and their total size.
