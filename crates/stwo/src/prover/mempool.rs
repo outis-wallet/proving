@@ -91,8 +91,12 @@ impl<B: ColumnOps<BaseField>> BaseColumnPool<B> {
         }
         // Fresh buffers close to the largest size seen are allocated with room for the next
         // size: the capacity is only reserved, its pages are not touched before they are used.
-        let capacity_log_size =
-            if log_size + 3 >= largest { (log_size + 1).min(largest) } else { log_size };
+        // Not on wasm, though: there reserved capacity is memory taken, whether touched or not.
+        let capacity_log_size = if log_size + 3 >= largest && !cfg!(target_arch = "wasm32") {
+            (log_size + 1).min(largest)
+        } else {
+            log_size
+        };
         unsafe {
             let mut buffer = Col::<B, BaseField>::uninitialized(1 << capacity_log_size);
             if capacity_log_size > log_size && !buffer.truncate(1 << log_size) {

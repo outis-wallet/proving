@@ -1028,7 +1028,7 @@ impl LargeBlocks {
 /// The class of a block the cache serves, or `None` for one the system allocator serves.
 fn large_class(layout: Layout) -> Option<usize> {
     let size = layout.size();
-    if size < 1 << LARGE_MIN_LOG || size > 1 << LARGE_MAX_LOG || layout.align() > 4096 {
+    if size < 1 << LARGE_MIN_LOG || size as u64 > 1u64 << LARGE_MAX_LOG || layout.align() > 4096 {
         return None;
     }
     if size == 1 << LARGE_MIN_LOG {

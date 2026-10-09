@@ -565,7 +565,8 @@ impl<B: BackendForChannel<MC>, MC: MerkleChannel> CommitmentTreeProver<B, MC> {
 
         // The evaluations of every column on one stripe of its domain.
         let evaluate_stripe = |polynomials: &[CircleCoefficients<B>],
-                               stripe: usize|
+                               stripe: usize,
+                               reused: Vec<Option<Col<B, BaseField>>>|
          -> Vec<Col<B, BaseField>> {
             let stripe_twiddles: HashMap<u32, TwiddleTree<B>> = domains
                 .iter()
@@ -579,7 +580,12 @@ impl<B: BackendForChannel<MC>, MC: MerkleChannel> CommitmentTreeProver<B, MC> {
                 .collect();
             let buffers = domains
                 .iter()
-                .map(|domain| base_column_pool.take_or_alloc(domain.log_size() - log_blowup_factor))
+                .zip(reused)
+                .map(|(domain, reused)| {
+                    reused.unwrap_or_else(|| {
+                        base_column_pool.take_or_alloc(domain.log_size() - log_blowup_factor)
+                    })
+                })
                 .collect_vec();
             let evaluate =
                 |((poly, domain), buffer): ((&CircleCoefficients<B>, &CircleDomain), _)| {
@@ -614,10 +620,19 @@ impl<B: BackendForChannel<MC>, MC: MerkleChannel> CommitmentTreeProver<B, MC> {
         // The first stripe, the one that is kept, goes last: the coefficients go as soon as it is
         // evaluated, so that a column never holds more than its coefficients and one stripe, its
         // buffer passed on from stripe to stripe through the pool.
+        // Each column's buffer goes straight on to the column's next stripe. Going through the
+        // pool instead let columns of other sizes take (and grow) them in between, so every
+        // stripe allocated some buffers afresh while the pool filled with idle ones.
+        let no_buffers = || (0..n_columns).map(|_| None).collect_vec();
+        let mut reused = no_buffers();
         let mut polynomials = Some(polynomials);
         for stripe in (1..n_stripes).chain([0]) {
             let _span = span!(Level::INFO, "Extension and Merkle", stripe).entered();
-            let values = evaluate_stripe(polynomials.as_ref().unwrap(), stripe);
+            let values = evaluate_stripe(
+                polynomials.as_ref().unwrap(),
+                stripe,
+                std::mem::replace(&mut reused, no_buffers()),
+            );
             if stripe == 0 {
                 drop(polynomials.take());
             }
@@ -630,7 +645,7 @@ impl<B: BackendForChannel<MC>, MC: MerkleChannel> CommitmentTreeProver<B, MC> {
                 if whole[i] {
                     whole_stripes[i].push(column);
                 } else {
-                    base_column_pool.give_back(column.len().ilog2(), column);
+                    reused[i] = Some(column);
                 }
             }
         }

@@ -43,8 +43,8 @@ impl ClaimGenerator {
         // TODO(Ohad): remove.
         const RAYON_THREAD_STACK_SIZE: usize = 1024 * 1024 * 8;
         let pool =
-            rayon::ThreadPoolBuilder::new().stack_size(RAYON_THREAD_STACK_SIZE).build().unwrap();
-        let (trace, lookup_data, sub_component_inputs) = pool.install(|| {
+            rayon::ThreadPoolBuilder::new().stack_size(RAYON_THREAD_STACK_SIZE).build().ok();
+        let (trace, lookup_data, sub_component_inputs) = run_in(pool.as_ref(), || {
             write_trace_simd(
                 packed_inputs,
                 n_active_rows,
@@ -6188,5 +6188,13 @@ impl InteractionClaimGenerator {
         let (trace, claimed_sum) = logup_gen.finalize_last();
 
         (trace, InteractionClaim { claimed_sum })
+    }
+}
+
+/// Runs `f` in `pool`, or on the current thread where no thread pool can be built (WebAssembly).
+fn run_in<R: Send>(pool: Option<&rayon::ThreadPool>, f: impl FnOnce() -> R + Send) -> R {
+    match pool {
+        Some(pool) => pool.install(f),
+        None => f(),
     }
 }

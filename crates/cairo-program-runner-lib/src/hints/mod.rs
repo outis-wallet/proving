@@ -15,6 +15,8 @@ mod load_cairo_pie;
 mod mock_cairo_verifier_hints;
 mod pedersen_merkle_hints;
 mod privacy_simple_bootloader_hints;
+#[cfg(target_arch = "wasm32")]
+pub use privacy_simple_bootloader_hints::take_output_preimage_dump;
 mod program_hash;
 mod program_loader;
 mod select_builtins;

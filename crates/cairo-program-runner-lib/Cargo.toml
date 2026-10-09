@@ -21,7 +21,6 @@ num-traits.workspace = true
 regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-sonic-rs.workspace = true
 starknet-crypto.workspace = true
 starknet-types-core.workspace = true
 thiserror.workspace = true

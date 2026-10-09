@@ -379,8 +379,13 @@ fn build_privacy_bootloader_input(
 fn run_privacy_bootloader(pie: CairoPie) -> Result<(ProverInput, Vec<Felt>), Box<dyn Error>> {
     let _span = span!(Level::INFO, "get_prover_input").entered();
 
+    // wasm32-unknown-unknown has no file system: the dump hint keeps the preimage in memory.
+    #[cfg(not(target_arch = "wasm32"))]
     let output_preimage_file = NamedTempFile::new()?;
+    #[cfg(not(target_arch = "wasm32"))]
     let output_preimage_path = output_preimage_file.path();
+    #[cfg(target_arch = "wasm32")]
+    let output_preimage_path = Path::new("/privacy-bootloader-output-preimage.json");
     let bootloader_input = build_privacy_bootloader_input(pie, output_preimage_path);
     let bootloader_program = get_privacy_bootloader_program()?;
 
@@ -393,7 +398,11 @@ fn run_privacy_bootloader(pie: CairoPie) -> Result<(ProverInput, Vec<Felt>), Box
     )?;
 
     info!("Reading the bootloader output preimage");
+    #[cfg(not(target_arch = "wasm32"))]
     let output_preimage_content = read_to_string(output_preimage_path)?;
+    #[cfg(target_arch = "wasm32")]
+    let output_preimage_content = cairo_program_runner_lib::take_output_preimage_dump(output_preimage_path)
+        .ok_or("the bootloader dumped no output preimage")?;
     let output_preimage: Vec<Felt> = from_str(&output_preimage_content)?;
 
     info!("Adapting the runner output for the prover");

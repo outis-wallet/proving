@@ -45,6 +45,9 @@ pub fn dump_privacy_simple_bootloader_output_preimage(
     let json = serde_json::to_string_pretty(&elements).map_err(|e| {
         HintError::CustomHint(format!("Failed to serialize output preimage: {e}").into())
     })?;
+    #[cfg(target_arch = "wasm32")]
+    OUTPUT_PREIMAGE_DUMPS.lock().unwrap().push((dump_path, json));
+    #[cfg(not(target_arch = "wasm32"))]
     std::fs::write(&dump_path, json).map_err(|e| {
         HintError::CustomHint(
             format!("Failed to write output preimage to {dump_path:?}: {e}").into(),
@@ -52,6 +55,20 @@ pub fn dump_privacy_simple_bootloader_output_preimage(
     })?;
 
     Ok(())
+}
+
+/// wasm32-unknown-unknown has no file system, so there the output preimage dumps are kept here,
+/// keyed by their path.
+#[cfg(target_arch = "wasm32")]
+static OUTPUT_PREIMAGE_DUMPS: std::sync::Mutex<Vec<(PathBuf, String)>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// Takes the output preimage the bootloader dumped to `path` (wasm32 only).
+#[cfg(target_arch = "wasm32")]
+pub fn take_output_preimage_dump(path: &std::path::Path) -> Option<String> {
+    let mut dumps = OUTPUT_PREIMAGE_DUMPS.lock().unwrap();
+    let index = dumps.iter().position(|(dump_path, _)| dump_path == path)?;
+    Some(dumps.remove(index).1)
 }
 
 #[cfg(test)]

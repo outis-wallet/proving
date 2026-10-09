@@ -128,6 +128,6 @@ pub fn write_output_to_file(runner: &mut CairoRunner, output_path: PathBuf) -> a
                 .map_err(|_| anyhow::anyhow!("Failed to parse output line as Felt decimal: {line}"))
         })
         .collect::<Result<Vec<Felt252>, anyhow::Error>>()?;
-    std::fs::write(&output_path, sonic_rs::to_string_pretty(&output_lines)?)?;
+    std::fs::write(&output_path, serde_json::to_string_pretty(&output_lines)?)?;
     Ok(())
 }
