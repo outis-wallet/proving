@@ -1,7 +1,7 @@
 # Outis's branch of StarkWare's prover
 
 This is `starkware-libs/proving` at `2b495a36`, the revision the sequencer's
-`PRIVACY-0.14.4-RC.0` pins, plus five commits. The changes make the whole Starknet transaction
+`PRIVACY-0.14.4-RC.0` pins, plus six commits. The changes make the whole Starknet transaction
 proof small enough in memory for phones and browsers (wasm32, 4 GiB). They are used by
 [outis-wallet/prover](https://github.com/outis-wallet/prover), and run on outis.cash/prover and
 in the Outis Prover apps.
@@ -17,6 +17,7 @@ Proofs are byte-identical to the upstream prover's for the same input.
 | Build and run on wasm32-unknown-unknown | No file system, no sonic-rs, 32-bit `usize`, real memory for reserved capacity | Outis |
 | Android: the large-block cache maps with Linux's MAP_ANONYMOUS | `target_os = "android"` took macOS's flag | Outis |
 | Witness: no heap Vec per row in the logup combines | `verify_bitwise_xor_12` (Cairo and circuit) and `memory_id_to_big` combined each row's values through a fresh `Vec`. On wasm32 every allocation takes one global spin lock, so the parallel loop serialized on it | Outis |
+| privacy_recursive_prove_once | The recursive proof for a process that proves once: each leg's precomputes are built when it starts and freed when it ends (about -85 MiB at the peak), and none outlive the proof | Outis |
 
 Of the non-trivial lines these commits add, about 2,600 come from the frontier, about 830 are
 ours (the striped prover and its port to `2b495a36`), about 50 are the wasm and Android fixes, and

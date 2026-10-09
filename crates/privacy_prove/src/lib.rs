@@ -360,6 +360,128 @@ pub fn privacy_recursive_prove(
     )
 }
 
+/// [`privacy_recursive_prove`] for a process that proves once, such as a browser worker: the same
+/// proof, with each leg's precomputes built when that leg starts and freed when it ends. The Cairo
+/// proof doesn't carry the circuit's preprocessed circuit, the circuit proof doesn't carry the
+/// Cairo preprocessed trace and tree, and nothing stays allocated after the proof (the precomputes
+/// of [`prepare_recursive_prover_precomputes`] live as long as the process).
+pub fn privacy_recursive_prove_once(pie: CairoPie) -> Result<PrivacyProofOutput, Box<dyn Error>> {
+    let _span = span!(Level::INFO, "privacy_recursive_prove_once").entered();
+
+    let cairo_verifier_config = get_cairo_verifier_config()?;
+    let circuit_config =
+        get_recursive_circuit_config(&PRIVACY_RECURSION_CIRCUIT_PREPROCESSED_ROOT)?;
+    let base_column_pool = BaseColumnPool::<SimdBackend>::new();
+    let LiftingSizePolicy::Fixed(cairo_lifting_log_size) = CAIRO_PROVER_PARAMS.lifting_size_policy
+    else {
+        panic!("Only LiftingSizePolicy::Fixed is supported with a precomputed preprocessed tree");
+    };
+    let max_domain_size = max(cairo_lifting_log_size, CIRCUIT_PCS_CONFIG.trace_lifting_log_size);
+
+    info!("Prepare the twiddles and the cairo prover preprocessed trace and tree");
+    let (twiddles, (cairo_preprocessed_trace, cairo_preprocessed_evals)) = rayon::join(
+        || {
+            SimdBackend::precompute_twiddles(
+                CanonicCoset::new(max_domain_size).circle_domain().half_coset,
+            )
+        },
+        || {
+            let cairo_preprocessed_trace =
+                Arc::new(CAIRO_PROVER_PARAMS.preprocessed_trace.to_preprocessed_trace());
+            warm_pedersen_pp_trace(CAIRO_PROVER_PARAMS.preprocessed_trace);
+            let evals = gen_trace(cairo_preprocessed_trace.clone());
+            (cairo_preprocessed_trace, evals)
+        },
+    );
+    let cairo_preprocessed_tree =
+        CommitmentTreeProver::<SimdBackend, Blake2sM31MerkleChannel>::new_striped(
+            SimdBackend::interpolate_columns(cairo_preprocessed_evals, &twiddles),
+            CAIRO_PCS_CONFIG.fri_config.log_blowup_factor,
+            &twiddles,
+            cairo_lifting_log_size,
+            &base_column_pool,
+        );
+
+    info!("Run privacy bootloader and get the prover input and output preimage");
+    let (prover_input, output_preimage) = run_privacy_bootloader(pie)?;
+
+    info!("Generate the cairo proof");
+    let cairo_proof = prove_cairo_with_precompute(
+        &base_column_pool,
+        &twiddles,
+        cairo_preprocessed_trace,
+        MaybeOwned::Owned(cairo_preprocessed_tree),
+        prover_input,
+        CAIRO_PROVER_PARAMS,
+    )?;
+    let FlatClaim { component_enable_bits, component_log_sizes: _, public_data: _ } =
+        cairo_proof.claim.flatten_claim();
+    info!("Prepare the cairo proof for the cairo-circuit verifier");
+    let (proof, serialized_aux_data) =
+        prepare_cairo_proof_for_circuit_verifier(&cairo_proof, &component_enable_bits);
+    drop(cairo_proof);
+
+    // The preprocessed circuit is built while the verifier context is filled, as the Cairo side's
+    // precomputes and the circuit's are built side by side in prepare_recursive_prover_precomputes.
+    info!("Build the cairo-circuit verifier context and the circuit prover preprocessed circuit");
+    let (preprocessed_circuit, context) = rayon::join(
+        || get_cairo_preprocessed_circuit(&cairo_verifier_config),
+        || {
+            let output_hash = compute_privacy_bootloader_output_hash(&output_preimage);
+            let mut context = build_and_fill_cairo_verifier_circuit(
+                &cairo_verifier_config,
+                proof,
+                serialized_aux_data,
+                output_hash,
+            );
+            let valid = context.is_circuit_valid();
+            pad_context(&mut context);
+            (valid, context)
+        },
+    );
+    let (valid, context) = context;
+    if !valid {
+        return Err("Circuit is not valid".into());
+    }
+    let context_values = context.values();
+
+    let circuit_preprocessed_tree = {
+        let _span = span!(Level::INFO, "prepare_circuit_preprocessed_tree").entered();
+        let circuit_preprocessed_trace =
+            preprocessed_circuit.preprocessed_trace.get_trace::<SimdBackend>();
+        CommitmentTreeProver::<SimdBackend, Blake2sM31MerkleChannel>::new_striped(
+            SimdBackend::interpolate_columns(circuit_preprocessed_trace, &twiddles),
+            CIRCUIT_FRI_CONFIG.log_blowup_factor,
+            &twiddles,
+            circuit_config.config.preprocessed_lifting_log_size,
+            &base_column_pool,
+        )
+    };
+
+    info!("Prove the cairo-circuit verifier");
+    let circuit_proof = prove_circuit_with_precompute(
+        &base_column_pool,
+        &twiddles,
+        &preprocessed_circuit,
+        MaybeOwned::Owned(circuit_preprocessed_tree),
+        context_values,
+        circuit_config.config,
+    )?;
+
+    info!("Prepare the circuit proof for the circuit verifier");
+    let (proof_qm31s, _public_data) = prepare_circuit_proof_for_circuit_verifier(circuit_proof);
+
+    info!("Serialize and compress the proof");
+    let mut proof_bytes: Vec<u8> = vec![];
+    proof_qm31s.serialize(&mut proof_bytes);
+
+    build_privacy_proof_output(
+        proof_bytes,
+        &PRIVACY_RECURSION_CIRCUIT_PREPROCESSED_ROOT,
+        output_preimage,
+    )
+}
+
 fn build_privacy_bootloader_input(
     pie: CairoPie,
     output_preimage_path: &Path,
@@ -401,8 +523,9 @@ fn run_privacy_bootloader(pie: CairoPie) -> Result<(ProverInput, Vec<Felt>), Box
     #[cfg(not(target_arch = "wasm32"))]
     let output_preimage_content = read_to_string(output_preimage_path)?;
     #[cfg(target_arch = "wasm32")]
-    let output_preimage_content = cairo_program_runner_lib::take_output_preimage_dump(output_preimage_path)
-        .ok_or("the bootloader dumped no output preimage")?;
+    let output_preimage_content =
+        cairo_program_runner_lib::take_output_preimage_dump(output_preimage_path)
+            .ok_or("the bootloader dumped no output preimage")?;
     let output_preimage: Vec<Felt> = from_str(&output_preimage_content)?;
 
     info!("Adapting the runner output for the prover");
