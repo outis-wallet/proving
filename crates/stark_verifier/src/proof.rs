@@ -231,8 +231,7 @@ pub struct ProofConfig {
     // the order in which the statement iterates its components in
     // `compute_composition_polynomial`; callers ensure this by building this config from the same
     // components map the statement uses. Note this is not necessarily the committed-column order:
-    // when `Statement::sorting_required` is `true` the verifier sorts the query columns to the
-    // committed order during decommitment instead.
+    // The verifier sorts the query columns to the committed order during decommitment.
     pub component_shapes: Vec<ComponentShape>,
 
     // Per column in the interaction trace, an indicator of whether it is a cumulative sum column.

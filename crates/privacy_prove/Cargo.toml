@@ -32,7 +32,6 @@ cairo-vm = { workspace = true, features = [
 ] }
 
 # stwo cairo
-cairo-air.workspace = true
 stwo-cairo-adapter.workspace = true
 stwo-cairo-prover.workspace = true
 stwo-cairo-common.workspace = true

@@ -88,7 +88,7 @@ pub struct CairoVerifierConfig {
     pub program: Arc<[[M31; MEMORY_VALUES_LIMBS]]>,
     /// Merkle root of the preprocessed (constant) trace columns.
     pub preprocessed_root: HashValue<QM31>,
-    /// Which preprocessed trace variant to use (e.g. small canonical vs lifted).
+    /// Which preprocessed trace variant to use.
     pub preprocessed_trace_variant: PreProcessedTraceVariant,
     /// Amount of ZK blinding to add to the verifier circuit. To be effective, should be >= the
     /// number of zk blinding rows added to the circuit verifier components.
@@ -208,7 +208,6 @@ pub fn build_cairo_verifier_circuit(
 /// Converts a [CairoProof] to a [Proof] and serialized aux data for the circuit verifier.
 pub fn prepare_cairo_proof_for_circuit_verifier(
     proof: &CairoProof<Blake2sMerkleHasher>,
-    enabled_bits: &[bool],
 ) -> (Proof<QM31>, Vec<M31>) {
     let CairoProof {
         claim,
@@ -225,7 +224,7 @@ pub fn prepare_cairo_proof_for_circuit_verifier(
 
     let components = all_components::<QM31>()
         .into_iter()
-        .zip(component_enable_bits)
+        .zip_eq(component_enable_bits)
         .filter_map(|(component, enable)| enable.then_some(component))
         .collect::<IndexMap<_, _>>();
 
@@ -236,7 +235,6 @@ pub fn prepare_cairo_proof_for_circuit_verifier(
         INTERACTION_POW_BITS,
     );
 
-    debug_assert_eq!(component_enable_bits, enabled_bits);
     debug_assert_eq!(component_log_sizes.len(), proof_config.n_components());
     debug_assert_eq!(claimed_sums.len(), proof_config.n_components());
 
@@ -313,8 +311,7 @@ pub fn verify_cairo_with_component_set(
             })
             .try_collect()?;
 
-    let (proof, serialized_aux_data) =
-        prepare_cairo_proof_for_circuit_verifier(cairo_proof, &component_enable_bits);
+    let (proof, serialized_aux_data) = prepare_cairo_proof_for_circuit_verifier(cairo_proof);
 
     let output_hash = output_hash_from_output_cells(&public_data.public_memory.output)?;
 

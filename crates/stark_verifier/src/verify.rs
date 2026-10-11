@@ -189,12 +189,8 @@ pub fn verify<Value: IValue>(
     // Check decommitment of trace queries.
     let bits = queries.bits.iter().map(|simd| Simd::unpack(context, simd)).collect_vec();
 
-    let opt_column_log_sizes_by_trace = get_opt_column_log_sizes_by_trace(
-        context,
-        config,
-        component_log_sizes,
-        statement.sorting_required(),
-    );
+    let opt_column_log_sizes_by_trace =
+        get_opt_column_log_sizes_by_trace(context, config, component_log_sizes);
 
     decommit_eval_domain_samples(
         context,
@@ -309,19 +305,12 @@ fn check_relation_uses<Value: IValue>(
 
 // Returns a map from trace index to the column log sizes used to sort that trace's query columns
 // into committed order. A trace index absent from the map needs no sorting (its columns are already
-// in committed order), so only the trace and interaction columns ever appear. When
-// `sorting_required` is false every trace is already in committed order and an empty map is
-// returned, skipping sorting entirely.
+// in committed order), so only the trace and interaction columns ever appear.
 fn get_opt_column_log_sizes_by_trace(
     context: &mut Context<impl IValue>,
     config: &ProofConfig,
     component_log_sizes: Simd,
-    sorting_required: bool,
 ) -> HashMap<usize, Vec<Var>> {
-    if !sorting_required {
-        return HashMap::new();
-    }
-
     let mut column_log_sizes = [
         Vec::with_capacity(config.n_trace_columns),
         Vec::with_capacity(config.n_interaction_columns),

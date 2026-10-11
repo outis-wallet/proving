@@ -95,11 +95,13 @@ impl IValue for QM31 {
     }
 
     fn blake2s(input: &[Self], n_bytes: usize) -> HashValue<Self> {
+        const BYTES_PER_QM31: usize = 16; // 4 coords per QM31, 4 bytes per M31.
+
         // Sanity check: check the number of bytes is consistent with the number of [QM31] values.
-        assert_eq!(input.len(), n_bytes.div_ceil(16));
+        assert_eq!(input.len(), n_bytes.div_ceil(BYTES_PER_QM31));
 
         // Serialize each QM31's four M31 coordinates as little-endian u32 words.
-        let mut input_bytes: Vec<u8> = Vec::new();
+        let mut input_bytes: Vec<u8> = Vec::with_capacity(BYTES_PER_QM31 * input.len());
         for x in input {
             for coord in x.to_m31_array() {
                 input_bytes.extend_from_slice(&coord.0.to_le_bytes());

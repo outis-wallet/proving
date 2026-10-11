@@ -53,12 +53,7 @@ impl Channel {
 
     /// Mixes the given Merkle root into the channel's digest.
     pub fn mix_commitment(&mut self, context: &mut Context<impl IValue>, root: &HashValue<Var>) {
-        // Sixteen message words: the eight raw digest words followed by the eight root words.
-        let mut message = self.digest.to_vec();
-        message.extend(root.0);
-
-        let hash = blake2s_u32s(context, message, 4 * 16);
-        self.update_digest(hash);
+        self.mix_u32s(context, root.0.iter().cloned());
     }
 
     /// Mixes the given list of `QM31` values into the channel.

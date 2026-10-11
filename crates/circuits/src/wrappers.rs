@@ -1,6 +1,6 @@
 use std::fmt::Debug;
 
-use stwo::core::fields::m31::M31;
+use stwo::core::fields::m31::{M31, P};
 use stwo::core::fields::qm31::QM31;
 
 use crate::context::{Context, GuessVar, Var};
@@ -39,6 +39,13 @@ impl M31Wrapper<Var> {
     /// Creates a constant `Var` with the given `M31` value.
     pub fn const_m31(context: &mut Context<impl IValue>, value: M31) -> M31Wrapper<Var> {
         Self(context.constant(value.into()))
+    }
+
+    pub fn const_from_u32(context: &mut Context<impl IValue>, value: u32) -> M31Wrapper<Var> {
+        if value >= P {
+            panic!("{value} is > P")
+        }
+        Self::const_m31(context, value.into())
     }
 
     /// Adds a multiplication gate to the circuit, and returns the output variable.
@@ -104,13 +111,13 @@ impl<T> U16Wrapper<T> {
 
 impl From<u16> for U16Wrapper<QM31> {
     fn from(value: u16) -> Self {
-        U16Wrapper(qm31_from_u32s(value as u32, 0, 0, 0))
+        Self(qm31_from_u32s(value as u32, 0, 0, 0))
     }
 }
 
 impl From<NoValue> for U16Wrapper<NoValue> {
     fn from(_: NoValue) -> Self {
-        U16Wrapper(NoValue)
+        Self(NoValue)
     }
 }
 
@@ -154,7 +161,7 @@ impl<T> U32Wrapper<T> {
 
 impl U32Wrapper<NoValue> {
     pub fn no_value() -> Self {
-        U32Wrapper(NoValue)
+        Self(NoValue)
     }
 }
 
@@ -173,7 +180,7 @@ impl From<u32> for U32Wrapper<QM31> {
 
 impl From<NoValue> for U32Wrapper<NoValue> {
     fn from(_: NoValue) -> Self {
-        U32Wrapper(NoValue)
+        Self(NoValue)
     }
 }
 

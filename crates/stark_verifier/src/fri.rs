@@ -29,12 +29,19 @@ pub fn mix_fri_params<Value: IValue>(
     channel: &mut Channel,
     params: &FriParams,
 ) {
+    let FriParams {
+        pow_bits,
+        log_blowup_factor,
+        n_queries,
+        log_last_layer_degree_bound,
+        fold_step,
+    } = params;
     let words = [
-        params.pow_bits,
-        params.log_blowup_factor,
-        params.n_queries as u32,
-        params.log_last_layer_degree_bound,
-        params.fold_step,
+        *pow_bits,
+        *log_blowup_factor,
+        *n_queries as u32,
+        *log_last_layer_degree_bound,
+        *fold_step,
     ]
     .map(|value| U32Wrapper::const_u32(context, value));
     channel.mix_u32s(context, words.into_iter());
@@ -203,6 +210,7 @@ pub fn fri_decommit<Value: IValue>(
     }
 
     // Check last layer.
+    assert_eq!(last_layer_coefs.len(), 1);
     let last_layer_val = last_layer_coefs[0];
     for value in layer_values {
         eq(context, value, last_layer_val);

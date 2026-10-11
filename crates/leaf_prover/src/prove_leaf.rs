@@ -172,8 +172,7 @@ pub fn prove_leaf(
         );
     }
 
-    let (proof_for_circuit, serialized_aux_data) =
-        prepare_cairo_proof_for_circuit_verifier(&proof, &verifier_config.enabled_bits);
+    let (proof_for_circuit, serialized_aux_data) = prepare_cairo_proof_for_circuit_verifier(&proof);
 
     let mut context = build_and_fill_cairo_verifier_circuit(
         &verifier_config,

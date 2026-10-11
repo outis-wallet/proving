@@ -10,7 +10,6 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use anyhow::Result;
-use cairo_air::flat_claims::FlatClaim;
 use cairo_program_runner_lib::types::{
     HashFunc, PrivacySimpleBootloaderInput, SimpleBootloaderInput,
 };
@@ -211,11 +210,8 @@ pub fn privacy_recursive_prove(
         prover_input,
         CAIRO_PROVER_PARAMS,
     )?;
-    let FlatClaim { component_enable_bits, component_log_sizes: _, public_data: _ } =
-        cairo_proof.claim.flatten_claim();
     info!("Prepare the cairo proof for the cairo-circuit verifier");
-    let (proof, serialized_aux_data) =
-        prepare_cairo_proof_for_circuit_verifier(&cairo_proof, &component_enable_bits);
+    let (proof, serialized_aux_data) = prepare_cairo_proof_for_circuit_verifier(&cairo_proof);
 
     info!("Build the cairo-circuit verifier context");
     let output_hash = compute_privacy_bootloader_output_hash(&output_preimage);

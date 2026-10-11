@@ -1,5 +1,4 @@
 use circuits::blake::{blake_g_gate, m31_to_u32, triple_xor};
-use circuits::circuit::Circuit;
 use circuits::context::{Context, FinalizedContext, Var};
 use circuits::eval;
 use circuits::ivalue::{IValue, qm31_from_u32s};
@@ -10,7 +9,7 @@ use rand_chacha::rand_core::{RngCore, SeedableRng};
 use crate::N_LANES;
 
 fn pad_qm31_ops(context: &mut Context<impl IValue>, target: usize) {
-    let qm31_ops_n_rows = qm31_ops_n_rows(&context.circuit);
+    let qm31_ops_n_rows = context.circuit.n_qm31_ops_rows();
     assert!(qm31_ops_n_rows <= target);
     let one = context.one();
     for _ in qm31_ops_n_rows..target {
@@ -259,7 +258,7 @@ pub fn raw_component_sizes(context: &FinalizedContext<impl IValue>) -> Component
     let circuit = &context.context.circuit;
     ComponentSizes {
         eq: circuit.eq.len(),
-        qm31_ops: qm31_ops_n_rows(circuit),
+        qm31_ops: circuit.n_qm31_ops_rows(),
         m31_to_u32: circuit.m31_to_u32.len(),
         triple_xor: circuit.triple_xor.len(),
         blake_g_gate: circuit.blake_g_gate.len(),
@@ -268,15 +267,6 @@ pub fn raw_component_sizes(context: &FinalizedContext<impl IValue>) -> Component
 
 pub fn compute_padded_sizes(context: &FinalizedContext<impl IValue>) -> ComponentSizes {
     raw_component_sizes(context).map(padded_size)
-}
-
-/// Computes the number of rows in the qm31_ops AIR component.
-pub fn qm31_ops_n_rows(circuit: &Circuit) -> usize {
-    circuit.add.len()
-        + circuit.sub.len()
-        + circuit.mul.len()
-        + circuit.pointwise_mul.len()
-        + circuit.permutation.iter().map(|p| p.inputs.len() + p.outputs.len()).sum::<usize>()
 }
 
 pub fn padded_size(n_rows: usize) -> usize {

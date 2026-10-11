@@ -211,8 +211,9 @@ fn build_m31_from_base(
     val: M31,
 ) -> Var {
     // If already in cache, return directly.
-    if m31_cache.contains_key(&val) {
-        return *m31_cache.get(&val).unwrap();
+    if let Some(var) = m31_cache.get(&val) {
+        assert!(!m31_constants.contains_key(&val));
+        return *var;
     }
 
     // Decompose `val` into its base `base` limbs (least significant first).
@@ -292,7 +293,7 @@ fn decompose_broadcast_constants(
     });
 }
 
-/// Computes the constant a + bi, adds it to the cache, and returns its index.
+/// Computes the constant a + bi, adds it to the cache, and returns its corresponding var.
 fn add_cm31_constant(
     context: &mut Context<impl IValue>,
     qm31_constants: &mut IndexMap<QM31, Var>,

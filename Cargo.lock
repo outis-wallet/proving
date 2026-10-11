@@ -3709,7 +3709,6 @@ name = "privacy-prove"
 version = "2.4.0"
 dependencies = [
  "anyhow",
- "cairo-air",
  "cairo-program-runner-lib",
  "cairo-vm",
  "circuit-cairo-verifier",

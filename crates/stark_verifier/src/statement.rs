@@ -61,15 +61,6 @@ pub trait Statement<Value: IValue> {
         HashMap::new()
     }
 
-    /// Whether the trace and interaction query columns must be sorted by (log size,
-    /// column index) before Merkle leaf hashing during decommitment, to match the order
-    /// in which those columns were committed to the Merkle tree. Returns `true` by
-    /// default, matching the standard verifier behavior. Statements whose column order
-    /// already matches the committed order can override this to `false` to skip sorting.
-    fn sorting_required(&self) -> bool {
-        true
-    }
-
     /// Performs statement-level consistency checks on the claim.
     fn verify_claim(
         &self,

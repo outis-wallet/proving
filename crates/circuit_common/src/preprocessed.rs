@@ -49,8 +49,7 @@ const N_OP_CODES: usize = 4;
 /// The ids and the fields holding the values they label are one list, so no edit can pair a
 /// column with the wrong id.
 macro_rules! define_preprocessed_columns {
-    ($struct_name:ident, $column_ids_array_name:ident, [$($field:ident),+ $(,)?]) => {
-        const $column_ids_array_name: &[&str] = &[$(stringify!($field)),+];
+    ($struct_name:ident, [$($field:ident),+ $(,)?]) => {
 
         /// Defaults to every column empty, to be filled by the component's gates.
         #[derive(Default)]
@@ -58,9 +57,13 @@ macro_rules! define_preprocessed_columns {
             $($field: Vec<usize>),+
         }
 
-        impl From<[Vec<usize>; $column_ids_array_name.len()]> for $struct_name {
+        impl $struct_name {
+            const IDS: &[&str] = &[$(stringify!($field)),+];
+        }
+
+        impl From<[Vec<usize>; $struct_name::IDS.len()]> for $struct_name {
             /// For components whose columns are filled by index rather than by name.
-            fn from(columns: [Vec<usize>; $column_ids_array_name.len()]) -> Self {
+            fn from(columns: [Vec<usize>; Self::IDS.len()]) -> Self {
                 let [$($field),+] = columns;
                 Self { $($field),+ }
             }
@@ -70,7 +73,7 @@ macro_rules! define_preprocessed_columns {
             /// Pushes every column under its id, in commitment order.
             fn push_to(self, pp_trace: &mut PreProcessedTrace) {
                 for (id, column) in
-                    zip_eq($column_ids_array_name.iter().copied(), [$(self.$field),+])
+                    zip_eq($struct_name::IDS.iter().copied(), [$(self.$field),+])
                 {
                     pp_trace.push_column(PreProcessedColumnId { id: id.to_owned() }, column);
                 }
@@ -79,10 +82,9 @@ macro_rules! define_preprocessed_columns {
     };
 }
 
-define_preprocessed_columns!(EqColumns, EQ_COLUMN_IDS, [eq_in0_address, eq_in1_address]);
+define_preprocessed_columns!(EqColumns, [eq_in0_address, eq_in1_address]);
 define_preprocessed_columns!(
     Qm31OpsColumns,
-    QM31_OPS_COLUMN_IDS,
     [
         qm_31_ops_add_flag,
         qm_31_ops_sub_flag,
@@ -96,7 +98,6 @@ define_preprocessed_columns!(
 );
 define_preprocessed_columns!(
     TripleXorColumns,
-    TRIPLE_XOR_COLUMN_IDS,
     [
         triple_xor_input_addr_0,
         triple_xor_input_addr_1,
@@ -107,12 +108,10 @@ define_preprocessed_columns!(
 );
 define_preprocessed_columns!(
     M31ToU32Columns,
-    M31_TO_U32_COLUMN_IDS,
     [m31_to_u32_input_addr, m31_to_u32_output_addr, m31_to_u32_multiplicity]
 );
 define_preprocessed_columns!(
     BlakeGGateColumns,
-    BLAKE_G_GATE_COLUMN_IDS,
     [
         blake_g_gate_input_addr_a,
         blake_g_gate_input_addr_b,
@@ -129,8 +128,8 @@ define_preprocessed_columns!(
 );
 
 // The two components that fill their columns by index rather than by name.
-const N_QM31_OPS_PP_COLUMNS: usize = QM31_OPS_COLUMN_IDS.len();
-const N_M31_TO_U32_PP_COLUMNS: usize = M31_TO_U32_COLUMN_IDS.len();
+const N_QM31_OPS_PP_COLUMNS: usize = Qm31OpsColumns::IDS.len();
+const N_M31_TO_U32_PP_COLUMNS: usize = M31ToU32Columns::IDS.len();
 
 /// Bit widths of the bitwise-XOR lookup tables (three columns each; a table of `n` bits has
 /// `2^(2n)` rows).
@@ -138,7 +137,8 @@ const XOR_TABLE_N_BITS: [u32; 5] = [4, 7, 8, 9, 10];
 /// Log size of the sequence column (`0..2^n`, used by `range_check_16`).
 const SEQ_LOG_SIZE: u32 = 16;
 
-/// A fixed column's per-row value, as a function of the column's log size.
+/// A function that computes the values of a fixed column.
+/// (log_size, row) -> value at that row.
 type ColumnFn = fn(u32, usize) -> usize;
 
 fn seq(_log_size: u32, row: usize) -> usize {
@@ -186,11 +186,11 @@ pub fn layout_from_component_sizes(
         entries.extend(ids.iter().map(|id| (id.to_string(), size.ilog2())));
     };
     // Order of components here must match `PreprocessedCircuit::from_finalized_circuit`.
-    push(EQ_COLUMN_IDS, sizes.eq);
-    push(QM31_OPS_COLUMN_IDS, sizes.qm31_ops);
-    push(TRIPLE_XOR_COLUMN_IDS, sizes.triple_xor);
-    push(M31_TO_U32_COLUMN_IDS, sizes.m31_to_u32);
-    push(BLAKE_G_GATE_COLUMN_IDS, sizes.blake_g_gate);
+    push(EqColumns::IDS, sizes.eq);
+    push(Qm31OpsColumns::IDS, sizes.qm31_ops);
+    push(TripleXorColumns::IDS, sizes.triple_xor);
+    push(M31ToU32Columns::IDS, sizes.m31_to_u32);
+    push(BlakeGGateColumns::IDS, sizes.blake_g_gate);
     entries.extend(fixed_columns().map(|(id, log_size, _)| (id, log_size)));
     // The same order as `PreProcessedTrace::sort_by_size` (stable, so ties keep insertion order).
     entries.sort_by_key(|(_, log_size)| *log_size);

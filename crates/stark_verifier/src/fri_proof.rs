@@ -2,7 +2,6 @@ use circuits::blake::HashValue;
 use circuits::context::{Context, Var};
 use circuits::ivalue::{IValue, NoValue};
 use circuits::ops::Guess;
-use circuits::wrappers::U32Wrapper;
 use itertools::zip_eq;
 pub use stwo::core::fri::{FriConfig, FriParams};
 
@@ -81,8 +80,13 @@ impl<T> FriProof<T> {
     pub fn validate_structure(&self, config: &FriConfig) {
         let FriProof { commit, pow_nonce: _, auth_paths, witness } = self;
         let all_fold_steps = compute_all_fold_steps(
-            (config.trace_log_size - config.params.log_last_layer_degree_bound) as usize,
-            config.params.fold_step as usize,
+            config
+                .trace_log_size
+                .checked_sub(config.params.log_last_layer_degree_bound)
+                .unwrap()
+                .try_into()
+                .unwrap(),
+            config.params.fold_step.try_into().unwrap(),
         );
         commit.validate_structure(&config.params, &all_fold_steps);
 
@@ -92,9 +96,9 @@ impl<T> FriProof<T> {
         // starts, so a layer with `2^k` values has an auth path of length `k - fold_step`
         // (equivalently, the layer's log-size after folding).
         let mut tree_heights: Vec<usize> = Vec::with_capacity(all_fold_steps.len());
-        let mut layer_size = config.log_evaluation_domain_size() as usize;
+        let mut layer_size: usize = config.log_evaluation_domain_size().try_into().unwrap();
         for fold_step in &all_fold_steps {
-            layer_size -= *fold_step;
+            layer_size = layer_size.checked_sub(*fold_step).unwrap();
             tree_heights.push(layer_size);
         }
         auth_paths.validate_structure(&tree_heights, config.params.n_queries);
@@ -122,7 +126,7 @@ pub fn empty_fri_proof(config: &FriConfig) -> FriProof<NoValue> {
         (config.trace_log_size - config.params.log_last_layer_degree_bound) as usize,
         config.params.fold_step as usize,
     );
-    let mut log_layer_size = config.log_evaluation_domain_size() as usize;
+    let mut log_layer_size: usize = config.log_evaluation_domain_size().try_into().unwrap();
     let mut auth_paths = vec![];
 
     for step in &all_fold_steps {
@@ -132,7 +136,7 @@ pub fn empty_fri_proof(config: &FriConfig) -> FriProof<NoValue> {
             AuthPath(vec![HashValue::no_value(); log_layer_size - step]);
             config.params.n_queries
         ]);
-        log_layer_size -= step;
+        log_layer_size = log_layer_size.checked_sub(*step).unwrap();
     }
     let auth_paths = AuthPaths { data: auth_paths };
 
@@ -142,7 +146,7 @@ pub fn empty_fri_proof(config: &FriConfig) -> FriProof<NoValue> {
         .collect();
     FriProof {
         commit: FriCommitProof {
-            layer_commitments: vec![HashValue([U32Wrapper::no_value(); 8]); all_fold_steps.len()],
+            layer_commitments: vec![HashValue::no_value(); all_fold_steps.len()],
             last_layer_coefs: vec![NoValue; 1 << config.params.log_last_layer_degree_bound],
         },
         pow_nonce: NoValue,
