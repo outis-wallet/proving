@@ -42,6 +42,7 @@ circuit-verifier.workspace = true
 stwo.workspace = true
 
 [dev-dependencies]
+circuit-cairo-verifier = { workspace = true, features = ["test-utils"] }
 ctor.workspace = true
 mockall.workspace = true
 rstest.workspace = true

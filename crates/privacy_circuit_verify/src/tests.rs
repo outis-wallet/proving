@@ -1,5 +1,6 @@
 use circuit_cairo_verifier::all_components::all_components;
 use circuit_cairo_verifier::privacy::PRIVACY_TRANSACTION_COMPONENTS;
+use circuit_cairo_verifier::test_utils::privacy_pcs_config;
 use stwo::core::fields::qm31::QM31;
 use stwo::core::poly::circle::CanonicCoset;
 use stwo::core::vcs_lifted::blake2_merkle::Blake2sMerkleChannel;
@@ -23,6 +24,16 @@ fn check_proof_config() {
     let proof_config = get_proof_config(&PRIVACY_RECURSION_CIRCUIT_PREPROCESSED_ROOT).unwrap();
     // All circuit components should be enabled.
     assert!(proof_config.component_shapes.iter().all(|s| s.trace_columns > 0));
+}
+
+/// Test that the privacy test setup (`privacy_pcs_config`) matches the production configs.
+#[test]
+fn check_pcs_configs_match_test_setup() {
+    assert_eq!(CAIRO_PCS_CONFIG, privacy_pcs_config(CAIRO_TRACE_LOG_SIZE, CAIRO_LOG_BLOWUP_FACTOR));
+    assert_eq!(
+        CIRCUIT_PCS_CONFIG,
+        privacy_pcs_config(CIRCUIT_TRACE_LOG_SIZE, CIRCUIT_LOG_BLOWUP_FACTOR)
+    );
 }
 
 #[test]

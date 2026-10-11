@@ -1,5 +1,5 @@
 use blake2::{Blake2s256, Digest};
-use circuit_cairo_verifier::test_utils::get_pcs_config;
+use circuit_cairo_verifier::test_utils::privacy_pcs_config;
 use circuit_common::finalize::{ComponentSizes, pad_to_targets};
 use circuit_common::preprocessed::PreprocessedCircuit;
 use circuit_prover::circuit_hash::compute_circuit_hash;
@@ -22,7 +22,7 @@ use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 const PRIVACY_CAIRO_VERIFIER_TRACE_LOG_SIZE: u32 = 21;
 pub const LOG_BLOWUP_FACTOR: u32 = 3;
 pub const PCS_CONFIG: PcsConfig =
-    get_pcs_config(PRIVACY_CAIRO_VERIFIER_TRACE_LOG_SIZE, LOG_BLOWUP_FACTOR);
+    privacy_pcs_config(PRIVACY_CAIRO_VERIFIER_TRACE_LOG_SIZE, LOG_BLOWUP_FACTOR);
 pub const TARGET_PADDING_SIZES: ComponentSizes = ComponentSizes {
     eq: 1 << 17,
     qm31_ops: 1 << 21,

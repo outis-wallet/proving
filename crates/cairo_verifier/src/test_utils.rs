@@ -59,7 +59,7 @@ pub fn privacy_cairo_verifier_config(
         components.into_iter().flatten().collect();
 
     // Derive proof config parameters from the log blowup factor, targeting 96-bit security.
-    let pcs_config = get_pcs_config(PRIVACY_CAIRO_TRACE_LOG_SIZE, log_blowup_factor);
+    let pcs_config = privacy_pcs_config(PRIVACY_CAIRO_TRACE_LOG_SIZE, log_blowup_factor);
 
     let proof_config = ProofConfig::new(
         &components,
@@ -86,7 +86,7 @@ pub fn privacy_components() -> HashSet<&'static str> {
     HashSet::from_iter(PRIVACY_TRANSACTION_COMPONENTS)
 }
 
-pub const fn get_pcs_config(trace_log_size: u32, log_blowup_factor: u32) -> PcsConfig {
+pub const fn privacy_pcs_config(trace_log_size: u32, log_blowup_factor: u32) -> PcsConfig {
     let (pow_bits, n_queries) = match log_blowup_factor {
         1 => (26, 70),
         2 => (26, 35),
