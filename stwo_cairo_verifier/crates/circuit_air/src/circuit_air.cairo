@@ -3,9 +3,9 @@ use core::num::traits::Zero;
 use stwo_constraint_framework::{
     AirComponent, CommonLookupElements, Component, PreprocessedMaskValuesImpl,
 };
-use stwo_verifier_core::fields::qm31::{QM31, QM31_EXTENSION_DEGREE};
+use stwo_verifier_core::fields::qm31::QM31;
 use stwo_verifier_core::verifier::Air;
-use stwo_verifier_core::{ColumnSpan, TreeSpan};
+use stwo_verifier_core::{ColumnSpan, N_TREES, TreeSpan};
 use crate::claims::CircuitInteractionClaim;
 use crate::components;
 use crate::components::blake_g_gate::AirComponentImpl as BlakeGGateAirComponentImpl;
@@ -51,7 +51,7 @@ pub impl CircuitAirNewImpl of CircuitAirNewTrait {
     ) -> CircuitAir {
         // Each component's interaction claim is its single `claimed_sum`, and its log size is the
         // matching field of `COMPONENT_LOG_SIZES`.
-        let CircuitInteractionClaim { claimed_sum } = interaction_claim;
+        let CircuitInteractionClaim { claimed_sums } = interaction_claim;
         let PerComponent {
             eq: eq_claimed_sum,
             qm_31_ops: qm_31_ops_claimed_sum,
@@ -64,7 +64,7 @@ pub impl CircuitAirNewImpl of CircuitAirNewTrait {
             verify_bitwise_xor_7: verify_bitwise_xor_7_claimed_sum,
             verify_bitwise_xor_9: verify_bitwise_xor_9_claimed_sum,
             range_check_16: range_check_16_claimed_sum,
-        } = *claimed_sum;
+        } = *claimed_sums;
         let PerComponent {
             eq: eq_log_size,
             qm_31_ops: qm_31_ops_log_size,
@@ -139,7 +139,7 @@ pub impl CircuitAirImpl of Air<CircuitAir> {
             mut trace_mask_values,
             mut interaction_trace_mask_values,
             _composition_trace_mask_values,
-        ]: [ColumnSpan<Span<QM31>>; QM31_EXTENSION_DEGREE] =
+        ]: [ColumnSpan<Span<QM31>>; N_TREES + 1] =
             (*mask_values
             .try_into()
             .unwrap())

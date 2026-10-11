@@ -38,18 +38,18 @@ fn output_limbs(value: u32) -> [M31; 2] {
     [m31(lo), m31(hi)]
 }
 
-/// Circuit interaction claim, holding every component's `claimed_sum` in `ComponentList` order.
+/// Circuit interaction claim, holding every component's claimed sum in `ComponentList` order.
 /// The circuit is fixed-size, so every component is always present — one field per component.
 #[derive(Drop, Serde)]
 pub struct CircuitInteractionClaim {
-    pub claimed_sum: PerComponent<QM31>,
+    pub claimed_sums: PerComponent<QM31>,
 }
 
 #[generate_trait]
 pub impl CircuitInteractionClaimImpl of CircuitInteractionClaimTrait {
     fn mix_into(self: @CircuitInteractionClaim, ref channel: Channel) {
         // Mix every component's claimed sum in `ComponentList` order, in a single call.
-        channel.mix_felts(self.claimed_sum.to_fixed_array().span());
+        channel.mix_felts(self.claimed_sums.to_fixed_array().span());
     }
 }
 
@@ -72,7 +72,7 @@ pub fn logup_sum(
 ) -> QM31 {
     // component_sum = Σ claimed_sums.
     let component_sum: QM31 = interaction_claim
-        .claimed_sum
+        .claimed_sums
         .to_fixed_array()
         .span()
         .into_iter()
