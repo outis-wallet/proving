@@ -25,9 +25,11 @@ use stwo::core::fri::FriParams;
 use stwo::core::pcs::PcsConfig;
 use stwo::core::vcs_lifted::blake2_merkle::Blake2sMerkleHasher;
 
-use crate::test_utils::{privacy_cairo_verifier_config, privacy_components};
+use crate::test_utils::{
+    privacy_cairo_verifier_config, privacy_components, verify_cairo_with_component_set,
+};
 use crate::utils::{get_proof_file_path, get_test_data_dir};
-use crate::verify::{build_cairo_verifier_circuit, verify_cairo_with_component_set};
+use crate::verify::build_cairo_verifier_circuit;
 
 /// Verifies with a circuit a proof of execution of another circuit.
 fn verify_circuit_proof(

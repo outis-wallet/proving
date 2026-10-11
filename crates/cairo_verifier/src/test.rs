@@ -30,8 +30,9 @@ use stwo_cairo_prover::prover::{ChannelHash, LiftingSizePolicy, ProverParameters
 
 use crate::all_components::all_components;
 use crate::statement::{AUX_DATA_FIXED_LEN, CairoStatement, MEMORY_VALUES_LIMBS};
+use crate::test_utils::verify_cairo_with_component_set;
 use crate::utils::get_proof_file_path;
-use crate::verify::{enabled_components, get_preprocessed_root, verify_cairo_with_component_set};
+use crate::verify::{enabled_components, get_preprocessed_root};
 
 /// Circuit Verifies a [CairoProof].
 pub fn verify_cairo(
