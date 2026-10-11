@@ -1,5 +1,6 @@
 use std::fs::read_to_string;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock};
 
 use anyhow::Result;
@@ -197,8 +198,13 @@ where
         prover_params,
         pcs_config,
         false,
+        &NEVER,
     )
+    .map(|proof| proof.expect("never stopped"))
 }
+
+/// Never set: the stop flag of the proofs that can't be stopped.
+static NEVER: AtomicBool = AtomicBool::new(false);
 
 pub fn prove_cairo_with_precompute<'a, MC: MerkleChannel>(
     base_column_pool: &BaseColumnPool<SimdBackend>,
@@ -208,6 +214,34 @@ pub fn prove_cairo_with_precompute<'a, MC: MerkleChannel>(
     input: ProverInput,
     prover_params: ProverParameters,
 ) -> Result<CairoProof<MC::H>, ProvingError>
+where
+    SimdBackend: BackendForChannel<MC>,
+{
+    prove_cairo_with_precompute_stoppable(
+        base_column_pool,
+        twiddles,
+        preprocessed_trace,
+        preprocessed_tree,
+        input,
+        prover_params,
+        &NEVER,
+    )
+    .map(|proof| proof.expect("never stopped"))
+}
+
+/// [`prove_cairo_with_precompute`] that its caller can stop: once `stop` is set, it returns
+/// `Ok(None)` at the next stage boundary (the base trace's commitment, the interaction trace, its
+/// commitment, the STARK proof) instead of going on. `stop` is only read: a proof that isn't
+/// stopped is the same proof.
+pub fn prove_cairo_with_precompute_stoppable<'a, MC: MerkleChannel>(
+    base_column_pool: &BaseColumnPool<SimdBackend>,
+    twiddles: &TwiddleTree<SimdBackend>,
+    preprocessed_trace: Arc<PreProcessedTrace>,
+    preprocessed_tree: MaybeOwned<'a, CommitmentTreeProver<SimdBackend, MC>>,
+    input: ProverInput,
+    prover_params: ProverParameters,
+    stop: &AtomicBool,
+) -> Result<Option<CairoProof<MC::H>>, ProvingError>
 where
     SimdBackend: BackendForChannel<MC>,
 {
@@ -241,6 +275,7 @@ where
         prover_params,
         pcs_config,
         true,
+        stop,
     )
 }
 
@@ -255,10 +290,13 @@ fn prove_cairo_common<'a, MC: MerkleChannel>(
     prover_params: ProverParameters,
     pcs_config: PcsConfig,
     bounded_memory: bool,
-) -> Result<CairoProof<MC::H>, ProvingError>
+    stop: &AtomicBool,
+) -> Result<Option<CairoProof<MC::H>>, ProvingError>
 where
     SimdBackend: BackendForChannel<MC>,
 {
+    // Checked between stages; never touches the channel.
+    let stopped = || stop.load(Ordering::Relaxed);
     let ProverParameters {
         channel_hash: _,
         channel_salt,
@@ -296,6 +334,9 @@ where
     commitment_scheme.commit_tree(preprocessed_tree, channel);
 
     // Base trace.
+    if stopped() {
+        return Ok(None);
+    }
     claim.mix_into::<MC>(channel);
     let span = span!(Level::INFO, "Compute base trace commitment").entered();
     let mut tree_builder = commitment_scheme.tree_builder();
@@ -309,6 +350,9 @@ where
     let interaction_elements = CommonLookupElements::draw(channel);
 
     // Interaction trace.
+    if stopped() {
+        return Ok(None);
+    }
     let span = span!(Level::INFO, "Write interaction trace").entered();
     let (interaction_trace_evals, interaction_claim) =
         interaction_generator.write_interaction_trace(&interaction_elements);
@@ -322,6 +366,9 @@ where
     );
     interaction_claim.mix_into(channel);
 
+    if stopped() {
+        return Ok(None);
+    }
     let span = span!(Level::INFO, "Compute interaction trace commitment").entered();
     let mut tree_builder = commitment_scheme.tree_builder();
     tree_builder.extend_evals(interaction_trace_evals);
@@ -351,6 +398,9 @@ where
     let components = cairo_provers(&component_builder);
 
     // Prove stark.
+    if stopped() {
+        return Ok(None);
+    }
     let span = span!(Level::INFO, "Prove STARKs").entered();
     let proof = prove_ex::<SimdBackend, _>(
         &components,
@@ -362,14 +412,14 @@ where
 
     event!(name: "component_info", Level::DEBUG, "Components: {}", component_builder);
 
-    Ok(CairoProof {
+    Ok(Some(CairoProof {
         claim,
         interaction_pow,
         interaction_claim,
         extended_stark_proof: proof,
         channel_salt,
         preprocessed_trace_variant,
-    })
+    }))
 }
 
 /// Generates proof given the Cairo VM output and prover config/parameters.

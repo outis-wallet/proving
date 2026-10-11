@@ -8,6 +8,7 @@ use std::fs::read_to_string;
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::Result;
 use cairo_air::flat_claims::FlatClaim;
@@ -59,7 +60,8 @@ use stwo_cairo_adapter::ProverInput;
 use stwo_cairo_adapter::adapter::adapt;
 use stwo_cairo_common::preprocessed_columns::preprocessed_trace::PreProcessedTrace;
 use stwo_cairo_prover::prover::{
-    LiftingSizePolicy, prove_cairo, prove_cairo_with_precompute, warm_pedersen_pp_trace,
+    LiftingSizePolicy, prove_cairo, prove_cairo_with_precompute,
+    prove_cairo_with_precompute_stoppable, warm_pedersen_pp_trace,
 };
 use stwo_cairo_prover::witness::preprocessed_trace::gen_trace;
 use tempfile::NamedTempFile;
@@ -366,7 +368,40 @@ pub fn privacy_recursive_prove(
 /// Cairo preprocessed trace and tree, and nothing stays allocated after the proof (the precomputes
 /// of [`prepare_recursive_prover_precomputes`] live as long as the process).
 pub fn privacy_recursive_prove_once(pie: CairoPie) -> Result<PrivacyProofOutput, Box<dyn Error>> {
+    static NEVER: AtomicBool = AtomicBool::new(false);
+    privacy_recursive_prove_once_stoppable(pie, &NEVER)
+}
+
+/// A proof its caller stopped (see [`privacy_recursive_prove_once_stoppable`]).
+#[derive(Debug)]
+pub struct Cancelled {
+    /// Where the proof stopped, e.g. "before the circuit proof".
+    pub at: &'static str,
+}
+
+impl std::fmt::Display for Cancelled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "cancelled {}", self.at)
+    }
+}
+
+impl Error for Cancelled {}
+
+/// [`privacy_recursive_prove_once`] that a caller can stop: once `stop` is set, the proof returns
+/// [`Cancelled`] at the next step boundary (the Cairo precomputes, the bootloader, the stages of
+/// the Cairo proof, the verifier context, the circuit's preprocessed tree, the circuit proof)
+/// instead of running on. `stop` is only read, and the steps run as in
+/// [`privacy_recursive_prove_once`]: a proof that isn't stopped is the same proof.
+pub fn privacy_recursive_prove_once_stoppable(
+    pie: CairoPie,
+    stop: &AtomicBool,
+) -> Result<PrivacyProofOutput, Box<dyn Error>> {
     let _span = span!(Level::INFO, "privacy_recursive_prove_once").entered();
+    let check = |at: &'static str| -> Result<(), Box<dyn Error>> {
+        if stop.load(Ordering::Relaxed) { Err(Box::new(Cancelled { at })) } else { Ok(()) }
+    };
+
+    check("before the precomputes")?;
 
     let cairo_verifier_config = get_cairo_verifier_config()?;
     let circuit_config =
@@ -393,6 +428,7 @@ pub fn privacy_recursive_prove_once(pie: CairoPie) -> Result<PrivacyProofOutput,
             (cairo_preprocessed_trace, evals)
         },
     );
+    check("before the cairo prover preprocessed tree")?;
     let cairo_preprocessed_tree =
         CommitmentTreeProver::<SimdBackend, Blake2sM31MerkleChannel>::new_striped(
             SimdBackend::interpolate_columns(cairo_preprocessed_evals, &twiddles),
@@ -402,18 +438,24 @@ pub fn privacy_recursive_prove_once(pie: CairoPie) -> Result<PrivacyProofOutput,
             &base_column_pool,
         );
 
+    check("before the privacy bootloader")?;
     info!("Run privacy bootloader and get the prover input and output preimage");
     let (prover_input, output_preimage) = run_privacy_bootloader(pie)?;
 
+    check("before the cairo proof")?;
     info!("Generate the cairo proof");
-    let cairo_proof = prove_cairo_with_precompute(
+    let Some(cairo_proof) = prove_cairo_with_precompute_stoppable(
         &base_column_pool,
         &twiddles,
         cairo_preprocessed_trace,
         MaybeOwned::Owned(cairo_preprocessed_tree),
         prover_input,
         CAIRO_PROVER_PARAMS,
-    )?;
+        stop,
+    )?
+    else {
+        return Err(Box::new(Cancelled { at: "during the cairo proof" }));
+    };
     let FlatClaim { component_enable_bits, component_log_sizes: _, public_data: _ } =
         cairo_proof.claim.flatten_claim();
     info!("Prepare the cairo proof for the cairo-circuit verifier");
@@ -421,6 +463,7 @@ pub fn privacy_recursive_prove_once(pie: CairoPie) -> Result<PrivacyProofOutput,
         prepare_cairo_proof_for_circuit_verifier(&cairo_proof, &component_enable_bits);
     drop(cairo_proof);
 
+    check("before the cairo-circuit verifier context")?;
     // The preprocessed circuit is built while the verifier context is filled, as the Cairo side's
     // precomputes and the circuit's are built side by side in prepare_recursive_prover_precomputes.
     info!("Build the cairo-circuit verifier context and the circuit prover preprocessed circuit");
@@ -445,6 +488,7 @@ pub fn privacy_recursive_prove_once(pie: CairoPie) -> Result<PrivacyProofOutput,
     }
     let context_values = context.values();
 
+    check("before the circuit prover preprocessed tree")?;
     let circuit_preprocessed_tree = {
         let _span = span!(Level::INFO, "prepare_circuit_preprocessed_tree").entered();
         let circuit_preprocessed_trace =
@@ -458,6 +502,7 @@ pub fn privacy_recursive_prove_once(pie: CairoPie) -> Result<PrivacyProofOutput,
         )
     };
 
+    check("before the circuit proof")?;
     info!("Prove the cairo-circuit verifier");
     let circuit_proof = prove_circuit_with_precompute(
         &base_column_pool,
