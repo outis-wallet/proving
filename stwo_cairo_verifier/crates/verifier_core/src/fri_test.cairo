@@ -1,7 +1,8 @@
 use crate::channel::Channel;
 use crate::circle::{CirclePointIndexImpl, CirclePointM31Impl, CosetImpl};
 use crate::fields::Invertible;
-use crate::fields::qm31::{QM31, qm31_const};
+use crate::fields::m31::m31;
+use crate::fields::qm31::{QM31, QM31Trait, qm31_const};
 use crate::fri::{FriParams, FriParamsTrait, FriVerifierImpl, FriVerifierTrait, fold_coset};
 use crate::poly::circle::CircleEvaluationImpl;
 use crate::poly::line::{LineDomainImpl, LineDomainTrait};
@@ -591,6 +592,76 @@ fn test_fold_coset_step_2() {
     let expected = fri_fold(r0, r1, x2.inverse(), alpha2);
 
     assert_eq!(result, expected);
+}
+
+/// Evaluates `fold_coset` on the coset of size `2^fold_step` with initial index 1, on the
+/// evaluations `[(100, 200, 300, 400), (500, 600, 700, 800), ...]` and `alpha = (17, 23, 31, 37)`.
+fn fold_coset_on_test_values(fold_step: u32) -> QM31 {
+    let domain = LineDomainImpl::new_unchecked(
+        CosetImpl::new(CirclePointIndexImpl::new(1), fold_step),
+    );
+    let mut eval = array![];
+    let mut x_coords = array![];
+    for i in 0..domain.size() {
+        let offset = 400 * i;
+        eval
+            .append(
+                QM31Trait::from_fixed_array(
+                    [m31(100 + offset), m31(200 + offset), m31(300 + offset), m31(400 + offset)],
+                ),
+            );
+        // The x-coordinates at the bit-reversed even positions of the domain.
+        if i % 2 == 0 {
+            x_coords.append(domain.at(bit_reverse_index(i, domain.log_size())));
+        }
+    }
+    fold_coset(eval.span(), x_coords.span(), qm31_const::<17, 23, 31, 37>())
+}
+
+/// The expected values were computed with `stwo::core::fri::fold_coset`. To reproduce them, add
+/// this test to `crates/stwo/src/core/fri.rs` and run
+/// `cargo test -p stwo --lib print_fold_coset_golden_values -- --nocapture`:
+///
+/// ```rust
+/// #[test]
+/// fn print_fold_coset_golden_values() {
+///     use crate::core::circle::{CirclePointIndex, Coset};
+///     use crate::core::fri::fold_coset;
+///     use crate::core::poly::line::LineDomain;
+///     use crate::qm31;
+///
+///     for fold_step in 1..=4 {
+///         let domain = LineDomain::new(Coset::new(CirclePointIndex(1), fold_step));
+///         let eval = (0..1 << fold_step)
+///             .map(|i| {
+///                 let offset = 400 * i;
+///                 qm31!(100 + offset, 200 + offset, 300 + offset, 400 + offset)
+///             })
+///             .collect();
+///         println!("{fold_step}: {:?}", fold_coset(eval, domain, qm31!(17, 23, 31, 37)));
+///     }
+/// }
+/// ```
+#[test]
+fn test_fold_coset_matches_stwo() {
+    assert_eq!(fold_coset_on_test_values(1), qm31_const::<17800, 2147450447, 3400, 2147463247>());
+    assert_eq!(
+        fold_coset_on_test_values(2), qm31_const::<594647235, 854916691, 1820368153, 114341901>(),
+    );
+    assert_eq!(
+        fold_coset_on_test_values(3), qm31_const::<1967360086, 1251096559, 256371775, 1343207531>(),
+    );
+    assert_eq!(
+        fold_coset_on_test_values(4),
+        qm31_const::<1700708935, 1973349609, 1477985936, 2094624621>(),
+    );
+}
+
+#[test]
+#[should_panic(expected: "assertion failed: `eval.len() == 2 * x_coords.len()`.")]
+fn test_fold_coset_wrong_number_of_x_coords_fails() {
+    let eval = array![qm31_const::<1, 2, 3, 4>(), qm31_const::<5, 6, 7, 8>()];
+    fold_coset(eval.span(), array![m31(1), m31(2)].span(), qm31_const::<17, 23, 31, 37>());
 }
 
 // The proof data uses Blake2s Merkle hashes and the Blake2s channel.
