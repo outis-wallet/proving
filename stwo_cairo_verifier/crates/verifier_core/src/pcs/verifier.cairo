@@ -49,7 +49,7 @@ pub type QueriedValues = TreeArray<Span<M31>>;
 pub struct CommitmentSchemeProof {
     pub commitments: TreeSpan<Hash>,
     /// Proof of work nonce ground before the OODS point is drawn.
-    pub oods_proof_of_work: u64,
+    pub oods_pow_nonce: u64,
     pub sampled_values: SampledValues,
     pub decommitments: TreeArray<MerkleDecommitment<MerkleHasher>>,
     pub queried_values: QueriedValues,
@@ -149,7 +149,7 @@ pub impl CommitmentSchemeVerifierImpl of CommitmentSchemeVerifierTrait {
         let CommitmentSchemeProof {
             commitments: _,
             // Verified before the OODS point was drawn, see `verify`.
-            oods_proof_of_work: _,
+            oods_pow_nonce: _,
             sampled_values,
             decommitments,
             queried_values: queried_values_per_tree,

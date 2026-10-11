@@ -58,7 +58,7 @@ pub fn verify<A, +Air<A>, +Drop<A>>(
 ) {
     let StarkProof { commitment_scheme_proof } = proof;
     let log_trace_degree_bound = commitment_scheme.log_degree_bound;
-    let oods_proof_of_work = commitment_scheme_proof.oods_proof_of_work;
+    let oods_pow_nonce = commitment_scheme_proof.oods_pow_nonce;
 
     commitment_scheme.fri_params.validate(min_security_bits);
 
@@ -77,11 +77,11 @@ pub fn verify<A, +Air<A>, +Drop<A>>(
 
     // Verify the proof of work ground before the OODS point.
     assert!(
-        channel.verify_pow_nonce(OODS_POW_BITS, oods_proof_of_work),
+        channel.verify_pow_nonce(OODS_POW_BITS, oods_pow_nonce),
         "{}",
         VerificationError::OodsProofOfWork,
     );
-    channel.mix_u64(oods_proof_of_work);
+    channel.mix_u64(oods_pow_nonce);
 
     // Draw OOD point.
     let ood_point = channel.get_random_point();
@@ -98,9 +98,9 @@ pub fn verify<A, +Air<A>, +Drop<A>>(
     // Evaluate composition polynomial at OOD point and check that it matches the trace OOD values.
     let numerator = air
         .eval_composition_polynomial_at_point(sampled_oods_values, composition_random_coeff);
-    // `max_trace_domain` is the largest domain of a trace polynomial (before LDE).
-    let max_trace_domain = CanonicCosetImpl::new(log_trace_degree_bound);
-    let denominator_inv = max_trace_domain.eval_vanishing(ood_point).inverse();
+    // `trace_domain` is the largest domain of a trace polynomial (before LDE).
+    let trace_domain = CanonicCosetImpl::new(log_trace_degree_bound);
+    let denominator_inv = trace_domain.eval_vanishing(ood_point).inverse();
     assert!(
         composition_oods_eval == numerator * denominator_inv,
         "{}",
