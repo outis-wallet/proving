@@ -6,8 +6,8 @@ use crate::components;
 use crate::multiverifier_consts::COMPONENT_LOG_SIZES;
 use crate::per_component::{PerComponent, PerComponentTrait};
 
-/// Checks that, for every lookup relation, the total number of uses across all components is
-/// less than `P`.
+/// Checks that, for every lookup relation, the total number of uses across all components, plus
+/// one for the external logups, is less than `P`.
 ///
 /// The circuit is fixed-size, so the uses are determined by the hardcoded
 /// `COMPONENT_LOG_SIZES` (that's why this is a test rather than a verifier-side check).
@@ -37,6 +37,9 @@ fn relation_uses_are_below_p() {
     let squashed = relation_uses.squash();
     for entry in squashed.into_entries() {
         let (_relation_id, _first_uses, last_uses) = entry;
-        assert!(last_uses < P_U32.into(), "A relation has more than P-1 uses");
+        // The `+ 1` accounts for the external logups (`u` and each public output). The external
+        // logups use distinct addresses, so each is counted separately against the characteristic
+        // bound.
+        assert!(last_uses + 1 < P_U32.into(), "A relation has more than P-2 uses");
     }
 }
