@@ -49,7 +49,7 @@ pub fn column_log_sizes_per_tree(log_sizes: &PerComponent<u32>) -> [Vec<u32>; 2]
     let components = all_circuit_components::<NoValue>();
     let mut trace = Vec::new();
     let mut interaction = Vec::new();
-    for (component, log_size) in components.values().zip_eq(log_sizes.into_array()) {
+    for (component, log_size) in components.zip(*log_sizes).into_array() {
         trace.extend(repeat_n(log_size, component.trace_columns()));
         interaction.extend(repeat_n(log_size, component.interaction_columns()));
     }

@@ -226,7 +226,7 @@ pub fn prepare_circuit_proof_for_circuit_verifier(
         CircuitPublicData { output_digest: HashValue(output_words.map(U32Wrapper::new_unsafe)) };
 
     let proof_config = ProofConfig::new(
-        &all_circuit_components::<QM31>(),
+        &all_circuit_components::<QM31>().into_index_map(),
         stark_proof.proof.sampled_values[PREPROCESSED_TRACE_IDX].len(),
         &pcs_config,
         INTERACTION_POW_BITS,

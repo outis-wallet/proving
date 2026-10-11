@@ -241,7 +241,7 @@ pub fn get_recursive_circuit_config(
 }
 
 pub fn get_proof_config(preprocessed_root: &[u32; 8]) -> Result<ProofConfig, Box<dyn Error>> {
-    let components = all_circuit_components::<QM31>();
+    let components = all_circuit_components::<QM31>().into_index_map();
     if *preprocessed_root == PRIVACY_RECURSION_CIRCUIT_PREPROCESSED_ROOT {
         Ok(ProofConfig::new(
             &components,

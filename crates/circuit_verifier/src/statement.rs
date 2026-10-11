@@ -62,6 +62,7 @@ impl<Value: IValue> CircuitStatement<Value> {
 
         let components = all_circuit_components::<Value>();
         let log_sizes = circuit_component_log_sizes(&components, preprocessed_column_log_sizes);
+        let components = components.into_index_map();
 
         let circuit_hash = compute_circuit_hash(
             context,
@@ -154,9 +155,9 @@ impl<Value: IValue> Statement<Value> for CircuitStatement<Value> {
     }
 }
 
-pub fn all_circuit_components<Value: IValue>() -> IndexMap<&'static str, Box<dyn CircuitEval<Value>>>
-{
-    let components = PerComponent::<Box<dyn CircuitEval<Value>>> {
+/// Returns the evaluator of every circuit component.
+pub fn all_circuit_components<Value: IValue>() -> PerComponent<Box<dyn CircuitEval<Value>>> {
+    PerComponent {
         eq: Box::new(CircuitEqComponent {}),
         qm_31_ops: Box::new(qm_31_ops::Component {}),
         triple_xor: Box::new(triple_xor::Component {}),
@@ -168,35 +169,19 @@ pub fn all_circuit_components<Value: IValue>() -> IndexMap<&'static str, Box<dyn
         verify_bitwise_xor_7: Box::new(verify_bitwise_xor_7::Component {}),
         verify_bitwise_xor_9: Box::new(verify_bitwise_xor_9::Component {}),
         range_check_16: Box::new(range_check_16::Component {}),
-    };
-    IndexMap::from_iter(components.into_named_iter())
+    }
 }
 
 /// Resolves the (static) log size of every circuit component.
 pub fn circuit_component_log_sizes<Value: IValue>(
-    components: &IndexMap<&'static str, Box<dyn CircuitEval<Value>>>,
+    components: &PerComponent<Box<dyn CircuitEval<Value>>>,
     preprocessed_column_log_sizes: &OrderedHashMap<PreProcessedColumnId, u32>,
 ) -> PerComponent<u32> {
-    let log_size = |name: &str| {
-        components
-            .get(name)
-            .unwrap()
+    components.as_ref().map(|component| {
+        component
             .log_size(preprocessed_column_log_sizes)
             .expect("The circuit components can't have a dynamic log_size.")
-    };
-    PerComponent {
-        eq: log_size("eq"),
-        qm_31_ops: log_size("qm_31_ops"),
-        triple_xor: log_size("triple_xor"),
-        m_31_to_u_32: log_size("m_31_to_u_32"),
-        blake_g_gate: log_size("blake_g_gate"),
-        verify_bitwise_xor_8: log_size("verify_bitwise_xor_8"),
-        verify_bitwise_xor_12: log_size("verify_bitwise_xor_12"),
-        verify_bitwise_xor_4: log_size("verify_bitwise_xor_4"),
-        verify_bitwise_xor_7: log_size("verify_bitwise_xor_7"),
-        verify_bitwise_xor_9: log_size("verify_bitwise_xor_9"),
-        range_check_16: log_size("range_check_16"),
-    }
+    })
 }
 
 /// Builds the [`ProofConfig`] for the circuit verifier circuit, with the components in the order
@@ -205,9 +190,8 @@ pub fn circuit_verifier_proof_config(
     preprocessed_column_log_sizes: &OrderedHashMap<PreProcessedColumnId, u32>,
     pcs_config: &PcsConfig,
 ) -> ProofConfig {
-    let components = all_circuit_components::<QM31>();
     ProofConfig::new(
-        &components,
+        &all_circuit_components::<QM31>().into_index_map(),
         preprocessed_column_log_sizes.len(),
         pcs_config,
         INTERACTION_POW_BITS,
