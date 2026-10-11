@@ -34,13 +34,7 @@ impl MerkleDecommitmentDebug<
     }
 }
 
-impl MerkleDecommitmentClone<
-    impl H: MerkleHasher, +Clone<Array<H::Hash>>, +Drop<Array<H::Hash>>,
-> of Clone<MerkleDecommitment<H>> {
-    fn clone(self: @MerkleDecommitment<H>) -> MerkleDecommitment<H> {
-        MerkleDecommitment::<H> { hash_witness: *self.hash_witness }
-    }
-}
+impl MerkleDecommitmentCopy<impl H: MerkleHasher> of Copy<MerkleDecommitment<H>>;
 
 impl MerkleDecommitmentSerde<
     impl H: MerkleHasher, +Serde<Span<H::Hash>>,
@@ -93,7 +87,7 @@ impl MerkleVerifierImpl<
         // associated layer in the Merkle tree. For example, a query in position k in the leaf
         // layer is encoded as (2^tree_height + k).
         let mut positions_and_hashes: Array<(usize, H::Hash)> = array![];
-        let layer_idx = pow2(*self.tree_height);
+        let layer_start_idx = pow2(*self.tree_height);
 
         let mut prev_pos: Option<u32> = None;
         for pos in query_positions {
@@ -102,12 +96,13 @@ impl MerkleVerifierImpl<
             }
             prev_pos = Some(*pos);
             let column_values = queried_values.pop_front_n(n_columns);
-            positions_and_hashes.append((*pos + layer_idx, H::hash_leaf(column_values)));
+            positions_and_hashes.append((*pos + layer_start_idx, H::hash_leaf(column_values)));
         }
         assert!(queried_values.is_empty());
         // Check that the largest query position is smaller than the number of leaves.
+        // Use unwrap because `query_positions` should be non-empty.
         assert!(
-            prev_pos.is_none_or(|x| x < layer_idx), "{}", MerkleVerificationError::QueryOutOfRange,
+            prev_pos.unwrap() < layer_start_idx, "{}", MerkleVerificationError::QueryOutOfRange,
         );
 
         // At this point `positions_and_hashes` contains the query positions and their

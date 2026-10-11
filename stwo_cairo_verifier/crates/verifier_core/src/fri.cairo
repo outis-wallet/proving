@@ -356,9 +356,7 @@ impl FriLayerVerifierImpl of FriLayerVerifierTrait {
         };
 
         merkle_verifier
-            .verify(
-                merkle_positions, decommitted_values.span(), (*self.proof.decommitment).clone(),
-            );
+            .verify(merkle_positions, decommitted_values.span(), **self.proof.decommitment);
 
         fold_preimage_evals
     }
