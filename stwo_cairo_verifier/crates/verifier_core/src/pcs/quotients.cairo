@@ -174,6 +174,8 @@ fn sample_batches_for_degree_bound(
         n_columns_per_tree.append(column_indices.len());
     }
 
+    // The list of sample batches is empty when there are no columns of the current log degree
+    // bound.
     if col_eval_coeff_triples_at_point.is_empty() {
         return (array![].span(), n_columns_per_tree);
     }
@@ -184,27 +186,18 @@ fn sample_batches_for_degree_bound(
     assert!(!col_eval_coeff_triples_at_point_plus_periodicity.is_empty());
     assert!(!col_eval_coeff_triples_at_prev_point.is_empty());
 
-    let mut sample_batches_by_point: Array<ColumnSampleBatch> = array![];
-    let point_plus_periodicity = oods_point.add_circle_point_m31(periodicity_generator);
-    sample_batches_by_point
-        .append(
-            ColumnSampleBatch {
-                point: point_plus_periodicity,
-                cols_vals_and_pows: col_eval_coeff_triples_at_point_plus_periodicity,
-            },
-        );
-    sample_batches_by_point
-        .append(
-            ColumnSampleBatch {
-                point: prev_oods_point, cols_vals_and_pows: col_eval_coeff_triples_at_prev_point,
-            },
-        );
-    sample_batches_by_point
-        .append(
-            ColumnSampleBatch {
-                point: oods_point, cols_vals_and_pows: col_eval_coeff_triples_at_point,
-            },
-        );
+    let sample_batches_by_point = array![
+        ColumnSampleBatch {
+            point: oods_point.add_circle_point_m31(periodicity_generator),
+            cols_vals_and_pows: col_eval_coeff_triples_at_point_plus_periodicity,
+        },
+        ColumnSampleBatch {
+            point: prev_oods_point, cols_vals_and_pows: col_eval_coeff_triples_at_prev_point,
+        },
+        ColumnSampleBatch {
+            point: oods_point, cols_vals_and_pows: col_eval_coeff_triples_at_point,
+        },
+    ];
 
     (sample_batches_by_point.span(), n_columns_per_tree)
 }
