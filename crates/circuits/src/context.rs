@@ -21,6 +21,9 @@ pub const U_VAR_IDX: usize = 2;
 /// The value of `u`.
 pub const U_VALUE: QM31 = QM31::from_m31(M31(0), M31(0), M31(1), M31(0));
 
+/// The address of the first output variable.
+pub const OUTPUT_START: usize = U_VAR_IDX + 1;
+
 /// Represents a variable in a [Circuit].
 ///
 /// A [Var] represents a `QM31` value.

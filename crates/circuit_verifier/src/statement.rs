@@ -1,6 +1,6 @@
 use circuit_common::N_RESERVED;
 use circuits::blake::HashValue;
-use circuits::context::{Context, U_VAR_IDX, Var};
+use circuits::context::{Context, OUTPUT_START, U_VAR_IDX, Var};
 use circuits::eval;
 use circuits::ivalue::IValue;
 use circuits::ops::Constant;
@@ -110,8 +110,9 @@ impl<Value: IValue> Statement<Value> for CircuitStatement<Value> {
 
         // Output gates public logup sum contribution.
         let gate_relation_id = context.constant(GATE_RELATION_ID.into());
-        // Construct the output addresses. They are located at addresses `[3, 3 + N_RESERVED)`.
-        let output_addresses = ((U_VAR_IDX + 1)..(U_VAR_IDX + 1 + N_RESERVED))
+        // Construct the output addresses. They are located at addresses `[OUTPUT_START,
+        // OUTPUT_START + N_RESERVED)`.
+        let output_addresses = (OUTPUT_START..(OUTPUT_START + N_RESERVED))
             .map(|addr| M31Wrapper::const_m31(context, addr.into()))
             .collect_vec();
         // Add the pair `(U_VAR_IDX, U_VALUE)` to the addresses and values, respectively.

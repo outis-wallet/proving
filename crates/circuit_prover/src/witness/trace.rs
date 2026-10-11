@@ -7,7 +7,7 @@ use circuit_verifier::circuit_claim::{
     CircuitClaim, CircuitInteractionClaim, CircuitInteractionElements,
 };
 use circuit_verifier::circuit_components::PerComponent;
-use circuits::context::U_VAR_IDX;
+use circuits::context::OUTPUT_START;
 use itertools::Itertools;
 use rayon::scope;
 use stwo::core::channel::MerkleChannel;
@@ -274,9 +274,8 @@ where
         tree_builder.extend_polys(polys);
     }
 
-    let output_values = ((U_VAR_IDX + 1)..(U_VAR_IDX + 1 + n_outputs))
-        .map(|addr| context_values[addr])
-        .collect_vec();
+    let output_values =
+        (OUTPUT_START..(OUTPUT_START + n_outputs)).map(|addr| context_values[addr]).collect_vec();
 
     (
         CircuitClaim { output_values },

@@ -21,7 +21,7 @@ use circuit_verifier::multiverifier::{
 use circuit_verifier::statement::circuit_verifier_proof_config;
 use circuit_verifier::verify::{CircuitConfig, CircuitPublicData, verify_circuit};
 use circuits::blake::HashValue;
-use circuits::context::FinalizedContext;
+use circuits::context::{FinalizedContext, OUTPUT_START};
 use circuits::ivalue::NoValue;
 use circuits::utils::le_u32s_from_bytes;
 use circuits_stark_verifier::proof::{Proof, ProofConfig};
@@ -356,9 +356,8 @@ fn test_verify_circuit_single_input_output_digest() {
         HashValue::<QM31>::from(expected_digest).into_iter().map(|w| *w.get()).collect();
 
     // Reserved output wires occupy indices 3..3+N_RESERVED (zero/one/u at 0..3; see Context::new).
-    const RESERVED_OFFSET: usize = 3;
     assert_eq!(
-        &context.values()[RESERVED_OFFSET..RESERVED_OFFSET + N_RESERVED],
+        &context.values()[OUTPUT_START..OUTPUT_START + N_RESERVED],
         expected_wires.as_slice()
     );
 }

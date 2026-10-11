@@ -1,7 +1,7 @@
 use std::iter::repeat_n;
 
 use circuits::blake::BLAKE2S_DIGEST_N_WORDS;
-use circuits::context::{U_VALUE, U_VAR_IDX};
+use circuits::context::{OUTPUT_START, U_VALUE, U_VAR_IDX};
 use circuits::ivalue::{IValue, NoValue};
 use itertools::Itertools;
 use num_traits::Zero;
@@ -92,7 +92,7 @@ pub fn logup_sum(
     for (i, value) in claim.output_values.iter().enumerate() {
         let values = [
             gate_relation_id,
-            M31::from((U_VAR_IDX + 1 + i) as u32),
+            M31::from((OUTPUT_START + i) as u32),
             value.0.0,
             value.0.1,
             value.1.0,
