@@ -1,4 +1,5 @@
 use circuit_cairo_verifier::all_components::all_components;
+use circuit_cairo_verifier::privacy::PRIVACY_TRANSACTION_COMPONENTS;
 use stwo::core::fields::qm31::QM31;
 use stwo::core::poly::circle::CanonicCoset;
 use stwo::core::vcs_lifted::blake2_merkle::Blake2sMerkleChannel;
@@ -11,7 +12,7 @@ use crate::consts::{
     CAIRO_LOG_BLOWUP_FACTOR, CAIRO_PCS_CONFIG, CAIRO_TRACE_LOG_SIZE, CIRCUIT_LOG_BLOWUP_FACTOR,
     CIRCUIT_OUTPUT_ADDRESSES, CIRCUIT_PCS_CONFIG, CIRCUIT_TRACE_LOG_SIZE,
     PRIVACY_CIRCUIT_PREPROCESSED_IDS, PRIVACY_CIRCUIT_PREPROCESSED_LOG_SIZES,
-    PRIVACY_RECURSION_CIRCUIT_PREPROCESSED_ROOT, PRIVACY_TRANSACTION_COMPONENTS,
+    PRIVACY_RECURSION_CIRCUIT_PREPROCESSED_ROOT,
 };
 use crate::{get_cairo_preprocessed_circuit, get_cairo_verifier_config, get_proof_config};
 

@@ -10,6 +10,7 @@ use anyhow::Result;
 use cairo_air::verifier::INTERACTION_POW_BITS;
 use cairo_vm::types::program::Program;
 use circuit_cairo_verifier::all_components::all_components;
+use circuit_cairo_verifier::privacy::PRIVACY_TRANSACTION_COMPONENTS;
 use circuit_cairo_verifier::statement::AUX_DATA_FIXED_LEN;
 use circuit_cairo_verifier::verify::{
     CairoVerifierConfig, NON_QUERY_INFO_LEAK, build_cairo_verifier_circuit, get_preprocessed_root,
@@ -46,7 +47,7 @@ use crate::consts::{
     LEAF_BOOTLOADER_JSON, MAX_CAIRO_PROOF_UNCOMPRESSED_BYTES,
     MAX_RECURSIVE_PROOF_UNCOMPRESSED_BYTES, PRIVACY_BOOTLOADER_JSON,
     PRIVACY_CIRCUIT_PREPROCESSED_IDS, PRIVACY_CIRCUIT_PREPROCESSED_LOG_SIZES,
-    PRIVACY_RECURSION_CIRCUIT_PREPROCESSED_ROOT, PRIVACY_TRANSACTION_COMPONENTS,
+    PRIVACY_RECURSION_CIRCUIT_PREPROCESSED_ROOT,
 };
 use crate::utils::ProofHeader;
 

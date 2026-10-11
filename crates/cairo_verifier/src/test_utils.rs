@@ -19,6 +19,7 @@ use stwo_cairo_common::preprocessed_columns::preprocessed_trace::PreProcessedTra
 use stwo_cairo_common::prover_types::felt::split_f252;
 
 use crate::all_components::all_components;
+use crate::privacy::PRIVACY_TRANSACTION_COMPONENTS;
 use crate::statement::{N_OUTPUTS, N_WORDS_PER_OUTPUT_CELL};
 use crate::utils::{get_test_data_dir, load_program};
 use crate::verify::{
@@ -80,69 +81,9 @@ pub fn privacy_cairo_verifier_config(
     }
 }
 
-// The set of components that are used to verify the privacy transaction.
-// The order of the components is determend by the order in all_components()
-// TODO(ilya): Fix the privacy bootloader to use the commented out components.
+/// Returns [`PRIVACY_TRANSACTION_COMPONENTS`] as a set.
 pub fn privacy_components() -> HashSet<&'static str> {
-    HashSet::from_iter([
-        "add_opcode",
-        "add_opcode_small",
-        "add_ap_opcode",
-        "assert_eq_opcode",
-        "assert_eq_opcode_imm",
-        "assert_eq_opcode_double_deref",
-        "blake_compress_opcode",
-        "call_opcode_abs",
-        "call_opcode_rel_imm",
-        "jnz_opcode_non_taken",
-        "jnz_opcode_taken",
-        "jump_opcode_abs",
-        "jump_opcode_double_deref",
-        "jump_opcode_rel",
-        "jump_opcode_rel_imm",
-        "mul_opcode",
-        "mul_opcode_small",
-        "ret_opcode",
-        "verify_instruction",
-        "blake_round",
-        "blake_g",
-        "blake_round_sigma",
-        "triple_xor_32",
-        "verify_bitwise_xor_12",
-        "bitwise_builtin",
-        "pedersen_builtin_narrow_windows",
-        "poseidon_builtin",
-        "range_check_builtin",
-        "pedersen_aggregator_window_bits_9",
-        "partial_ec_mul_window_bits_9",
-        "pedersen_points_table_window_bits_9",
-        "poseidon_aggregator",
-        "poseidon_3_partial_rounds_chain",
-        "poseidon_full_round_chain",
-        "cube_252",
-        "poseidon_round_keys",
-        "range_check_252_width_27",
-        "memory_address_to_id",
-        "memory_id_to_big",
-        "memory_id_to_small",
-        "range_check_6",
-        "range_check_8",
-        "range_check_11",
-        "range_check_12",
-        "range_check_18",
-        "range_check_20",
-        "range_check_4_3",
-        "range_check_4_4",
-        "range_check_9_9",
-        "range_check_7_2_5",
-        "range_check_3_6_6_3",
-        "range_check_4_4_4_4",
-        "range_check_3_3_3_3_3",
-        "verify_bitwise_xor_4",
-        "verify_bitwise_xor_7",
-        "verify_bitwise_xor_8",
-        "verify_bitwise_xor_9",
-    ])
+    HashSet::from_iter(PRIVACY_TRANSACTION_COMPONENTS)
 }
 
 pub const fn get_pcs_config(trace_log_size: u32, log_blowup_factor: u32) -> PcsConfig {
