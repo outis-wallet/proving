@@ -2,7 +2,7 @@ use std::fs::File;
 use std::io::Write;
 
 use cairo_air::utils::binary_deserialize_from_file;
-use circuit_cairo_verifier::privacy::{privacy_cairo_verifier_config, privacy_components};
+use circuit_cairo_verifier::test_utils::{privacy_cairo_verifier_config, privacy_components};
 use circuit_cairo_verifier::utils::get_proof_file_path;
 use circuit_cairo_verifier::verify::{
     build_cairo_verifier_circuit, verify_cairo_with_component_set,

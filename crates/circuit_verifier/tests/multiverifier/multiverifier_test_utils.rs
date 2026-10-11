@@ -1,5 +1,5 @@
 use blake2::{Blake2s256, Digest};
-use circuit_cairo_verifier::privacy::get_pcs_config;
+use circuit_cairo_verifier::test_utils::get_pcs_config;
 use circuit_common::finalize::{ComponentSizes, pad_to_targets};
 use circuit_common::preprocessed::PreprocessedCircuit;
 use circuit_prover::circuit_hash::compute_circuit_hash;

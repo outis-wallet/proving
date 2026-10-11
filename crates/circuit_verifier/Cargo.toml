@@ -20,7 +20,7 @@ indoc.workspace = true
 rstest.workspace = true
 expect-test.workspace = true
 cairo-air.workspace = true
-circuit-cairo-verifier.workspace = true
+circuit-cairo-verifier = { workspace = true, features = ["test-utils"] }
 circuit-prover.workspace = true
 circuit-serialize.workspace = true
 stwo = { workspace = true, features = ["prover"] }
