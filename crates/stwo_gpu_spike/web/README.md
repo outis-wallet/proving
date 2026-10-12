@@ -35,7 +35,8 @@ The demo function is `gpu_m31_mul(a: &[u32], b: &[u32]) -> Result<Vec<u32>, Brid
 2. It writes the op and its args: pointers and lengths into its own memory.
 3. It marks the slot SUBMITTED, bumps the doorbell and runs `memory.atomic.notify`.
 4. It waits on the slot with `memory.atomic.wait32`, in 100 ms steps. Each step rechecks the
-   server state, so a dead GPU worker can't hang `prove()`.
+   server state and, with `call_with_deadline`, the caller's deadline, so a dead GPU worker
+   can't hang `prove()`.
 
 **What the GPU worker does with it** (`gpu.worker.mjs`):
 
@@ -53,8 +54,13 @@ The demo function is `gpu_m31_mul(a: &[u32], b: &[u32]) -> Result<Vec<u32>, Brid
 - A lost device, or a trap in the GPU module (caught by the worker's `error` and
   `unhandledrejection` handlers), sets the server state to LOST. Every waiting and future call
   then gets `Err`, and detaching doesn't wait for a job the trap left unsettled.
+- A GPU worker that ends without marking anything (the page terminated it) is caught by the
+  caller's deadline (`call_with_deadline`; the prover's hook uses 60 s): the call returns
+  `TimedOut` and marks the server state LOST, so later calls fail at once.
 - With no GPU worker attached (no WebGPU, no adapter), every call returns `Err` at once.
-- On `Err`, the caller uses the CPU, whose outputs are the same.
+- On `Err`, the caller uses the CPU, whose outputs are the same. After `Lost` or `TimedOut`
+  (`job_may_be_running`) the worker may still write the job's outputs, so the caller leaks them
+  rather than free memory it could write into.
 
 The last three were run, not just written: `phases=trap` sends `op::TEST_TRAP`, which panics in
 the GPU module, and Firefox without its WebGPU prefs has no WebGPU. In both cases the calls
@@ -124,8 +130,9 @@ returned errors and the run ended cleanly. A recovered page would need a new GPU
 
 ## Measurements
 
-**These are software-GPU numbers.** Chrome 154 ran headless on SwiftShader (Vulkan on the CPU),
-because this machine's NVIDIA driver is broken. Firefox 157 ran headless with the WebGPU prefs
+**These are the bridge demo's software-GPU numbers.** Chrome 154 ran headless on SwiftShader
+(Vulkan on the CPU), because Chrome couldn't reach this machine's NVIDIA GPU then (it can now,
+with the flags in **The striped commitment in Chrome on an RTX 3080** below). Firefox 157 ran headless with the WebGPU prefs
 forced on (Linux doesn't ship it), on its fallback adapter. Both used 8 rayon threads on a
 36-thread x86 machine. The raw reports are in results/.
 
@@ -214,6 +221,81 @@ the renderer's baseline with a tiny run was 0.6 GiB.
 Unbounded transfers add 1.4 GiB to the tab's own process. Chrome backs writes and mappable
 buffers with shared memory mapped into the renderer, which is why the bridge bounds them.
 
+## The striped commitment in Chrome on an RTX 3080
+
+The prover's threaded build with feature `gpu` (see **The prover's side, as built**) proving the
+four captures in headless Chrome 154 on this machine's RTX 3080 (18 cores, 36 threads; NVIDIA
+595.99, Vulkan), 16 rayon threads. Chrome reaches the GPU through Vulkan with
+`--enable-unsafe-webgpu --enable-features=Vulkan --use-angle=vulkan --disable-gpu-compositing`;
+the adapter is `nvidia`/`ampere`, and the device gets its limits (4 GiB buffers, 2 GiB bindings).
+GPU on (`gpu=1`), GPU off (the same build, no port) and the default build (feature `threads`
+only) ran interleaved, 3 reps each, with the same flags; other agents' jobs put the machine's
+load at 3 to 15.
+
+**Correctness.** Every proof was byte-identical to the native prover's and verified: 12 GPU-on
+proofs with all 8 striped commitments on the GPU each, 12 GPU-off, 12 default-build. So were:
+
+- a proof with `max_gpu_mib=600`: 4 commitments on the GPU, the 4 larger ones refused for the
+  CPU;
+- a proof where the page terminated the GPU worker 6 s in (hook deadline 3 s): 3 on the GPU, the
+  4th timed out, the rest on the CPU;
+- 10 GPU-on proofs in Firefox (below).
+
+**Prove time** (s; best and median of 3):
+
+| capture | GPU on | GPU off | default build | GPU on vs off |
+|---|---|---|---|---|
+| register | 11.15 / 11.17 | 13.57 / 13.64 | 13.67 / 13.71 | 1.22x |
+| deposit | 12.08 / 12.20 | 14.55 / 14.65 | 14.55 / 14.59 | 1.20x |
+| pay | 11.24 / 11.32 | 13.71 / 13.78 | 14.06 / 14.20 | 1.22x |
+| withdraw | 11.05 / 11.32 | 13.56 / 13.57 | 13.76 / 13.77 | 1.23x |
+
+GPU off is the default build's time: the feature costs nothing without a GPU worker.
+
+**The commitments** (ms, medians): the 8 striped commitments take 2.0 to 2.3 s through the hook,
+where `new_striped` takes 4.6 to 5.4 s on the CPU (`cpu_times=1`, a tracing layer on its span).
+Per commitment, register, in proof order (the Cairo proof's four trees, log blowup 3, then
+the circuit proof's four, log blowup 2):
+
+| columns | 156 | 2608 | 1616 | 8 | 45 | 114 | 152 | 8 |
+|---|---|---|---|---|---|---|---|---|
+| coefficients (MiB) | 39 | 490 | 467 | 32 | 131 | 386 | 432 | 64 |
+| GPU, through the hook | 189 | 524 | 338 | 111 | 257 | 252 | 278 | 87 |
+| CPU, `new_striped` | 234 | 1309 | 1249 | 154 | 249 | 591 | 643 | 160 |
+
+The two large Cairo trees gain the most (2.5x and 3.7x); on the small ones the transfers and
+setup cost about what the CPU's FFTs do.
+
+**Where a proof's 2.2 s of GPU commitment goes** (sums over the 8, medians of 12 proofs): upload
+0.75 s (2.03 GiB at 2.7 GiB/s, 0.36 s of it waiting for the ring's buffers), compute 0.62 s,
+readback 0.49 s (2.16 GiB at 4.4 GiB/s), setup (buffers, plans, stripe twiddles) 0.18 s, the
+hook's allocation of the outputs 0.07 s, the twiddles 0.03 s. Transfers are 57 % of it: on a
+discrete GPU the next gains are in keeping data resident, not in the kernels.
+
+**Memory** (MiB; the range of the four captures' medians; RSS peaks; video memory is the
+device's used memory over its idle level):
+
+| | wasm memory | renderer (the tab) | GPU process | video memory |
+|---|---|---|---|---|
+| GPU on | 2374 to 2497 | 2908 to 3034 | 456 to 458 | +1235 |
+| GPU off | 2390 to 2495 | 2712 to 2829 | 213 to 214 | +53 |
+
+The wasm memory doesn't change: the hook allocates what `new_striped` would. The tab grows by
+about 200 MiB (the GPU worker, and the transfers' mappable buffers, which Chrome maps into it),
+the GPU process by about 245 MiB. The largest commitment holds 1148 MiB of device memory. The GPU worker starts in about 0.3 s (0.5 s from the page), compiling the
+commitment's pipelines.
+
+**Firefox 157** (headless, `dom.webgpu.enabled`, `gfx.webgpu.force-enabled`,
+`gfx.webgpu.ignore-blocklist`; Linux doesn't ship WebGPU) gets the RTX 3080 with the adapter's
+own limits (2 GiB buffers and bindings). GPU on: register 11.71, deposit 12.45, pay 11.41,
+withdraw 11.55 s (best; 1 to 5 runs), every proof identical and verified with 8 of 8
+commitments on the GPU; pay with the GPU off: 14.68 s (best of 2). The poll kicks (`kick_ms` 2)
+are on. Its WebGPU runs in the parent process: 649 to 769 MiB of RSS with the GPU, 512 to 518
+without; the content process 2921 to 3040 MiB, against 2882 to 2903. One of 11 GPU-on runs had
+a commitment refused with an error the report couldn't carry, which failed that run (fixed:
+the reasons are now escaped, and a report that doesn't parse no longer fails a proof); the 5
+runs after the fix had none.
+
 ## How the FFT and Merkle kernels plug in
 
 This is based on their branches: `gpu-fft` at 85dfe57e (`GpuColumns`,
@@ -255,26 +337,60 @@ This is based on their branches: `gpu-fft` at 85dfe57e (`GpuColumns`,
 6. **Later: residency.** Keep the extended evaluations on the GPU for quotients and FRI, rather
    than reading back twice the trace.
 
-## What changes in the prover's wasm build
+## The prover's side, as built
 
-- **os_wasm_probe:**
-  - It depends on `stwo-gpu-bridge` by path. The crate has no dependencies, and uses nightly's
-    `stdarch_wasm_atomic_wait`, which the prover's toolchain already has.
-  - It exports the region's address (`bridge_region()`).
-  - The wasm-bindgen pin, the flags and `-Z build-std` stay as they are.
-- **stwo (Outis fork):** the commitment hook above, behind a feature, for wasm32 with atomics
-  only.
-- **worker.mjs:**
-  - It gets a port from the page.
-  - After `initThreadPool`, it posts `{attach: {memory: wasm.memory, base}}` and awaits
-    `{attached}` before `session.prove()`.
-  - At the end, it posts `{detach}` before `endChildren()`.
-- **The page:** it creates the GPU worker once (gpu.worker.mjs and pkg/gpu, 304 KB of wasm), and
-  a MessageChannel per run.
-- **The build:** build-wasm.sh gains the GPU module's step, as build.sh does here. It is a plain
-  `cargo build --target wasm32-unknown-unknown`, with no threads and no build-std, and
-  wasm-bindgen 0.2.128 from `.tools/`. Bumping the prover's pin to ≥ 0.2.127 would let one CLI
-  serve both, but nothing requires it.
+The prover (outis-wallet/prover) builds this with feature `gpu` (`scripts/build-wasm.sh web-gpu`,
+into `pkg-mt-gpu/`); its default web build is unchanged.
+
+- **stwo (Outis fork):** `set_striped_commit_hook::<B, MC>(Some(hook))`.
+  `CommitmentTreeProver::new_striped` calls the hook once its striped path applies; the hook
+  returns the tree, or gives the polynomials back and `new_striped` commits them itself. Without
+  a hook nothing changes. The hook is in stwo for every target; only the prover registers one.
+- **os_wasm_probe, `src/gpu.rs` (feature `gpu`):**
+  - `gpu_bridge_region()`: the job table's address, its header written.
+  - `gpu_enable()` / `gpu_disable()`: registers and removes the hook (SimdBackend, Blake2s M31).
+  - The hook allocates the outputs as `new_striped` leaves them (each column's stripe 0, or its
+    whole evaluation for the small ones; the layers it stores, root first), faults their pages
+    in on all threads, writes a descriptor (`bridge::commit`) and calls `op::COMMIT_STRIPED`.
+    The calling thread blocks; the GPU worker fills those Vecs, and the hook builds the
+    `CommitmentTreeProver` from them. On any `Err` (no worker, a lost device, a shape or a size
+    the worker refuses) it returns the polynomials, for the CPU.
+  - `gpu_report()`: per commitment, its shape, where it ran (or why not) and its times.
+  - `gpu_time_cpu_commitments()`: a tracing layer that times `new_striped`'s own span, for the
+    CPU's reference in a run without the GPU.
+- **js/worker.mjs:** given a `gpuPort`, after `initThreadPool` it posts
+  `{attach: {memory, base: gpu_bridge_region()}}`, awaits `{attached}` and calls `gpu_enable()`;
+  after the proof (and on failure) it calls `gpu_disable()` and posts `{detach}`, before
+  `endChildren()`. Both requests time out after 10 s; a proof whose attach timed out runs on
+  the CPU.
+- **js/gpu.mjs:** `startGpu()` for the page: starts `gpu/gpu.worker.mjs` once, resolves with
+  `{ready, adapter, info}` (or `{ready: false, error}`, also after 20 s without a device), and
+  `port()` gives a port for one proof.
+- **scripts/build-web-engine.sh:** `PKG=pkg-mt-gpu GPU_WEB=<this directory>` adds the GPU
+  worker (`gpu.worker.mjs`, `pkg/gpu/`) to the site as `gpu/`, and `engine/gpu.mjs`.
+
+The GPU module's side of `op::COMMIT_STRIPED` is `gpu/src/commit.rs`:
+
+1. It reads the descriptor and checks every length against `new_striped`'s layout (the striped
+   path, the kept-whole columns, the stored levels) and the device's binding limits. A
+   mismatch is an error, so that commitment goes to the CPU; a panic would trap and end the
+   worker.
+2. The twiddles: the tail of the prover's twiddle tree the largest domain reads, copied from
+   its memory (or computed once and kept, `configure_commit`).
+3. `StripedCommitment::with_options(.., without_staging)`: the native commitment's buffers,
+   plans and stripe twiddles.
+4. Upload: the coefficients, packed into a ring of 4 mappable 8 MiB buffers kept for the
+   page's life (`mapAsync(WRITE)`, copy from the prover's memory, unmap,
+   `copyBufferToBuffer`).
+5. One submission for every stripe's extension and hashing and the levels above
+   (`StripedCommitment::encode`), then `onSubmittedWorkDone`.
+6. Readback: a ring of 4 mappable 8 MiB buffers, chunks packed from the outputs' segments and
+   copied straight into the prover's columns and layers.
+7. Every buffer of the commitment is destroyed (wgpu's WebGPU backend doesn't on drop), and the
+   stats are written into the descriptor.
+
+`Gpu.create` compiles the commitment's pipelines up front, so a proof's first commitment doesn't
+wait for the browser's shader compiler.
 
 ## Risks
 
@@ -287,6 +403,11 @@ This is based on their branches: `gpu-fft` at 85dfe57e (`GpuColumns`,
      A drop-in GPU commitment adds its buffers on top. The coefficients alone are 0.5 GiB, and
      the extension and the tree more. On an iPhone, the GPU path pays only with a residency
      design that frees the CPU copies, and it won't fit as a drop-in.
+   - **Measured on the RTX 3080:** one commitment holds up to 1148 MiB of device memory, on top
+     of the unchanged 2.3 to 2.4 GiB wasm heap. `max_gpu_mib` caps it (a larger commitment goes
+     to the CPU), but the commitments that fit under a phone's budget are the small ones, which
+     gain the least. Leave the GPU off on iOS until the commitment streams its stripes through
+     bounded buffers or stays resident.
    - **Transfers add their own copies there too.** Safari copies each write over 16 MiB into
      WebContent, and `getMappedRange` returns a copy into WebContent. The bridge's defaults stay
      clear of that: 8 MiB writes and an 8 MiB ring readback.
@@ -338,7 +459,7 @@ This is based on their branches: `gpu-fft` at 85dfe57e (`GpuColumns`,
   wasm-bindgen versions build it.
 - `gpu/`, `gpu.worker.mjs`: the GPU worker.
   - The ops are ping, empty submit, upload, readback and the M31 product, with chunked bindings,
-    error scopes and bounded transfers.
+    error scopes and bounded transfers, and the striped commitment (`gpu/src/commit.rs`).
   - The worker's JS owns the slot protocol and failure handling.
 - `demo/`, `prover.worker.mjs`, `index.html`, `main.mjs`: the demo.
   - It is threaded like the prover (wasm-bindgen =0.2.126, wasm-bindgen-rayon with `no-bundler`).
