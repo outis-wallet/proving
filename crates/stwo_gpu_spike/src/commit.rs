@@ -680,6 +680,57 @@ impl StripedCommitment {
         )
     }
 
+    /// The buffers the coefficients go to, as [`Self::layout`] places them.
+    pub fn coefficient_buffers(&self) -> &[wgpu::Buffer] {
+        &self.coeffs.buffers
+    }
+
+    /// The buffers of a stripe's evaluations, as [`Self::layout`] places them: stripe 0's once
+    /// the commitment ran.
+    pub fn evaluation_buffers(&self) -> &[wgpu::Buffer] {
+        &self.out.buffers
+    }
+
+    /// The tree's stored levels, as [`Self::tree_layout`] places them.
+    pub fn tree_buffer(&self) -> &wgpu::Buffer {
+        &self.tree
+    }
+
+    /// The columns kept whole ([`kept_whole`]), every stripe's: stripe `s` of column `i` at word
+    /// `s * whole_stride + whole_slot(i)`, `2^log_size` words.
+    pub fn whole_buffer(&self) -> Option<&wgpu::Buffer> {
+        self.whole.as_ref()
+    }
+
+    /// See [`Self::whole_buffer`]: `None` for a column not kept whole.
+    pub fn whole_slot(&self, column: usize) -> Option<u64> {
+        self.whole_slots[column]
+    }
+
+    /// See [`Self::whole_buffer`]: the words of a stripe of the columns kept whole.
+    pub fn whole_stride(&self) -> u64 {
+        self.whole_words
+    }
+
+    /// Frees every buffer the commitment uses now, its twiddles' too: for a commitment that owns
+    /// them ([`Self::with_options`]); one built on a [`CommitBuffers`] and shared twiddles frees
+    /// theirs as well. In a browser a buffer's memory is otherwise held until its JS object is
+    /// garbage collected (wgpu's WebGPU backend doesn't destroy buffers on drop). Nothing may be
+    /// recorded or read after this.
+    pub fn destroy(&self) {
+        self.coeffs.destroy();
+        self.out.destroy();
+        self.extension.destroy();
+        self.tree.destroy();
+        self.states.destroy();
+        for plan in self.stripe_plans.iter().chain([&self.top]) {
+            plan.destroy();
+        }
+        if let Some(whole) = &self.whole {
+            whole.destroy();
+        }
+    }
+
     /// The bytes of the device buffers (coefficients, one stripe's evaluations, twiddles, Merkle
     /// states, the tree's levels, the whole columns): the buffers' whole sizes, which may exceed
     /// this tree's needs when they are reused.
