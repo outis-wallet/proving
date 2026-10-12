@@ -123,7 +123,7 @@ impl<B: Backend> DomainEvaluationAccumulator<B> {
     }
 
     /// An accumulator holding already accumulated columns by log size, ready to be finalized.
-    pub fn from_sub_accumulations(
+    pub const fn from_sub_accumulations(
         sub_accumulations: Vec<Option<SecureColumnByCoords<B>>>,
         evaluation_mode: EvaluationMode,
     ) -> Self {

@@ -67,16 +67,16 @@ impl<B: ColumnOps<BaseField>> BaseColumnPool<B> {
             .filter(|entry| *entry.key() > log_size && !entry.value().is_empty())
             .map(|entry| *entry.key())
             .min();
-        if let Some(larger) = larger {
-            if let Some(mut buffer) = self.try_take(larger) {
-                if buffer.truncate(1 << log_size) {
-                    // The tail of a larger buffer was resident; give those pages back to the
-                    // kernel instead of carrying them through the rest of the proof.
-                    buffer.release_spare();
-                    return buffer;
-                }
-                self.give_back(larger, buffer);
+        if let Some(larger) = larger
+            && let Some(mut buffer) = self.try_take(larger)
+        {
+            if buffer.truncate(1 << log_size) {
+                // The tail of a larger buffer was resident; give those pages back to the
+                // kernel instead of carrying them through the rest of the proof.
+                buffer.release_spare();
+                return buffer;
             }
+            self.give_back(larger, buffer);
         }
         // A smaller idle buffer allocated with room to grow (see below), or shortened from a
         // larger one, is grown back: its pages are resident or reserved, and nothing is copied.

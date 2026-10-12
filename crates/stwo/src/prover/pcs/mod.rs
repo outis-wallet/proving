@@ -272,8 +272,9 @@ impl<'a, B: BackendForChannel<MC>, MC: MerkleChannel> CommitmentSchemeProver<'a,
                 .map(|&point| PointSample { point, value: SecureField::default() })
                 .collect_vec()
         });
-        let mut groups: HashMap<(u32, CirclePoint<SecureField>), Vec<(usize, usize, usize)>> =
-            HashMap::new();
+        // The (tree, column, sample) of every sample, by (column log size, projected point).
+        type Members = Vec<(usize, usize, usize)>;
+        let mut groups: HashMap<(u32, CirclePoint<SecureField>), Members> = HashMap::new();
         assert_eq!(polynomials.len(), sampled_points.len());
         for (tree_index, columns) in polynomials.iter().enumerate() {
             assert_eq!(columns.len(), sampled_points[tree_index].len());

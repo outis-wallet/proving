@@ -68,7 +68,7 @@ pub(crate) fn release_pages<T>(spare: &[std::mem::MaybeUninit<T>]) {
 
 /// The whole 4 KiB pages inside `[addr, addr + bytes)`, or an empty range for a buffer below
 /// 2 MiB, which is not worth a system call.
-fn whole_pages(addr: usize, bytes: usize) -> (usize, usize) {
+const fn whole_pages(addr: usize, bytes: usize) -> (usize, usize) {
     const PAGE: usize = 4096;
     if bytes < 1 << 21 {
         return (0, 0);
@@ -946,7 +946,7 @@ static LIVE_ANONYMOUS_BLOCKS: LiveAnonymousBlocks =
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 impl LiveAnonymousBlocks {
-    fn slot(&self, address: usize) -> &AtomicUsize {
+    const fn slot(&self, address: usize) -> &AtomicUsize {
         &self.slots[((address >> 21) ^ (address >> 35)) & (self.slots.len() - 1)]
     }
 
@@ -1018,6 +1018,8 @@ impl LargeBlocks {
     /// An idle block of the largest class that has one, with its size, while the idle memory is
     /// above the low-water mark.
     fn evict(&self) -> Option<(usize, usize)> {
+        // LARGE_LOW_WATER is a tunable, 0 for now, where `<=` is `==`.
+        #[allow(clippy::absurd_extreme_comparisons)]
         if self.idle.load(Ordering::Relaxed) <= LARGE_LOW_WATER {
             return None;
         }
@@ -1028,7 +1030,7 @@ impl LargeBlocks {
 }
 
 /// The class of a block the cache serves, or `None` for one the system allocator serves.
-fn large_class(layout: Layout) -> Option<usize> {
+const fn large_class(layout: Layout) -> Option<usize> {
     let size = layout.size();
     if size < 1 << LARGE_MIN_LOG || size as u64 > 1u64 << LARGE_MAX_LOG || layout.align() > 4096 {
         return None;
@@ -1041,7 +1043,7 @@ fn large_class(layout: Layout) -> Option<usize> {
     Some(((k - LARGE_MIN_LOG) * 4) as usize + size.div_ceil(1 << (k - 2)) - 4)
 }
 
-fn large_class_size(class: usize) -> usize {
+const fn large_class_size(class: usize) -> usize {
     if class == 0 {
         return 1 << LARGE_MIN_LOG;
     }

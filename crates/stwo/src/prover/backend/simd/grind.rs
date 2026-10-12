@@ -106,7 +106,7 @@ fn round8<const R: usize>(v: &mut [u32x8; 16], m: &[u32x8; 10]) {
 }
 
 /// Scalar `G`, used for the part of the compression that does not depend on the nonce.
-fn g_scalar(v: &mut [u32; 16], [a, b, c, d]: [usize; 4], x: u32, y: u32) {
+const fn g_scalar(v: &mut [u32; 16], [a, b, c, d]: [usize; 4], x: u32, y: u32) {
     v[a] = v[a].wrapping_add(v[b]).wrapping_add(x);
     v[d] = (v[d] ^ v[a]).rotate_right(16);
     v[c] = v[c].wrapping_add(v[d]);

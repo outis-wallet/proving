@@ -156,7 +156,10 @@ impl<B: Backend> ComponentProvers<'_, B> {
         // every column receives the same contributions in the same order.
         let powers = B::generate_secure_powers(random_coeff, total_constraints);
         let mut end = total_constraints;
-        let mut groups: Vec<(u32, Vec<(usize, core::ops::Range<usize>)>)> = vec![];
+        // Per size group: the evaluation domain's log size, and its components' indices with
+        // their ranges of the powers.
+        type Group = (u32, Vec<(usize, core::ops::Range<usize>)>);
+        let mut groups: Vec<Group> = vec![];
         for (index, component) in self.components.iter().enumerate() {
             let n = component.n_constraints();
             let start = end - n;
