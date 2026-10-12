@@ -31,7 +31,7 @@ use stwo_gpu_spike::constraint::fixture::Fixture;
 use stwo_gpu_spike::constraint::interp::{RowInputs, accumulate_rows};
 use stwo_gpu_spike::constraint::ir::{Program, Ty, lower, param_values};
 use stwo_gpu_spike::constraint::kernel::{ConstraintKernels, KernelOptions};
-use stwo_gpu_spike::constraint::wgsl::{ColumnGroups, emit, uniform_nodes};
+use stwo_gpu_spike::constraint::wgsl::{ColumnTable, emit, uniform_nodes};
 
 relation!(TestRelation, 4);
 
@@ -209,11 +209,10 @@ fn kernels_validate() {
     let (_, program) = synthetic();
     let n = program.constraints.len();
     let uniforms = uniform_nodes(&program, 0..n);
-    for (split, max_columns) in [(1, 64), (2, 3)] {
-        let groups = ColumnGroups::plan(&program.n_columns(), max_columns);
+    for split in [1, 2] {
         for k in 0..split {
             let range = k * n / split..(k + 1) * n / split;
-            let kernel = emit(&program, range, &groups, &uniforms, 10, 11, 256);
+            let kernel = emit(&program, range, &uniforms, 256);
             validate("synthetic", &kernel.source);
         }
     }
@@ -221,25 +220,25 @@ fn kernels_validate() {
         let text = std::fs::read_to_string(dir.join("program.txt")).unwrap();
         let program = Program::from_text(&text).unwrap();
         let n = program.constraints.len();
-        let groups = ColumnGroups::plan(&program.n_columns(), 1 << 10);
-        let kernel = emit(&program, 0..n, &groups, &uniform_nodes(&program, 0..n), 15, 16, 256);
+        let kernel = emit(&program, 0..n, &uniform_nodes(&program, 0..n), 256);
         validate(&dir.to_string_lossy(), &kernel.source);
         eprintln!(
-            "{}: {} lines of WGSL, {} row nodes, {} uniforms",
+            "{}: {} lines of WGSL, {} row nodes, {} uniforms, splits {:?}",
             dir.display(),
             kernel.source.lines().count(),
             kernel.n_row_nodes,
-            kernel.uniform_nodes.len()
+            kernel.uniform_nodes.len(),
+            KernelOptions::default().ranges(&program),
         );
     }
 }
 
-/// Runs the kernels on the inputs and returns the accumulator's words.
+/// Runs the kernels on the inputs and returns the accumulator's words; `None` if an
+/// interaction's columns exceed the device's storage binding.
 #[allow(clippy::too_many_arguments)]
 fn run_on_gpu(
     gpu: &GpuContext,
     program: &Program,
-    n_columns: &[usize],
     trace_log: u32,
     eval_log: u32,
     options: KernelOptions,
@@ -248,14 +247,20 @@ fn run_on_gpu(
     coeffs: &[QM31],
     denom_inv: &[u32],
     before: &[Vec<u32>; 4],
-) -> [Vec<u32>; 4] {
-    let kernels = ConstraintKernels::new(gpu, program, n_columns, trace_log, eval_log, options);
+) -> Option<[Vec<u32>; 4]> {
+    let table = ColumnTable::of(program);
+    let max_binding = gpu.device.limits().max_storage_buffer_binding_size;
+    if table.n_columns.iter().any(|k| (*k as u64 * 4) << eval_log > max_binding) {
+        return None;
+    }
+    let kernels = ConstraintKernels::new(gpu, program, options, None);
     let uniforms = program.bind(params).unwrap();
     let before: [&[u32]; 4] = std::array::from_fn(|c| before[c].as_slice());
-    let inputs = kernels.upload(gpu, columns, &uniforms, coeffs, denom_inv, &before);
-    let bind_group = kernels.bind_group(gpu, &inputs);
-    kernels.run(gpu, &bind_group);
-    kernels.read_accum(gpu, &inputs)
+    let inputs =
+        kernels.upload(gpu, columns, &uniforms, coeffs, denom_inv, &before, trace_log, eval_log);
+    let bind_group = kernels.bind_inputs(gpu, &inputs);
+    kernels.run(gpu, &bind_group, eval_log);
+    Some(kernels.read_out(gpu, &inputs))
 }
 
 fn mismatches(a: &[Vec<u32>; 4], b: &[Vec<u32>; 4]) -> usize {
@@ -277,8 +282,8 @@ fn gpu_synthetic_kernel_matches_interpreter() {
     let mut rng = SmallRng::seed_from_u64(3);
     let (trace_log, eval_log) = (10u32, 11u32);
     let n = 1usize << eval_log;
-    let n_columns = program.n_columns();
-    let columns: Vec<Vec<Vec<u32>>> = n_columns
+    let columns: Vec<Vec<Vec<u32>>> = program
+        .n_columns()
         .iter()
         .map(|k| (0..*k).map(|_| (0..n).map(|_| rng.random_range(0..P)).collect()).collect())
         .collect();
@@ -300,17 +305,14 @@ fn gpu_synthetic_kernel_matches_interpreter() {
     for options in [
         KernelOptions::default(),
         KernelOptions { split: 3, ..Default::default() },
-        KernelOptions {
-            max_binding_bytes: Some(3 * 4 * n as u64),
-            workgroup_size: 64,
-            ..Default::default()
-        },
-        KernelOptions { unchecked: true, ..Default::default() },
+        KernelOptions { workgroup_size: 64, nodes_per_kernel: 10, ..Default::default() },
+        KernelOptions { unchecked: true, split: 1, ..Default::default() },
     ] {
         let got = run_on_gpu(
-            &gpu, &program, &n_columns, trace_log, eval_log, options, &slices, &params, &coeffs,
-            &denom_inv, &before,
-        );
+            &gpu, &program, trace_log, eval_log, options, &slices, &params, &coeffs, &denom_inv,
+            &before,
+        )
+        .unwrap();
         assert_eq!(mismatches(&got, &expected), 0, "{options:?}");
     }
     assert!(program.nodes.iter().any(|n| n.ty == Ty::Base && matches!(n.op, stwo_gpu_spike::constraint::ir::Op::Inv(_))));
@@ -327,7 +329,8 @@ fn gpu_fixtures_bit_identical() {
     }
     let gpu = GpuContext::new();
     eprintln!("adapter: {:?}", gpu.adapter_info);
-    let split: usize = std::env::var("CONSTRAINT_SPLIT").ok().map_or(1, |s| s.parse().unwrap());
+    // 0: the default split, by row nodes.
+    let split: usize = std::env::var("CONSTRAINT_SPLIT").ok().map_or(0, |s| s.parse().unwrap());
     for dir in dirs {
         let fixture = Fixture::load(&dir).unwrap();
         let name = dir.file_name().unwrap().to_string_lossy().to_string();
@@ -363,7 +366,6 @@ fn gpu_fixtures_bit_identical() {
             run_on_gpu(
                 &gpu,
                 &fixture.program,
-                &fixture.n_columns,
                 trace_log,
                 eval_log,
                 options,
@@ -374,7 +376,11 @@ fn gpu_fixtures_bit_identical() {
                 &fixture.before,
             )
         };
-        let got = run(&slices, &fixture.coeffs);
+        let Some(got) = run(&slices, &fixture.coeffs) else {
+            eprintln!("{name}: skipped, an interaction's columns exceed this device's binding");
+            continue;
+        };
+        let run = |columns: &[Vec<&[u32]>], coeffs: &[QM31]| run(columns, coeffs).unwrap();
         assert_eq!(mismatches(&got, &fixture.after), 0, "{name}: GPU");
         eprintln!("{name}: {words} words identical to SIMD's ({n} rows, split {split})");
 

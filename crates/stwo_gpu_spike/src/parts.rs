@@ -39,17 +39,23 @@ pub enum PartsMode {
     Host,
     /// A3: kept on the GPU by the commitment, read back on request.
     Device,
+    /// A3 with stripe 0 too, each column's stripes 0 and 1 side by side in storage buffers: the
+    /// columns resident for constraint evaluation on the GPU (see [`crate::constraint::composer`]),
+    /// stripe 1 read back on request for the components evaluated on the CPU.
+    Resident,
     /// A2: recomputed on the GPU from stripe 0 on request.
     Recompute,
 }
 
 impl PartsMode {
-    /// `STWO_GPU_PARTS`: `host` (or `a1`), `device` (`a3`), `recompute` (`a2`); `Off` otherwise.
+    /// `STWO_GPU_PARTS`: `host` (or `a1`), `device` (`a3`), `recompute` (`a2`), `resident`;
+    /// `Off` otherwise.
     pub fn from_env() -> Self {
         match std::env::var("STWO_GPU_PARTS").unwrap_or_default().to_ascii_lowercase().as_str() {
             "host" | "a1" => Self::Host,
             "device" | "a3" => Self::Device,
             "recompute" | "a2" => Self::Recompute,
+            "resident" => Self::Resident,
             _ => Self::Off,
         }
     }
@@ -77,11 +83,13 @@ pub fn key(values: &BaseColumn) -> (usize, usize) {
 /// Where a kept stripe 1 is.
 enum Kept {
     Host(BaseColumn),
-    /// In `device[set]`'s buffer `buffer`, at byte `offset`.
+    /// In `device[set]`'s buffer `buffer`, at byte `offset`; and, if the set holds stripe 0
+    /// too, the column's stripes 0 and 1 at byte `resident` of that buffer.
     Device {
         set: usize,
         buffer: usize,
         offset: u64,
+        resident: Option<u64>,
     },
 }
 
@@ -133,6 +141,20 @@ pub struct PartStats {
     pub recompute_bytes: u64,
     /// Clears with something kept.
     pub clears: u64,
+    /// Trees not kept, as they would have exceeded the budget (see
+    /// [`PartStore::set_budget`]).
+    pub over_budget: u64,
+    /// Resident columns found for constraint evaluation on the GPU, and not found.
+    pub resident_hits: u64,
+    pub resident_misses: u64,
+}
+
+/// A column resident on the GPU: its stripes 0 and 1, `2^(log_size + 1)` words from word
+/// `word_offset` of `buffer`.
+#[derive(Clone, Debug)]
+pub struct ResidentColumn {
+    pub buffer: wgpu::Buffer,
+    pub word_offset: u64,
 }
 
 /// Stripe 1 of the columns of the trees committed since the last clear (see the module docs).
@@ -143,6 +165,8 @@ pub struct PartStore {
     /// A lookup was made since the last commitment.
     looked_up: bool,
     stats: PartStats,
+    /// The most GPU memory the kept stripes may take (`None`: no limit).
+    budget: Option<u64>,
 }
 
 impl PartStore {
@@ -201,6 +225,21 @@ impl PartStore {
         }
     }
 
+    /// Sets the most GPU memory the kept stripes may take (`None`: no limit): a tree that would
+    /// take more is not kept ([`Self::fits`]).
+    pub fn set_budget(&mut self, bytes: Option<u64>) {
+        self.budget = bytes;
+    }
+
+    /// Whether `bytes` more GPU memory fit in the budget; counts a tree that doesn't.
+    pub fn fits(&mut self, bytes: u64) -> bool {
+        let fits = self.budget.is_none_or(|budget| self.stats.held_bytes + bytes <= budget);
+        if !fits {
+            self.stats.over_budget += 1;
+        }
+        fits
+    }
+
     /// Keeps `stripes` (GPU memory), stripe 1 of the columns the tree holds as `stripe0`.
     pub fn keep_device(
         &mut self,
@@ -210,15 +249,16 @@ impl PartStore {
         log_blowup: u32,
     ) {
         let set = self.device.len();
-        for ((values, place), &log_size) in stripe0.iter().zip(&stripes.places).zip(log_sizes) {
-            let Some((buffer, offset)) = *place else { continue };
+        for (i, (values, &log_size)) in stripe0.iter().zip(log_sizes).enumerate() {
+            let Some((buffer, offset)) = stripes.stripe1_place(i) else { continue };
+            let resident = stripes.with_stripe0.then(|| stripes.places[i].unwrap().1);
             self.entries.insert(
                 key(values),
                 Entry {
                     fingerprint: fingerprint(values.as_slice()),
                     domain_log_size: log_size + log_blowup,
                     log_blowup,
-                    kept: Kept::Device { set, buffer, offset },
+                    kept: Kept::Device { set, buffer, offset, resident },
                 },
             );
         }
@@ -258,7 +298,7 @@ impl PartStore {
         }
         let place = match entry.kept {
             Kept::Host(_) => None,
-            Kept::Device { set, buffer, offset } => Some((set, buffer, offset)),
+            Kept::Device { set, buffer, offset, .. } => Some((set, buffer, offset)),
         };
         self.stats.hits += 1;
         self.stats.hit_bytes += 4 * stripe0.length as u64;
@@ -285,6 +325,35 @@ impl PartStore {
                 Some(Found::Device { set, buffer, offset })
             }
         }
+    }
+
+    /// The column the tree holds as `stripe0` (of committed domain log size `domain_log_size`
+    /// and blowup `log_blowup`), resident on the GPU with its stripes 0 and 1 (in
+    /// [`PartsMode::Resident`]); `None` if not. The column stays (unlike [`Self::find`]'s).
+    pub fn resident(
+        &mut self,
+        stripe0: &BaseColumn,
+        domain_log_size: u32,
+        log_blowup: u32,
+    ) -> Option<ResidentColumn> {
+        self.looked_up = true;
+        let found = self.entries.get(&key(stripe0)).and_then(|entry| {
+            let Kept::Device { set, buffer, resident: Some(offset), .. } = entry.kept else {
+                return None;
+            };
+            (entry.domain_log_size == domain_log_size
+                && entry.log_blowup == log_blowup
+                && entry.fingerprint == fingerprint(stripe0.as_slice()))
+            .then(|| ResidentColumn {
+                buffer: self.device[set].as_ref().expect("a kept set").buffers[buffer].clone(),
+                word_offset: offset / 4,
+            })
+        });
+        match found {
+            Some(_) => self.stats.resident_hits += 1,
+            None => self.stats.resident_misses += 1,
+        }
+        found
     }
 
     /// Buffer `buffer` of the kept set `set` (see [`Found::Device`]).

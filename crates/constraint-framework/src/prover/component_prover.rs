@@ -21,7 +21,9 @@ use stwo::prover::secure_column::SecureColumnByCoords;
 use stwo::prover::{ComponentProver, DomainEvaluationAccumulator, EvaluationMode, Poly, Trace};
 use tracing::{Level, span};
 
-use super::constraint_hook::{ConstraintEvalJob, ConstraintEvalOutcome, constraint_eval_hook};
+use super::constraint_hook::{
+    ConstraintEvalJob, ConstraintEvalOutcome, ConstraintsFingerprint, constraint_eval_hook,
+};
 use super::trace_part_hook::{TracePartColumn, TracePartRequest, trace_part_hook};
 use super::{CpuDomainEvaluator, SimdDomainEvaluator};
 use crate::expr::ExprEvaluator;
@@ -315,6 +317,7 @@ impl<E: FrameworkEval + Sync> ComponentProver<SimdBackend> for FrameworkComponen
             None => None,
             Some(hook) => {
                 let trace_constraints = || self.eval.evaluate(ExprEvaluator::new());
+                let fingerprint = || ConstraintsFingerprint::of(&self.eval);
                 let job = ConstraintEvalJob {
                     component: core::any::type_name::<E>(),
                     trace_log_size: trace_domain.log_size(),
@@ -327,6 +330,7 @@ impl<E: FrameworkEval + Sync> ComponentProver<SimdBackend> for FrameworkComponen
                     polys: &polys,
                     evaluations: &trace,
                     trace_constraints: &trace_constraints,
+                    fingerprint: &fingerprint,
                 };
                 match hook(&job, accum.col) {
                     ConstraintEvalOutcome::Evaluated => return,

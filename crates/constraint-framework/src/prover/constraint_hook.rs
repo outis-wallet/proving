@@ -21,6 +21,7 @@ use stwo::prover::poly::BitReversedOrder;
 use stwo::prover::poly::circle::CircleEvaluation;
 use stwo::prover::secure_column::SecureColumnByCoords;
 
+pub use super::fingerprint::ConstraintsFingerprint;
 use crate::expr::ExprEvaluator;
 
 /// A component's committed evaluations, per interaction, as the SIMD evaluation borrows them.
@@ -57,12 +58,20 @@ pub struct ConstraintEvalJob<'a> {
     pub polys: &'a TreeVec<Vec<&'a Poly<SimdBackend>>>,
     pub(super) evaluations: &'a Evaluations<'a>,
     pub(super) trace_constraints: &'a dyn Fn() -> ExprEvaluator,
+    pub(super) fingerprint: &'a dyn Fn() -> ConstraintsFingerprint,
 }
 
 impl ConstraintEvalJob<'_> {
     /// The component's constraints, traced symbolically.
     pub fn constraints(&self) -> ExprEvaluator {
         (self.trace_constraints)()
+    }
+
+    /// A fingerprint of the component's constraints and its relations' elements, much cheaper
+    /// than [`Self::constraints`]: components with the same fingerprint have the same
+    /// constraints (see [`ConstraintsFingerprint`]).
+    pub fn fingerprint(&self) -> ConstraintsFingerprint {
+        (self.fingerprint)()
     }
 }
 
