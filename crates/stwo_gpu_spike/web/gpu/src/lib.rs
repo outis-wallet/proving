@@ -559,6 +559,11 @@ impl Inner {
         let oom = oom.pop().await;
         let validation = scope.pop().await;
         if let Some(error) = oom.or(validation) {
+            // What the commitments keep may be what failed (a buffer whose allocation ran out of
+            // memory is invalid, and so is anything built on it): the next one starts afresh.
+            if op == bridge::op::COMMIT_STRIPED {
+                self.committer.release();
+            }
             return Err(format!("WebGPU: {error}"));
         }
         if LOST.load(Ordering::SeqCst) {
