@@ -28,8 +28,9 @@ use preprocessed_columns::PreProcessedColumnId;
 #[cfg(all(feature = "prover", feature = "std"))]
 pub use prover::{
     AssertEvaluator, CpuDomainEvaluator, FractionWriter, LogupColGenerator, LogupTraceGenerator,
-    SimdDomainEvaluator, assert_constraints_on_polys, assert_constraints_on_trace, constraint_hook,
-    relation_tracker,
+    SimdDomainEvaluator, TracePartColumn, TracePartHook, TracePartRequest,
+    assert_constraints_on_polys, assert_constraints_on_trace, constraint_hook, relation_tracker,
+    set_trace_part_hook,
 };
 use stwo::core::Fraction;
 use stwo::core::fields::FieldExpOps;

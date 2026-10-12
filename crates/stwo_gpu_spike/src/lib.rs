@@ -28,6 +28,8 @@ pub mod committer;
 pub mod constraint;
 pub mod extension;
 pub mod merkle;
+pub mod parts;
+pub mod recompute;
 pub mod reference;
 pub mod shapes;
 pub mod stream;
