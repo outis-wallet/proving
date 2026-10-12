@@ -137,6 +137,61 @@ fn striped_decommit_hook<B: ColumnOps<BaseField> + 'static>()
         .cloned()
 }
 
+/// One group of [`CommitmentSchemeProver`]'s out-of-domain samples of columns without stored
+/// coefficients: columns whose committed domain has log size `log_size`, at `point` (the sample
+/// point projected to that domain's polynomials).
+pub struct OodSampleGroup<'a, B: ColumnOps<BaseField>> {
+    pub log_size: u32,
+    pub point: CirclePoint<SecureField>,
+    pub columns: Vec<&'a CircleEvaluation<B, BaseField, BitReversedOrder>>,
+}
+
+/// A replacement for [`CommitmentSchemeProver`]'s out-of-domain evaluation of columns without
+/// stored coefficients (`PolyOps::subdomain_eval_group` on their first stripe), on one backend,
+/// e.g. on a GPU that still holds the columns' coefficients. Given every group of the samples,
+/// it returns, per group and per column, the column's value at the group's point, or `None` for
+/// the columns it leaves to the CPU. An answer of the wrong shape is ignored.
+///
+/// A hook must return exactly the values of the columns' polynomials (those interpolated from
+/// their first stripe) at the point. The values are mixed into the channel and sent in the
+/// proof; stwo does not check them (the verifier rejects a proof built on a wrong value).
+pub type OodSampleHook<B> =
+    dyn Fn(&[OodSampleGroup<'_, B>]) -> Vec<Vec<Option<SecureField>>> + Send + Sync;
+
+/// The registered out-of-domain sample hooks, by backend: `Arc<OodSampleHook<B>>`s behind `Any`.
+static OOD_SAMPLE_HOOKS: std::sync::RwLock<
+    Option<HashMap<std::any::TypeId, std::sync::Arc<dyn std::any::Any + Send + Sync>>>,
+> = std::sync::RwLock::new(None);
+
+/// Sets the hook [`CommitmentSchemeProver`]'s out-of-domain sampling tries first, for backend
+/// `B`, or removes it (`None`). It applies to the samples from then on, in every thread.
+pub fn set_ood_sample_hook<B: ColumnOps<BaseField> + 'static>(
+    hook: Option<std::sync::Arc<OodSampleHook<B>>>,
+) {
+    let key = std::any::TypeId::of::<B>();
+    let mut hooks = OOD_SAMPLE_HOOKS.write().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let hooks = hooks.get_or_insert_with(HashMap::new);
+    match hook {
+        Some(hook) => {
+            hooks.insert(key, std::sync::Arc::new(hook));
+        }
+        None => {
+            hooks.remove(&key);
+        }
+    }
+}
+
+/// The out-of-domain sample hook registered for backend `B`, if any.
+fn ood_sample_hook<B: ColumnOps<BaseField> + 'static>() -> Option<std::sync::Arc<OodSampleHook<B>>>
+{
+    let hooks = OOD_SAMPLE_HOOKS.read().unwrap_or_else(|poisoned| poisoned.into_inner());
+    hooks
+        .as_ref()?
+        .get(&std::any::TypeId::of::<B>())?
+        .downcast_ref::<std::sync::Arc<OodSampleHook<B>>>()
+        .cloned()
+}
+
 /// The prover side of a FRI polynomial commitment scheme. See [super].
 pub struct CommitmentSchemeProver<'a, B: BackendForChannel<MC>, MC: MerkleChannel> {
     pub trees: TreeVec<MaybeOwned<'a, CommitmentTreeProver<B, MC>>>,
@@ -352,10 +407,42 @@ impl<'a, B: BackendForChannel<MC>, MC: MerkleChannel> CommitmentSchemeProver<'a,
             }
         }
         let log_blowup = self.config.fri_config.log_blowup_factor;
-        for ((log_size, point), members) in groups {
+        let groups = groups.into_iter().collect_vec();
+        // A registered hook's values, per group and column (`None`: the CPU's).
+        let hooked: Option<Vec<Vec<Option<SecureField>>>> =
+            ood_sample_hook::<B>().and_then(|hook| {
+                let requests = groups
+                    .iter()
+                    .map(|&((log_size, point), ref members)| OodSampleGroup {
+                        log_size,
+                        point,
+                        columns: members
+                            .iter()
+                            .map(|&(tree, column, _)| &polynomials[tree][column].evals)
+                            .collect_vec(),
+                    })
+                    .collect_vec();
+                let answers = hook(&requests);
+                // An answer of the wrong shape is ignored.
+                (answers.len() == requests.len()
+                    && answers.iter().zip(&requests).all(|(a, r)| a.len() == r.columns.len()))
+                .then_some(answers)
+            });
+        for (g, ((log_size, point), members)) in groups.into_iter().enumerate() {
+            let answers = hooked.as_ref().map(|hooked| &hooked[g]);
+            let (answered, members): (Vec<_>, Vec<_>) = members
+                .into_iter()
+                .enumerate()
+                .partition(|&(m, _)| answers.is_some_and(|answers| answers[m].is_some()));
+            for (m, (tree, column, sample)) in answered {
+                samples[tree][column][sample].value = answers.unwrap()[m].unwrap();
+            }
+            if members.is_empty() {
+                continue;
+            }
             let evaluations = members
                 .iter()
-                .map(|&(tree, column, _)| &polynomials[tree][column].evals)
+                .map(|&(_, (tree, column, _))| &polynomials[tree][column].evals)
                 .collect_vec();
             let values = B::subdomain_eval_group(
                 CanonicCoset::new(log_size),
@@ -364,7 +451,7 @@ impl<'a, B: BackendForChannel<MC>, MC: MerkleChannel> CommitmentSchemeProver<'a,
                 &evaluations,
             );
             assert_eq!(members.len(), values.len());
-            for ((tree, column, sample), value) in members.into_iter().zip(values) {
+            for ((_, (tree, column, sample)), value) in members.into_iter().zip(values) {
                 samples[tree][column][sample].value = value;
             }
         }
@@ -1142,5 +1229,173 @@ mod striped_decommit_hook_tests {
             removed_decommitment.decommitment.hash_witness,
             decommitment.decommitment.hash_witness
         );
+    }
+}
+
+#[cfg(test)]
+mod ood_sample_hook_tests {
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::core::fri::FriConfig;
+    use crate::core::vcs_lifted::blake2_merkle::Blake2sM31MerkleChannel;
+    use crate::prover::backend::simd::SimdBackend;
+    use crate::prover::backend::simd::column::BaseColumn;
+    use crate::prover::poly::circle::PolyOps;
+
+    type Scheme<'a> = CommitmentSchemeProver<'a, SimdBackend, Blake2sM31MerkleChannel>;
+
+    /// This test's columns only (sizes no other test samples), so that the hook, which is
+    /// process-wide, leaves everyone else's samples to the CPU.
+    const LIFTING_LOG_SIZE: u32 = 19;
+    const LOG_SIZES: [u32; 3] = [11, 16, 16];
+    const LOG_BLOWUP: u32 = 3;
+
+    /// This test's sample points.
+    fn point(k: u128) -> CirclePoint<SecureField> {
+        CirclePoint::<SecureField>::get_point(k * 1_000_003 + 17)
+    }
+
+    fn ours(group: &OodSampleGroup<'_, SimdBackend>) -> bool {
+        LOG_SIZES.iter().any(|&log_size| group.log_size == log_size + LOG_BLOWUP)
+            && (1..=4)
+                .any(|k| group.point == point(k).repeated_double(LIFTING_LOG_SIZE - group.log_size))
+    }
+
+    /// The values of the columns' polynomials (interpolated from their first stripe) at the
+    /// group's point, by `eval_at_point`: another way than the CPU's barycentric sums.
+    fn polynomial_values(group: &OodSampleGroup<'_, SimdBackend>) -> Vec<Option<SecureField>> {
+        group
+            .columns
+            .iter()
+            .map(|column| {
+                let poly = Poly::new(None, (*column).clone());
+                let twiddles = SimdBackend::precompute_twiddles(poly.stripe_domain().half_coset);
+                Some(poly.stripe_coefficients(&twiddles).eval_at_point(group.point))
+            })
+            .collect()
+    }
+
+    fn values(samples: &TreeVec<Vec<Vec<PointSample>>>) -> Vec<SecureField> {
+        samples.iter().flatten().flatten().map(|sample| sample.value).collect()
+    }
+
+    #[test]
+    fn hook_values_partial_or_declines() {
+        let polys = LOG_SIZES
+            .iter()
+            .enumerate()
+            .map(|(c, &log_size)| {
+                CircleCoefficients::new(
+                    (0..1u32 << log_size)
+                        .map(|i| {
+                            BaseField::from(
+                                i.wrapping_mul(2_654_435_761).wrapping_add(7 * c as u32) >> 1,
+                            )
+                        })
+                        .collect::<BaseColumn>(),
+                )
+            })
+            .collect();
+        let twiddles = SimdBackend::precompute_twiddles(
+            CanonicCoset::new(LIFTING_LOG_SIZE).circle_domain().half_coset,
+        );
+        let config = PcsConfig {
+            fri_config: FriConfig::new(0, 1, LOG_BLOWUP, 3, 1),
+            trace_lifting_log_size: LIFTING_LOG_SIZE,
+            preprocessed_lifting_log_size: LIFTING_LOG_SIZE,
+        };
+        let mut scheme = Scheme::new(config, &twiddles);
+        let tree = CommitmentTreeProver::new_striped(
+            polys,
+            LOG_BLOWUP,
+            &twiddles,
+            LIFTING_LOG_SIZE,
+            &scheme.base_column_pool,
+        );
+        assert!(tree.polynomials.iter().all(|p| p.evals.values.len() < p.evals.domain.size()));
+        scheme.trees.push(MaybeOwned::Owned(tree));
+        // Two points for every column, and a third for the last one.
+        let points = TreeVec::new(vec![vec![
+            vec![point(1), point(2)],
+            vec![point(1), point(3)],
+            vec![point(1), point(3), point(4)],
+        ]]);
+        let samples = |scheme: &Scheme<'_>| {
+            values(&scheme.compute_grouped_samples(&points, LIFTING_LOG_SIZE))
+        };
+        let cpu = samples(&scheme);
+
+        // A hook that answers the polynomials' values: the same samples.
+        set_ood_sample_hook::<SimdBackend>(Some(Arc::new(|groups| {
+            groups
+                .iter()
+                .map(|g| if ours(g) { polynomial_values(g) } else { vec![None; g.columns.len()] })
+                .collect()
+        })));
+        assert_eq!(samples(&scheme), cpu);
+
+        // A hook that answers some of the columns: the CPU evaluates the others.
+        set_ood_sample_hook::<SimdBackend>(Some(Arc::new(|groups| {
+            groups
+                .iter()
+                .map(|g| {
+                    let mut values =
+                        if ours(g) { polynomial_values(g) } else { vec![None; g.columns.len()] };
+                    values[0] = None;
+                    values
+                })
+                .collect()
+        })));
+        assert_eq!(samples(&scheme), cpu);
+
+        // A hook that answers wrong values: different samples (the verifier would reject).
+        set_ood_sample_hook::<SimdBackend>(Some(Arc::new(|groups| {
+            groups
+                .iter()
+                .map(|g| {
+                    let values =
+                        if ours(g) { polynomial_values(g) } else { vec![None; g.columns.len()] };
+                    values.into_iter().map(|v| v.map(|v| v + SecureField::from(1u32))).collect()
+                })
+                .collect()
+        })));
+        let tampered = samples(&scheme);
+        assert_ne!(tampered, cpu);
+        assert_eq!(tampered.iter().zip(&cpu).filter(|(a, b)| a != b).count(), cpu.len());
+
+        // A hook that answers with the wrong shape, or declines: the CPU's samples.
+        set_ood_sample_hook::<SimdBackend>(Some(Arc::new(|groups| {
+            // One group too few.
+            let skip = usize::from(groups.iter().any(ours));
+            groups
+                .iter()
+                .skip(skip)
+                .map(|g| match ours(g) {
+                    true => vec![Some(SecureField::from(1u32)); g.columns.len()],
+                    false => vec![None; g.columns.len()],
+                })
+                .collect()
+        })));
+        assert_eq!(samples(&scheme), cpu);
+        set_ood_sample_hook::<SimdBackend>(Some(Arc::new(|groups| {
+            groups
+                .iter()
+                .map(|g| match ours(g) {
+                    // One value too many.
+                    true => vec![Some(SecureField::from(1u32)); g.columns.len() + 1],
+                    false => vec![None; g.columns.len()],
+                })
+                .collect()
+        })));
+        assert_eq!(samples(&scheme), cpu);
+        set_ood_sample_hook::<SimdBackend>(Some(Arc::new(|groups| {
+            groups.iter().map(|g| vec![None; g.columns.len()]).collect()
+        })));
+        assert_eq!(samples(&scheme), cpu);
+
+        // Removed.
+        set_ood_sample_hook::<SimdBackend>(None);
+        assert_eq!(samples(&scheme), cpu);
     }
 }
