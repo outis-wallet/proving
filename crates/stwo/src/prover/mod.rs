@@ -61,11 +61,8 @@ pub fn prove_ex<B: BackendForChannel<MC>, MC: MerkleChannel>(
     // and the components run one at a time, so that only one component's parts are held at once.
     let log_blowup_factor = commitment_scheme.config.fri_config.log_blowup_factor;
     let evaluation_mode = component_provers.evaluation_mode(log_blowup_factor);
-    let one_component_at_a_time = trace
-        .polys
-        .iter()
-        .flatten()
-        .any(|poly| poly.evals.values.len() < poly.evals.domain.size());
+    let one_component_at_a_time =
+        trace.polys.iter().flatten().any(|poly| poly.evals.values.len() < poly.evals.domain.size());
     let composition_poly = component_provers.compute_composition_polynomial_in_mode(
         random_coeff,
         &trace,
