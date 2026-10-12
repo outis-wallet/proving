@@ -296,6 +296,104 @@ a commitment refused with an error the report couldn't carry, which failed that 
 the reasons are now escaped, and a report that doesn't parse no longer fails a proof); the 5
 runs after the fix had none.
 
+## Streamed, on what the worker keeps: Chrome on the RTX 3080
+
+The GPU worker's commitment as it is now (see **The prover's side, as built**: streamed, its
+buffers, twiddles, rings and plans kept), against the one above, in headless Chrome 154 on the
+same machine with the same flags, 16 rayon threads. "Before" is the site built from c39d987a
+(the commitment above); GPU on and off ran interleaved, 3 reps each, one proof per page, with
+other agents' jobs putting the machine's load at 7 to 15. The runs' reports, each commitment's
+stats included, are in `results/chrome154-rtx3080-streamed.jsonl`.
+
+**Correctness.** Every proof below was byte-identical to the native prover's and verified (36 in
+the table, 12 in pages proving 3 times, 4 timestamped). So were proofs with the commitments
+stripe by stripe (`streamed=false`), with `writeBuffer` uploads (`upload=write`), with nothing
+kept (`keep=false`), with the twiddles computed in the worker, with `max_gpu_mib` refusing the
+larger trees, in the serial mode, in a page proving pay, withdraw and register in turn, and with
+the GPU worker ended by the page in the middle of a commitment (150 ms into the Cairo base
+trace's, 60 ms into the second circuit tree's; deadline 3 s): that commitment and the rest went
+to the CPU.
+
+**Prove time** (s; best and median of 3):
+
+| capture | GPU on | GPU on, before | GPU off | GPU on vs off | before vs off |
+|---|---|---|---|---|---|
+| register | 10.93 / 10.93 | 11.15 / 11.32 | 13.79 / 13.84 | 1.26x | 1.24x |
+| deposit | 11.98 / 12.13 | 12.12 / 12.36 | 14.97 / 15.01 | 1.25x | 1.24x |
+| pay | 11.02 / 11.03 | 11.41 / 11.60 | 13.99 / 14.12 | 1.27x | 1.23x |
+| withdraw | 10.95 / 10.96 | 11.39 / 11.41 | 13.91 / 13.94 | 1.27x | 1.22x |
+
+GPU off is unchanged: in an earlier interleaved run of five modes (3 reps), GPU off took
+13.86-14.85 s (best of 3, over the four captures) with this build, 13.79-14.78 s with before's,
+13.87-14.83 s with the default build (feature `threads` only).
+
+**A page's later proofs** (the same capture 3 times on one page; s, with the commitments' ms):
+register 10.90 (1713), 9.92 (1636), 9.55 (1372); deposit 12.05, 10.54, 10.61; pay 11.10, 9.85,
+9.64; withdraw 11.12, 9.69, 9.45 (1356). GPU off, a page's later proofs take 12.8-14.0 s (its
+first 13.9-15.1 s: the browser's compiled code is warm too). From the second proof the twiddles
+are kept, and 6 of the 8 trees' plans (all 8 from the third); the buffers were grown by the
+first.
+
+**The commitments** (ms, the 8 through the hook, medians): 1718-1975, against 2191-2300 before
+and 4779-4849 for `new_striped` on the CPU in wasm. Of pay's 1743: the hook's allocation of the
+outputs 68, the twiddles 78 (the first commitment of each blowup in a page), the plans 15, and
+1530 of transfers and compute overlapped. In those 1530 ms the worker spends 380 ms copying
+coefficients into the upload ring and 430 ms copying the readback ring out (each about 5 GiB/s,
+on its one thread), and waits the rest, 235 ms for an upload chunk and 463 ms for a readback
+chunk: the GPU is the bottleneck. Its own time (timestamp queries, pay): copies in 207 ms,
+compute 677 ms, copies out 216 ms, busy 1100 ms of the 1257 ms from its first to its last work.
+Before, the phases ran one after the other: upload 816 (429 of it waiting for the ring), compute
+642, readback 502, setup 185 (buffers, plans, stripe twiddles per commitment).
+
+| per commitment, pay (ms, medians) | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 |
+|---|---|---|---|---|---|---|---|---|
+| columns | 156 | 2608 | 1616 | 8 | 45 | 114 | 152 | 8 |
+| GPU, through the hook | 282 | 507 | 255 | 53 | 252 | 170 | 184 | 50 |
+| before | 200 | 545 | 357 | 113 | 277 | 414 | 286 | 93 |
+| CPU, `new_striped` | 238 | 1416 | 1324 | 159 | 254 | 607 | 663 | 162 |
+| the GPU's compute (timestamps) | 11 | 278 | 68 | 27 | 100 | 144 | 42 | 7 |
+
+**What limits it: the GPU's clocks.** The Cairo base trace's compute takes 270-314 ms of GPU time
+here, and 69 ms natively at full clocks (`bench_commit`, streamed); the interaction trace,
+committed right after it, 66-69 ms. The prover's CPU phases between commitments idle the GPU,
+which drops its clocks (P5: 495 MHz, memory 810 MHz, PCIe gen 2; `nvidia-smi` during a proof)
+and climbs back over the next few hundred ms of work. Natively the committer keeps the GPU's
+clocks up between commitments (`warm.rs`); the GPU worker doesn't (the GPU is the page's too).
+At full clocks the compute would be about a third of its 0.6-0.8 s.
+
+The browser's GPU process isn't the bottleneck either: in a Chrome trace of a proof its main
+thread is busy about 0.9 s of the commitments' 1.5 s (Dawn's command handling and submits, and
+the copies between its shared memory and the mapped buffers); saturated only during the base
+trace's commitment.
+
+**The first commitment** of a page takes about 280 ms (130 ms in a later proof): the stripe
+twiddles of its blowup (50 ms), and the first use of the device buffers (765 MiB for a 39 MiB
+tree: the streamed layout's Merkle states take 512 MiB for any tree of this height) and of the
+rings.
+
+**Memory** (MiB; medians; RSS peaks; video memory over its idle level):
+
+| | wasm memory | renderer (the tab) | GPU process | video memory |
+|---|---|---|---|---|
+| GPU on | 2375-2486 | 3038-3152 | 718-719 | +1591-1599 |
+| GPU on, before | 2384-2479 | 2922-3021 | 460-461 | +1235-1381 |
+| GPU off | 2381-2492 | 2701-2824 | 216-217 | +53-56 |
+
+The worker keeps 1.7 GiB between commitments and proofs (`held_mib`): the device buffers of the
+largest trees so far (1.4 GiB), the twiddles of both blowups (64 MiB) and the rings (192 MiB,
+host-visible). Before, a commitment's buffers (up to 1148 MiB) were freed after it. The GPU
+process holds each ring chunk twice (as Vulkan memory and as the shared memory the tab maps),
+hence its 718 MiB; rings of 4 + 4 chunks took 847 MiB there for no measurable gain, 2 + 3 chunks
+654 MiB and 40-130 ms more per proof. `release()` (js/gpu.mjs) frees what the worker keeps, and
+`keep: false` makes every commitment free what it used (12.0 s for pay, one run). With `max_gpu_mib`, a
+commitment over the limit is refused after its plans are made, and frees the buffers they grew,
+so a cap that refuses the larger trees remakes the buffers for each smaller one (phones run
+without the GPU anyway, see **Risks**).
+
+A page proving several times holds more than one proof's wasm memory at once (7.7 GiB of
+renderer RSS for 3 proofs), with or without the GPU: the engine's ended workers' memories are
+not freed at once.
+
 ## How the FFT and Merkle kernels plug in
 
 This is based on their branches: `gpu-fft` at 85dfe57e (`GpuColumns`,
@@ -355,7 +453,11 @@ into `pkg-mt-gpu/`); its default web build is unchanged.
     The calling thread blocks; the GPU worker fills those Vecs, and the hook builds the
     `CommitmentTreeProver` from them. On any `Err` (no worker, a lost device, a shape or a size
     the worker refuses) it returns the polynomials, for the CPU.
-  - `gpu_report()`: per commitment, its shape, where it ran (or why not) and its times.
+  - `gpu_report()`: per commitment, its shape, where it ran (or why not) and its times: the
+    descriptor's stats (version 2). The transfers overlap the compute, so `commit_ms` is the
+    whole of them, `upload_ms`/`readback_ms` the worker's own copies and `*_wait_ms` its waits;
+    `compute_ms` is only the submissions (the GPU's compute alone is `gpu_compute_ms`, with the
+    worker's `timestamps` option, or `compute_ms` in its `serial` mode).
   - `gpu_time_cpu_commitments()`: a tracing layer that times `new_striped`'s own span, for the
     CPU's reference in a run without the GPU.
 - **js/worker.mjs:** given a `gpuPort`, after `initThreadPool` it posts
@@ -365,29 +467,52 @@ into `pkg-mt-gpu/`); its default web build is unchanged.
   the CPU.
 - **js/gpu.mjs:** `startGpu()` for the page: starts `gpu/gpu.worker.mjs` once, resolves with
   `{ready, adapter, info}` (or `{ready: false, error}`, also after 20 s without a device), and
-  `port()` gives a port for one proof.
+  `port()` gives a port for one proof; `release()` frees what the worker keeps between proofs.
+  Its `configure` goes to the worker (the commitment's options: see `Gpu.configure_commit`).
 - **scripts/build-web-engine.sh:** `PKG=pkg-mt-gpu GPU_WEB=<this directory>` adds the GPU
   worker (`gpu.worker.mjs`, `pkg/gpu/`) to the site as `gpu/`, and `engine/gpu.mjs`.
 
-The GPU module's side of `op::COMMIT_STRIPED` is `gpu/src/commit.rs`:
+The GPU module's side of `op::COMMIT_STRIPED` is `gpu/src/commit.rs`. It runs the native
+committer's commitment (`committer.rs`: kept buffers and twiddles, the streamed commitment of
+`stream.rs`), with the web's I/O edges:
 
 1. It reads the descriptor and checks every length against `new_striped`'s layout (the striped
    path, the kept-whole columns, the stored levels) and the device's binding limits. A
    mismatch is an error, so that commitment goes to the CPU; a panic would trap and end the
    worker.
-2. The twiddles: the tail of the prover's twiddle tree the largest domain reads, copied from
-   its memory (or computed once and kept, `configure_commit`).
-3. `StripedCommitment::with_options(.., without_staging)`: the native commitment's buffers,
-   plans and stripe twiddles.
-4. Upload: the coefficients, packed into a ring of 4 mappable 8 MiB buffers kept for the
-   page's life (`mapAsync(WRITE)`, copy from the prover's memory, unmap,
-   `copyBufferToBuffer`).
-5. One submission for every stripe's extension and hashing and the levels above
-   (`StripedCommitment::encode`), then `onSubmittedWorkDone`.
-6. Readback: a ring of 4 mappable 8 MiB buffers, chunks packed from the outputs' segments and
-   copied straight into the prover's columns and layers.
-7. Every buffer of the commitment is destroyed (wgpu's WebGPU backend doesn't on drop), and the
-   stats are written into the descriptor.
+2. **What it keeps** (`Kept`, for the page's life, across proofs): the device buffers
+   (`CommitBuffers`: the largest tree's so far, grown when a tree needs more, a replaced buffer
+   destroyed at once), every blowup's stripe twiddles (`TwiddleCache`: every log size up to the
+   largest seen, computed from the prover's twiddle tree only on a miss, or from its own tree
+   with `compute_twiddles`), the two transfer rings, and the plans (uniforms, bind groups) of the
+   last 16 trees by shape, valid while the buffers and twiddles they are bound to are. After a
+   failure everything kept is dropped and remade by the next commitment (a ring's chunk may have
+   been left mapped); a refusal (`max_gpu_mib`) keeps it.
+3. **Streamed** (`StreamedCommitment`; stripe by stripe, `StripedCommitment`, when a column below
+   the largest size doesn't fit a group): group by group, a group being a ring chunk's worth of
+   columns (32 MiB),
+   - its coefficients go up through the upload ring (`mapAsync(WRITE)`, a copy from the
+     prover's memory into the mapped chunk, unmap, `copyBufferToBuffer` into the group buffer),
+     while the GPU works on the group before;
+   - one submission evaluates and hashes every stripe of the group (`encode_group`);
+   - its stripe 0 is read back through the readback ring (each chunk's copy a submission of
+     its own, then `mapAsync(READ)`), submitted before the next group's work overwrites it, and
+     copied out, straight into the prover's columns, a few groups later.
+
+   Then the columns of the largest size go up, stripe by stripe (stripe 0's readback submitted
+   before stripe 1's work), then the levels, the columns kept whole and the layers. The steps and
+   their order are the native ones (`StreamedCommitment::commit_timed` walks the same
+   `group_uploads`/`group_reads`/... lists); only the waits are awaits.
+4. The commitment's plans are kept (or destroyed, if not), and the stats written into the
+   descriptor (version 2: the overlapped commitment's, see the bridge's `commit::ST_*`).
+
+The rings are 4 chunks of 32 MiB each (`commit_chunk`, `upload_ring`, `readback_ring`). The
+worker is one thread: the copies into and out of the rings (about 0.8 s of an Outis proof's
+4.2 GiB of transfers) are its own work; the GPU process and the GPU do the rest meanwhile.
+Diagnostics: `serial` waits for each phase before the next (each phase's time alone);
+`timestamps` times the GPU's own work (timestamp queries around each submission's work, the
+device asking for the feature when the adapter has it; Chrome quantizes them to 0.1 ms without
+`--enable-webgpu-developer-features`).
 
 `Gpu.create` compiles the commitment's pipelines up front, so a proof's first commitment doesn't
 wait for the browser's shader compiler.
@@ -403,14 +528,17 @@ wait for the browser's shader compiler.
      A drop-in GPU commitment adds its buffers on top. The coefficients alone are 0.5 GiB, and
      the extension and the tree more. On an iPhone, the GPU path pays only with a residency
      design that frees the CPU copies, and it won't fit as a drop-in.
-   - **Measured on the RTX 3080:** one commitment holds up to 1148 MiB of device memory, on top
-     of the unchanged 2.3 to 2.4 GiB wasm heap. `max_gpu_mib` caps it (a larger commitment goes
-     to the CPU), but the commitments that fit under a phone's budget are the small ones, which
-     gain the least. Leave the GPU off on iOS until the commitment streams its stripes through
-     bounded buffers or stays resident.
+   - **Measured on the RTX 3080:** the stripe-by-stripe commitment held up to 1148 MiB of device
+     memory, on top of the unchanged 2.3 to 2.4 GiB wasm heap; the streamed one keeps 1.7 GiB
+     between commitments (its Merkle states alone 512 MiB, whatever the tree's size: see
+     **Streamed, on what the worker keeps**). `max_gpu_mib` caps it (a larger commitment goes to
+     the CPU), but the commitments that fit under a phone's budget are the small ones, which gain
+     the least. Leave the GPU off on iOS until the commitment streams through bounded buffers
+     (states included) or stays resident.
    - **Transfers add their own copies there too.** Safari copies each write over 16 MiB into
-     WebContent, and `getMappedRange` returns a copy into WebContent. The bridge's defaults stay
-     clear of that: 8 MiB writes and an 8 MiB ring readback.
+     WebContent, and `getMappedRange` returns a copy into WebContent. The bridge's own ops stay
+     clear of that (8 MiB writes and an 8 MiB ring readback); the commitment's rings are 32 MiB
+     chunks (`commit_chunk` sets them).
    - **Keep buffers at 256 MiB or less on iOS.** Safari's `maxBufferSize` is
      max(256 MiB, min(1 GiB, maxBufferLength / 3)), and an Apple engineer wrote "iOS is too likely
      to jetsam at 1GB" ([bug 275958](https://bugs.webkit.org/show_bug.cgi?id=275958)).
@@ -431,7 +559,9 @@ wait for the browser's shader compiler.
    - WebGPU ships on Windows (141) and Apple-silicon macOS (145/147), but not on Linux or
      Android.
    - `Atomics.waitAsync` is there since 145.
-   - The 100 ms poll timer needs the kicks above.
+   - The 100 ms poll timer needs the kicks above. The streamed commitment waits on many more
+     maps than the stripe-by-stripe one measured in Firefox above (a few per 32 MiB group): it
+     hasn't been measured there.
    - Uploads are slow: 0.9 GiB/s here.
    - Views over 2 GB throw (bug 2022805).
    - This adapter's `maxStorageBufferBindingSize` is 128 MiB. The bridge binds in chunks.
