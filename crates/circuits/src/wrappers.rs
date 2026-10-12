@@ -212,7 +212,7 @@ impl<Value: IValue> Guess<Value> for U32Wrapper<Value> {
         let value = Value::unpack_u32(self.get());
         let low = U16Wrapper::<Value>::from_u16(value as u16).guess(context);
         let high = U16Wrapper::<Value>::from_u16((value >> 16) as u16).guess(context);
-        let i = context.constant(qm31_from_u32s(0, 1, 0, 0));
+        let i = context.i();
         U32Wrapper(eval!(context, (*low.get()) + ((*high.get()) * (i))))
     }
 }
