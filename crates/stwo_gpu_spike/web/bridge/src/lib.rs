@@ -191,6 +191,18 @@ pub enum BridgeError {
     TooManyArgs,
     /// The job failed, with the GPU worker's message.
     Failed(String),
+    /// The job didn't finish within the caller's deadline ([`call_with_deadline`]). The bridge
+    /// is marked lost, so later calls fail at once.
+    TimedOut,
+}
+
+impl BridgeError {
+    /// Whether the GPU worker may still be running the job: after [`BridgeError::Lost`] or
+    /// [`BridgeError::TimedOut`] it may yet write the job's outputs, so the caller must keep
+    /// them allocated (leak them) rather than free memory the worker could write into.
+    pub fn job_may_be_running(&self) -> bool {
+        matches!(self, BridgeError::Lost | BridgeError::TimedOut)
+    }
 }
 
 impl core::fmt::Display for BridgeError {
@@ -200,6 +212,7 @@ impl core::fmt::Display for BridgeError {
             BridgeError::Lost => write!(f, "the GPU worker failed or lost its device"),
             BridgeError::TooManyArgs => write!(f, "more than {MAX_ARGS} arguments"),
             BridgeError::Failed(message) => write!(f, "GPU job failed: {message}"),
+            BridgeError::TimedOut => write!(f, "the GPU job didn't finish in time"),
         }
     }
 }
@@ -329,8 +342,22 @@ mod client {
     /// absolute clock (`performance.timeOrigin + performance.now()`), for the times.
     ///
     /// Memory the args point to must stay put and untouched until this returns: the GPU worker
-    /// reads inputs and writes outputs there while the caller is blocked.
+    /// reads inputs and writes outputs there while the caller is blocked. After an error for
+    /// which [`BridgeError::job_may_be_running`], the outputs must stay allocated for good.
     pub fn call(op: u32, args: &[u32], now: fn() -> f64) -> Result<Completion, BridgeError> {
+        call_with_deadline(op, args, now, f64::INFINITY)
+    }
+
+    /// [`call`], giving up after `deadline_ms` (by `now`) with [`BridgeError::TimedOut`]: a GPU
+    /// worker the page ended can't mark the bridge lost, and nothing else would wake the caller.
+    /// A timeout marks the bridge lost, so every later call fails at once; the slot stays
+    /// claimed, as the worker may still finish the job.
+    pub fn call_with_deadline(
+        op: u32,
+        args: &[u32],
+        now: fn() -> f64,
+        deadline_ms: f64,
+    ) -> Result<Completion, BridgeError> {
         if args.len() > MAX_ARGS {
             return Err(BridgeError::TooManyArgs);
         }
@@ -349,7 +376,8 @@ mod client {
             write_f64(index, S_TIMES + 2 * t, 0.0);
         }
         slot(index, S_ERROR_LEN).store(0, SeqCst);
-        write_f64(index, S_TIMES + 2 * T_SUBMIT, now());
+        let submitted = now();
+        write_f64(index, S_TIMES + 2 * T_SUBMIT, submitted);
         slot(index, S_STATE).store(SUBMITTED, SeqCst);
         word(H_DOORBELL).fetch_add(1, SeqCst);
         notify(word(H_DOORBELL));
@@ -364,8 +392,20 @@ mod client {
                 // The GPU worker is gone; the slot stays claimed (its memory may still be read).
                 return Err(BridgeError::Lost);
             }
+            if now() - submitted > deadline_ms {
+                // Every later call fails at once; a live worker sees it and stops serving.
+                let _ = word(H_SERVER).compare_exchange(SERVER_READY, SERVER_LOST, SeqCst, SeqCst);
+                notify(word(H_SERVER));
+                notify(word(H_DOORBELL));
+                return Err(BridgeError::TimedOut);
+            }
             wait(slot(index, S_STATE), state, 100);
         };
+        // An ERROR the worker set while marking itself lost (markLost fails the jobs it was
+        // running) doesn't mean the job stopped writing: the caller must treat it as lost.
+        if state == ERROR && word(H_SERVER).load(SeqCst) == SERVER_LOST {
+            return Err(BridgeError::Lost);
+        }
         let returned = now();
         let mut completion = Completion { times: [0.0; NTIMES], returned };
         for t in 0..NTIMES {
