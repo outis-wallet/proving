@@ -261,6 +261,29 @@ fn split_batches_in_one_buffer() {
         &expected,
         "batches split at the binding limit",
     );
+
+    // Both: one batch per size at unaligned offsets in the arena, split at the binding limit.
+    let mut whole = vec![];
+    let mut i = 0;
+    while i < columns.len() {
+        let n = log_sizes[i..].iter().take_while(|&&s| s == log_sizes[i]).count();
+        whole.push(ColumnBatch {
+            buffer: &arena,
+            word_offset: offsets[i],
+            log_size: log_sizes[i],
+            n_columns: n as u32,
+        });
+        i += n;
+    }
+    let shapes = whole.iter().map(|b| (b.log_size, b.n_columns)).collect_vec();
+    let states = small.state_buffers(&gpu, &shapes, height);
+    let tree = small.tree_buffer(&gpu, &layout);
+    gpu.run_plans(&[&small.plan_stripe(&gpu, &whole, &states, &tree, &layout, 0)]);
+    assert_levels_eq(
+        &small.read_levels(&gpu, &tree, &layout),
+        &expected,
+        "unaligned batches split at the binding limit",
+    );
 }
 
 /// The Cairo base trace's shapes, every column's log size less `scale` (at least 4, the smallest
