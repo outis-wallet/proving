@@ -44,7 +44,10 @@ pub fn simd_stripe_layers(sorted_columns: &[BaseColumn], height: u32) -> Vec<Vec
 /// The layers of a whole tree from its stripes' subtrees, as `CommitmentTreeProver::new_striped`
 /// assembles them (leaves first): the subtrees' levels side by side (a level a subtree leaves
 /// empty stays empty), then `build_next_layer` up to the root.
-pub fn simd_tree_layers(subtrees: &[Vec<Vec<Blake2sHash>>], stripe_height: u32) -> Vec<Vec<Blake2sHash>> {
+pub fn simd_tree_layers(
+    subtrees: &[Vec<Vec<Blake2sHash>>],
+    stripe_height: u32,
+) -> Vec<Vec<Blake2sHash>> {
     let mut layers: Vec<Vec<Blake2sHash>> = (0..=stripe_height as usize)
         .map(|level| {
             if subtrees.iter().any(|subtree| subtree[level].is_empty()) {
@@ -90,7 +93,8 @@ impl UploadedStripe {
         let buffers = shapes
             .iter()
             .map(|&(log_size, n)| {
-                let words: Vec<u32> = columns.by_ref().take(n as usize).flatten().copied().collect();
+                let words: Vec<u32> =
+                    columns.by_ref().take(n as usize).flatten().copied().collect();
                 gpu.upload(&format!("columns 2^{log_size}"), &words)
             })
             .collect();
@@ -118,7 +122,12 @@ impl UploadedStripe {
         self.buffers
             .iter()
             .zip(&self.shapes)
-            .map(|(buffer, &(log_size, n_columns))| ColumnBatch { buffer, word_offset: 0, log_size, n_columns })
+            .map(|(buffer, &(log_size, n_columns))| ColumnBatch {
+                buffer,
+                word_offset: 0,
+                log_size,
+                n_columns,
+            })
             .collect()
     }
 }

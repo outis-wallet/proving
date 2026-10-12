@@ -26,28 +26,40 @@
 //! ```
 //!
 //! The batches are given in the tree's column order: by nondecreasing log size, and within a log
-//! size in polynomial order. A log size may be split into any number of batches, at any column
-//! boundary, in one buffer or in several (a batch can start anywhere in its buffer: it is bound
-//! from the 256-byte boundary below it, so several batches, or a whole stripe, can share one
-//! buffer). So the FFT's output can be hashed where it is: one buffer per size batch (the Cairo
-//! base trace's largest, log size 16, is 109 MiB, under WebGPU's default 128 MiB binding limit),
-//! or one arena on native. A batch is read once, by one dispatch, and can be reused as soon as
-//! that dispatch is done.
+//! size in polynomial order (`new_striped`'s `order`: a stable sort of the polynomials by size).
+//! A log size may be split into any number of batches, at any column boundary, in one buffer or in
+//! several; a batch can start at any word of its buffer (it is bound from the alignment boundary
+//! below it, `min_storage_buffer_offset_alignment`), so several batches, or a whole stripe, can
+//! share one buffer. A batch larger than a storage binding (`max_storage_buffer_binding_size`,
+//! 128 MiB by default in WebGPU and on lavapipe) is split by the planner into several dispatches.
+//! The buffers need `STORAGE` usage, nothing else. So the FFT's output can be hashed where it is:
+//! one buffer per size batch (the Cairo base trace's largest, log size 16, is 109 MiB, under
+//! WebGPU's default 256 MiB buffer limit), or one arena on native.
+//!
+//! Joining with the FFT: record the stripe's FFT dispatches, then its [`Plan`] (from
+//! [`GpuMerkle::plan_stripe`]) into the same encoder; queue order makes the hashing see the FFT's
+//! writes. A batch is read by its dispatch only, so its buffer can take the next stripe's values
+//! (or another size's) as soon as the dispatches recorded after it run. Plans are built once (a
+//! millisecond for the Cairo trace: uniform buffers and bind groups) and recorded any number of
+//! times, the eight stripes' plans differing only in where their levels go.
+//!
+//! Scratch: two state buffers, `(8 + up to 16) × 2^k` words each for the largest domain `2^k`
+//! below the tree's height (2 × 32 MiB for the Cairo base trace: `k = 19`), and the layers.
 //!
 //! # Kernels
 //!
-//! - `absorb`, one dispatch per batch, one invocation per row of the batch's domain `2^k`: it
-//!   loads the row's Blake2s state left by the previous dispatch (lifted from the previous,
-//!   smaller domain if the size grew), absorbs the batch's columns, 16 values per compression,
-//!   and stores the state again. A state is the chain value (8 words) and the words of the last,
-//!   not yet compressed block (1 to 16 words, carried over to the next dispatch: a block can span
-//!   batches, and the last block of the row is compressed only at the end, with the finalization
-//!   flag). States are stored word-major (`state[w * 2^k + row]`), so adjacent invocations read
-//!   and write adjacent words, as they do the columns' values: every load is coalesced. Two
-//!   state buffers alternate (ping-pong).
+//! - `absorb`, one dispatch per batch, one invocation per row of the batch's domain `2^k`: it loads
+//!   the row's Blake2s state left by the previous dispatch (lifted from the previous, smaller
+//!   domain if the size grew), absorbs the batch's columns, 16 values per compression, and stores
+//!   the state again. A state is the chain value (8 words) and the words of the last, not yet
+//!   compressed block (1 to 16 words, carried over to the next dispatch: a block can span batches,
+//!   and the last block of the row is compressed only at the end, with the finalization flag).
+//!   States are stored word-major (`state[w * 2^k + row]`), so adjacent invocations read and write
+//!   adjacent words, as they do the columns' values: every load is coalesced. Two state buffers
+//!   alternate (ping-pong).
 //! - `absorb_final`, for the last batch (or, if the tree is taller than the largest column, a
-//!   dispatch without columns over the leaves' domain): it absorbs, finalizes the leaf hashes,
-//!   and hashes the first `min(8, H)` levels of the tree within the workgroup of 256 leaves, in
+//!   dispatch without columns over the leaves' domain): it absorbs, finalizes the leaf hashes, and
+//!   hashes the first `min(8, H)` levels of the tree within the workgroup of 256 leaves, in
 //!   workgroup memory, storing the levels that are kept.
 //! - `nodes`, one invocation per node: up to 9 levels per dispatch (the first from the layer in
 //!   memory, the others within the workgroup). It hashes the levels of a stripe's subtree above
@@ -231,7 +243,8 @@ fn absorb_wgsl() -> String {
             .collect::<Vec<_>>()
             .join(", ")
     );
-    let store_chain = unrolled(&|w| format!("state_out[({w}u << P.log_rows) + row] = a.h[{w}];"), 8);
+    let store_chain =
+        unrolled(&|w| format!("state_out[({w}u << P.log_rows) + row] = a.h[{w}];"), 8);
     format!(
         r#"
 const WG: u32 = {WORKGROUP}u;
@@ -446,9 +459,9 @@ fn shared_helpers_wgsl() -> String {
     let read = (0..8).map(|w| format!("sh[8u * i + {w}u]")).collect::<Vec<_>>();
     let write = (0..8).map(|w| format!("sh[8u * i + {w}u] = h[{w}];")).collect::<Vec<_>>();
     format!(
-        "fn store_hash(offset: u32, h: array<u32, 8>) {{\n    {}\n}}\n\n\
-         fn read_sh(i: u32) -> array<u32, 8> {{\n    return array<u32, 8>({});\n}}\n\n\
-         fn write_sh(i: u32, h: array<u32, 8>) {{\n    {}\n}}\n",
+        "fn store_hash(offset: u32, h: array<u32, 8>) {{\n    {}\n}}\n\nfn read_sh(i: u32) -> \
+         array<u32, 8> {{\n    return array<u32, 8>({});\n}}\n\nfn write_sh(i: u32, h: array<u32, \
+         8>) {{\n    {}\n}}\n",
         store.join("\n    "),
         read.join(", "),
         write.join("\n    "),
@@ -494,22 +507,42 @@ fn absorb_schedule(shapes: &[(u32, u32)], height: u32) -> Vec<AbsorbStep> {
     let mut bytes_before = 0;
     for (k, &i) in nonempty.iter().enumerate() {
         let (log_size, n_cols) = shapes[i];
-        assert!((1..=height).contains(&log_size), "column log size {log_size}, tree height {height}");
+        assert!(
+            (1..=height).contains(&log_size),
+            "column log size {log_size}, tree height {height}"
+        );
         let prev = steps.last().map(|step: &AbsorbStep| (step.log_rows, step.rest()));
         if let Some((prev_log_size, _)) = prev {
-            assert!(prev_log_size <= log_size, "batches out of order: {prev_log_size} > {log_size}");
+            assert!(
+                prev_log_size <= log_size,
+                "batches out of order: {prev_log_size} > {log_size}"
+            );
         }
         if let Some(step) = steps.last() {
             bytes_before += 64 * step.n_blocks() as u64;
         }
         let is_final = k == nonempty.len() - 1 && log_size == height;
-        steps.push(AbsorbStep { batch: Some(i), log_rows: log_size, n_cols, prev, bytes_before, is_final });
+        steps.push(AbsorbStep {
+            batch: Some(i),
+            log_rows: log_size,
+            n_cols,
+            prev,
+            bytes_before,
+            is_final,
+        });
     }
     if !steps.last().unwrap().is_final {
         let last = steps.last().unwrap();
         let prev = Some((last.log_rows, last.rest()));
         bytes_before += 64 * last.n_blocks() as u64;
-        steps.push(AbsorbStep { batch: None, log_rows: height, n_cols: 0, prev, bytes_before, is_final: true });
+        steps.push(AbsorbStep {
+            batch: None,
+            log_rows: height,
+            n_cols: 0,
+            prev,
+            bytes_before,
+            is_final: true,
+        });
     }
     steps
 }
@@ -570,18 +603,42 @@ pub struct GpuMerkle {
 
 impl GpuMerkle {
     pub fn new(gpu: &GpuContext) -> Self {
+        Self::build(gpu, true)
+    }
+
+    /// The kernels without wgpu's runtime checks (bounds checks, loop bounding), to measure what
+    /// they cost; browsers always keep them.
+    ///
+    /// # Safety
+    ///
+    /// Every buffer bound to a plan must be as large as the planner assumes (it checks the batches
+    /// against their buffers' sizes, and sizes the states and the layers itself); the kernels
+    /// then stay in bounds: a row past the domain or a node past the level reads nothing.
+    pub unsafe fn new_unchecked(gpu: &GpuContext) -> Self {
+        Self::build(gpu, false)
+    }
+
+    fn build(gpu: &GpuContext, checked: bool) -> Self {
         let blake2s = blake2s_wgsl();
         let absorb_source = format!("{blake2s}\n{}", absorb_wgsl());
         let nodes_source = format!("{blake2s}\n{}", nodes_wgsl());
         let limits = gpu.device.limits();
+        let pipeline = |label: &str, source: &str| {
+            if checked {
+                gpu.pipeline(label, source, label)
+            } else {
+                // Safety: see `new_unchecked`.
+                unsafe { gpu.pipeline_unchecked(label, source, label) }
+            }
+        };
         Self {
-            absorb: gpu.pipeline("absorb", &absorb_source, "absorb"),
-            absorb_final: gpu.pipeline("absorb_final", &absorb_source, "absorb_final"),
-            nodes: gpu.pipeline("nodes", &nodes_source, "nodes"),
+            absorb: pipeline("absorb", &absorb_source),
+            absorb_final: pipeline("absorb_final", &absorb_source),
+            nodes: pipeline("nodes", &nodes_source),
             dummy: gpu.upload("dummy", &[0; 64]),
             uniform_align: limits.min_uniform_buffer_offset_alignment as u64,
             storage_align: limits.min_storage_buffer_offset_alignment as u64,
-            max_binding: limits.max_storage_buffer_binding_size as u64,
+            max_binding: limits.max_storage_buffer_binding_size,
         }
     }
 
@@ -601,7 +658,12 @@ impl GpuMerkle {
 
     /// The state buffers for the leaves of stripes of these `(log_size, n_columns)` batches in a
     /// tree of height `height`.
-    pub fn state_buffers(&self, gpu: &GpuContext, shapes: &[(u32, u32)], height: u32) -> StateBuffers {
+    pub fn state_buffers(
+        &self,
+        gpu: &GpuContext,
+        shapes: &[(u32, u32)],
+        height: u32,
+    ) -> StateBuffers {
         let words = absorb_schedule(&self.dispatch_shapes(shapes), height)
             .iter()
             .filter(|step| !step.is_final)
@@ -611,7 +673,10 @@ impl GpuMerkle {
             .max(64);
         assert!(words * 4 <= self.max_binding, "the states ({} bytes) exceed a binding", words * 4);
         StateBuffers {
-            buffers: [gpu.storage("states a", words as usize), gpu.storage("states b", words as usize)],
+            buffers: [
+                gpu.storage("states a", words as usize),
+                gpu.storage("states b", words as usize),
+            ],
             words,
         }
     }
@@ -685,7 +750,8 @@ impl GpuMerkle {
                 Some(i) => {
                     let batch = &batches[i];
                     let start = batch.word_offset * 4;
-                    let end = (batch.word_offset + ((batch.n_columns as u64) << batch.log_size)) * 4;
+                    let end =
+                        (batch.word_offset + ((batch.n_columns as u64) << batch.log_size)) * 4;
                     assert!(end <= batch.buffer.size(), "batch {i} past the end of its buffer");
                     let bind_start = start / self.storage_align * self.storage_align;
                     assert!(end - bind_start <= self.max_binding, "batch {i} exceeds a binding");
@@ -805,8 +871,10 @@ impl GpuMerkle {
             .iter()
             .enumerate()
             .map(|(k, p)| {
-                let entries =
-                    [(0, self.uniform_binding::<NodeParams>(&uniforms, k)), (1, tree.as_entire_binding())];
+                let entries = [
+                    (0, self.uniform_binding::<NodeParams>(&uniforms, k)),
+                    (1, tree.as_entire_binding()),
+                ];
                 let bind_group = self.bind_group(gpu, &self.nodes, &entries);
                 (self.nodes.clone(), bind_group, workgroups(p.n_out as u64))
             })
@@ -816,7 +884,12 @@ impl GpuMerkle {
 
     /// Every level of the tree, read back: the hashes of the stored levels, an empty vector for
     /// the others (as stwo's layers, leaves first).
-    pub fn read_levels(&self, gpu: &GpuContext, tree: &wgpu::Buffer, layout: &TreeLayout) -> Vec<Vec<Blake2sHash>> {
+    pub fn read_levels(
+        &self,
+        gpu: &GpuContext,
+        tree: &wgpu::Buffer,
+        layout: &TreeLayout,
+    ) -> Vec<Vec<Blake2sHash>> {
         let words = gpu.read(tree, layout.total_words as usize);
         (0..=layout.height())
             .map(|level| match layout.level_offset(level) {
@@ -825,7 +898,9 @@ impl GpuMerkle {
                     let start = offset as usize;
                     words[start..start + 8 * layout.level_len(level)]
                         .chunks_exact(8)
-                        .map(|hash| Blake2sHash(bytemuck::cast_slice::<u32, u8>(hash).try_into().unwrap()))
+                        .map(|hash| {
+                            Blake2sHash(bytemuck::cast_slice::<u32, u8>(hash).try_into().unwrap())
+                        })
                         .collect()
                 }
             })
@@ -847,7 +922,11 @@ impl GpuMerkle {
         })
     }
 
-    fn uniform_binding<'a, T>(&self, uniforms: &'a wgpu::Buffer, k: usize) -> wgpu::BindingResource<'a> {
+    fn uniform_binding<'a, T>(
+        &self,
+        uniforms: &'a wgpu::Buffer,
+        k: usize,
+    ) -> wgpu::BindingResource<'a> {
         let stride = (size_of::<T>() as u64).next_multiple_of(self.uniform_align);
         wgpu::BindingResource::Buffer(wgpu::BufferBinding {
             buffer: uniforms,
@@ -864,7 +943,10 @@ impl GpuMerkle {
     ) -> wgpu::BindGroup {
         let entries: Vec<wgpu::BindGroupEntry<'_>> = entries
             .iter()
-            .map(|(binding, resource)| wgpu::BindGroupEntry { binding: *binding, resource: resource.clone() })
+            .map(|(binding, resource)| wgpu::BindGroupEntry {
+                binding: *binding,
+                resource: resource.clone(),
+            })
             .collect();
         gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: None,

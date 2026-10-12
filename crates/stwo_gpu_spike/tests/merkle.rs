@@ -7,13 +7,12 @@
 use itertools::Itertools;
 use rand::rngs::SmallRng;
 use rand::{Rng, SeedableRng};
-use stwo::core::vcs_lifted::blake2_merkle::Blake2sM31MerkleChannel;
 use stwo::core::poly::circle::CanonicCoset;
 use stwo::core::vcs::blake2_hash::Blake2sHash;
-use stwo::core::vcs_lifted::blake2_merkle::Blake2sMerkleHasher;
+use stwo::core::vcs_lifted::blake2_merkle::{Blake2sM31MerkleChannel, Blake2sMerkleHasher};
 use stwo::prover::CommitmentTreeProver;
-use stwo::prover::backend::simd::SimdBackend;
 use stwo::prover::backend::Column;
+use stwo::prover::backend::simd::SimdBackend;
 use stwo::prover::backend::simd::column::BaseColumn;
 use stwo::prover::mempool::BaseColumnPool;
 use stwo::prover::poly::circle::{CircleCoefficients, PolyOps};
@@ -21,7 +20,8 @@ use stwo::prover::vcs_lifted::ops::MerkleOpsLifted;
 use stwo_gpu_spike::GpuContext;
 use stwo_gpu_spike::merkle::{ColumnBatch, GpuMerkle, TreeLayout, stwo_min_stored_level};
 use stwo_gpu_spike::reference::{
-    UploadedStripe, random_columns, random_values, simd_columns, simd_stripe_layers, simd_tree_layers,
+    UploadedStripe, random_columns, random_values, simd_columns, simd_stripe_layers,
+    simd_tree_layers,
 };
 use stwo_gpu_spike::shapes::{
     CAIRO_LIFTING_LOG_SIZE, CAIRO_LOG_BLOWUP, CIRCUIT_LIFTING_LOG_SIZE, CIRCUIT_LOG_BLOWUP,
@@ -39,7 +39,12 @@ fn assert_levels_eq(gpu_levels: &[Vec<Blake2sHash>], stwo_levels: &[Vec<Blake2sH
     for (level, (gpu, stwo)) in gpu_levels.iter().zip(stwo_levels).enumerate() {
         assert_eq!(gpu.len(), stwo.len(), "{what}: level {level} length");
         if let Some(i) = (0..gpu.len()).find(|&i| gpu[i] != stwo[i]) {
-            panic!("{what}: level {level} differs at {i} of {}: {} vs {}", gpu.len(), gpu[i], stwo[i]);
+            panic!(
+                "{what}: level {level} differs at {i} of {}: {} vs {}",
+                gpu.len(),
+                gpu[i],
+                stwo[i]
+            );
         }
     }
 }
@@ -47,7 +52,14 @@ fn assert_levels_eq(gpu_levels: &[Vec<Blake2sHash>], stwo_levels: &[Vec<Blake2sH
 /// A tree of `2^log_n_stripes` stripes of height `height`, every stripe of random columns of
 /// `log_sizes` (in any order), hashed on the GPU and by stwo; the levels of the whole tree are
 /// compared, and, if `check_stripes`, every stripe's subtree with `build_layers_sparse`'s.
-fn check_tree(gpu: &GpuContext, merkle: &GpuMerkle, log_sizes: &[u32], height: u32, log_n_stripes: u32, seed: u64) {
+fn check_tree(
+    gpu: &GpuContext,
+    merkle: &GpuMerkle,
+    log_sizes: &[u32],
+    height: u32,
+    log_n_stripes: u32,
+    seed: u64,
+) {
     let sorted_sizes = tree_order(log_sizes).into_iter().map(|i| log_sizes[i]).collect_vec();
     let min_stored = stwo_min_stored_level(&sorted_sizes, height);
     let layout = TreeLayout::new(height, log_n_stripes, min_stored);
@@ -58,14 +70,18 @@ fn check_tree(gpu: &GpuContext, merkle: &GpuMerkle, log_sizes: &[u32], height: u
     for stripe in 0..1 << log_n_stripes {
         let columns = random_columns(&mut rng, &sorted_sizes);
         let uploaded = UploadedStripe::new(gpu, &columns);
-        let states = states.get_or_insert_with(|| merkle.state_buffers(gpu, &uploaded.shapes, height));
+        let states =
+            states.get_or_insert_with(|| merkle.state_buffers(gpu, &uploaded.shapes, height));
         let plan = merkle.plan_stripe(gpu, &uploaded.batches(), states, &tree, &layout, stripe);
         gpu.run_plans(&[&plan]);
         subtrees.push(simd_stripe_layers(&simd_columns(&columns), height));
     }
     gpu.run_plans(&[&merkle.plan_top(gpu, &tree, &layout)]);
     let gpu_levels = merkle.read_levels(gpu, &tree, &layout);
-    let what = format!("tree of 2^{log_n_stripes} stripes of height {height}, {} columns", log_sizes.len());
+    let what = format!(
+        "tree of 2^{log_n_stripes} stripes of height {height}, {} columns",
+        log_sizes.len()
+    );
     // The stripes' subtrees, level by level, are slices of the tree's levels.
     let stripe_count = 1usize << log_n_stripes;
     for (stripe, subtree) in subtrees.iter().enumerate() {
@@ -95,7 +111,10 @@ fn nodes_match_build_next_layer() {
         gpu.run_plans(&[&merkle.plan_top(&gpu, &tree, &layout)]);
         let gpu_levels = merkle.read_levels(&gpu, &tree, &layout);
         let mut stwo_levels: Vec<Vec<Blake2sHash>> = vec![
-            words.chunks_exact(8).map(|h| Blake2sHash(bytemuck::cast_slice::<u32, u8>(h).try_into().unwrap())).collect(),
+            words
+                .chunks_exact(8)
+                .map(|h| Blake2sHash(bytemuck::cast_slice::<u32, u8>(h).try_into().unwrap()))
+                .collect(),
         ];
         for _ in 0..log_len {
             let next = <SimdBackend as MerkleOpsLifted<Blake2sMerkleHasher>>::build_next_layer(
@@ -128,9 +147,9 @@ fn columns_of_one_size() {
     for (n, seed) in [(2, 1), (15, 2), (16, 3), (17, 4), (32, 5), (47, 6), (100, 7)] {
         check_tree(&gpu, &merkle, &vec![10; n], 10, 0, seed);
     }
-    check_tree(&gpu, &merkle, &vec![12; 33], 12, 2, 8);
+    check_tree(&gpu, &merkle, &[12; 33], 12, 2, 8);
     // Lifted: the tree taller than its columns.
-    check_tree(&gpu, &merkle, &vec![9; 20], 11, 0, 9);
+    check_tree(&gpu, &merkle, &[9; 20], 11, 0, 9);
 }
 
 #[test]
@@ -155,6 +174,17 @@ fn mixed_sizes() {
     check_tree(&gpu, &merkle, &sizes, 9, 1, 14);
     // Every size from 1 to 12, one column each.
     check_tree(&gpu, &merkle, &(1..=12).collect_vec(), 12, 0, 15);
+}
+
+/// The kernels without wgpu's runtime checks compute the same trees.
+#[test]
+fn unchecked_kernels() {
+    let gpu = GpuContext::new();
+    // Safety: the planner sizes and checks every buffer it binds.
+    let merkle = unsafe { GpuMerkle::new_unchecked(&gpu) };
+    let sizes = [vec![4; 9], vec![7; 30], vec![9; 3], vec![11; 18]].concat();
+    check_tree(&gpu, &merkle, &sizes, 11, 2, 16);
+    check_tree(&gpu, &merkle, &sizes, 12, 0, 17);
 }
 
 /// The smallest shapes the striped commitment takes: stripes of height 10 (`MIN_STRIPE_HEIGHT`),
@@ -184,7 +214,11 @@ fn split_batches_in_one_buffer() {
     let tree = merkle.tree_buffer(&gpu, &layout);
     gpu.run_plans(&[&merkle.plan_stripe(&gpu, &uploaded.batches(), &states, &tree, &layout, 0)]);
     let expected = merkle.read_levels(&gpu, &tree, &layout);
-    assert_levels_eq(&expected, &simd_stripe_layers(&simd_columns(&columns), height), "one buffer per size");
+    assert_levels_eq(
+        &expected,
+        &simd_stripe_layers(&simd_columns(&columns), height),
+        "one buffer per size",
+    );
 
     // Every column after 3 words of padding, all in one buffer; batches of 1 to 9 columns.
     let mut words = vec![0u32; 3];
@@ -198,8 +232,15 @@ fn split_batches_in_one_buffer() {
     let mut i = 0;
     while i < columns.len() {
         let log_size = log_sizes[i];
-        let n = rng.random_range(1..=9).min(log_sizes[i..].iter().take_while(|&&s| s == log_size).count());
-        batches.push(ColumnBatch { buffer: &arena, word_offset: offsets[i], log_size, n_columns: n as u32 });
+        let n = rng
+            .random_range(1..=9)
+            .min(log_sizes[i..].iter().take_while(|&&s| s == log_size).count());
+        batches.push(ColumnBatch {
+            buffer: &arena,
+            word_offset: offsets[i],
+            log_size,
+            n_columns: n as u32,
+        });
         i += n;
     }
     let shapes = batches.iter().map(|b| (b.log_size, b.n_columns)).collect_vec();
@@ -215,7 +256,11 @@ fn split_batches_in_one_buffer() {
     let states = small.state_buffers(&gpu, &uploaded.shapes, height);
     let tree = small.tree_buffer(&gpu, &layout);
     gpu.run_plans(&[&small.plan_stripe(&gpu, &uploaded.batches(), &states, &tree, &layout, 0)]);
-    assert_levels_eq(&small.read_levels(&gpu, &tree, &layout), &expected, "batches split at the binding limit");
+    assert_levels_eq(
+        &small.read_levels(&gpu, &tree, &layout),
+        &expected,
+        "batches split at the binding limit",
+    );
 }
 
 /// The Cairo base trace's shapes, every column's log size less `scale` (at least 4, the smallest
@@ -264,7 +309,9 @@ fn circuit_tree(scale: u32) {
     let merkle = GpuMerkle::new(&gpu);
     let height = CIRCUIT_LIFTING_LOG_SIZE - CIRCUIT_LOG_BLOWUP - scale;
     let mut log_sizes = vec![];
-    for (log_size, n) in [(21, 21), (20, 9), (19, 35), (18, 3), (17, 50), (15, 7), (12, 19), (8, 5), (5, 2)] {
+    for (log_size, n) in
+        [(21, 21), (20, 9), (19, 35), (18, 3), (17, 50), (15, 7), (12, 19), (8, 5), (5, 2)]
+    {
         log_sizes.extend(std::iter::repeat_n((log_size - scale as i32).max(4) as u32, n));
     }
     check_tree(&gpu, &merkle, &log_sizes, height, CIRCUIT_LOG_BLOWUP, 50 + scale as u64);
@@ -309,10 +356,15 @@ fn new_striped_commitment() {
 
     let polys = coeffs_log_sizes
         .iter()
-        .map(|&log_size| CircleCoefficients::<SimdBackend>::new(simd_columns(&[random_values(&mut rng, 1 << log_size)]).remove(0)))
+        .map(|&log_size| {
+            CircleCoefficients::<SimdBackend>::new(
+                simd_columns(&[random_values(&mut rng, 1 << log_size)]).remove(0),
+            )
+        })
         .collect_vec();
-    let twiddles =
-        SimdBackend::precompute_twiddles(CanonicCoset::new(lifting_log_size).circle_domain().half_coset);
+    let twiddles = SimdBackend::precompute_twiddles(
+        CanonicCoset::new(lifting_log_size).circle_domain().half_coset,
+    );
     let pool = BaseColumnPool::<SimdBackend>::new();
     let striped = CommitmentTreeProver::<SimdBackend, Blake2sM31MerkleChannel>::new_striped(
         polys.clone(),
@@ -343,7 +395,11 @@ fn new_striped_commitment() {
     let order = tree_order(&coeffs_log_sizes);
     let stripe_height = lifting_log_size - log_blowup;
     let sorted_sizes = order.iter().map(|&i| coeffs_log_sizes[i]).collect_vec();
-    let layout = TreeLayout::new(stripe_height, log_blowup, stwo_min_stored_level(&sorted_sizes, stripe_height));
+    let layout = TreeLayout::new(
+        stripe_height,
+        log_blowup,
+        stwo_min_stored_level(&sorted_sizes, stripe_height),
+    );
     let tree = merkle.tree_buffer(&gpu, &layout);
     let mut states = None;
     for stripe in 0..1usize << log_blowup {
@@ -355,8 +411,10 @@ fn new_striped_commitment() {
             })
             .collect_vec();
         let uploaded = UploadedStripe::new(&gpu, &columns);
-        let states = states.get_or_insert_with(|| merkle.state_buffers(&gpu, &uploaded.shapes, stripe_height));
-        let plan = merkle.plan_stripe(&gpu, &uploaded.batches(), states, &tree, &layout, stripe as u32);
+        let states = states
+            .get_or_insert_with(|| merkle.state_buffers(&gpu, &uploaded.shapes, stripe_height));
+        let plan =
+            merkle.plan_stripe(&gpu, &uploaded.batches(), states, &tree, &layout, stripe as u32);
         gpu.run_plans(&[&plan]);
     }
     gpu.run_plans(&[&merkle.plan_top(&gpu, &tree, &layout)]);

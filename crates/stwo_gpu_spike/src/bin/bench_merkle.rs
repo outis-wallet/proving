@@ -13,8 +13,12 @@
 //! - CPU: `SimdBackend::build_layers_sparse` per stripe and `build_next_layer` above, as
 //!   `CommitmentTreeProver::new_striped` hashes, on rayon's default pool and on `--threads`.
 //!
-//! Usage: `bench_merkle [--scale N] [--threads T] [--reps R] [--no-cpu] [--no-gpu]`; `--scale N`
-//! shrinks every component's rows by 2^N (columns no smaller than 2^4, the tree 2^N times lower).
+//! - `--unchecked`: also the GPU, inputs resident, with kernels without wgpu's bounds checks and
+//!   loop bounding (native only: browsers always keep them), to see what the checks cost.
+//!
+//! Usage: `bench_merkle [--scale N] [--threads T] [--reps R] [--unchecked] [--no-cpu] [--no-gpu]`;
+//! `--scale N` shrinks every component's rows by 2^N (columns no smaller than 2^4, the tree 2^N
+//! times lower).
 //! The adapter comes from the environment (`WGPU_ADAPTER_NAME`, `WGPU_BACKEND`).
 use std::time::{Duration, Instant};
 
@@ -24,14 +28,17 @@ use rayon::prelude::*;
 use stwo::core::vcs::blake2_hash::Blake2sHash;
 use stwo_gpu_spike::GpuContext;
 use stwo_gpu_spike::merkle::{GpuMerkle, Plan, TreeLayout, stwo_min_stored_level};
-use stwo_gpu_spike::reference::{UploadedStripe, random_values, simd_columns, simd_stripe_layers, simd_tree_layers};
+use stwo_gpu_spike::reference::{
+    UploadedStripe, random_values, simd_columns, simd_stripe_layers, simd_tree_layers,
+};
 use stwo_gpu_spike::shapes::{
-    CAIRO_LIFTING_LOG_SIZE, CAIRO_LOG_BLOWUP, base_trace_log_sizes, cairo_pay_components, size_batches,
-    tree_order,
+    CAIRO_LIFTING_LOG_SIZE, CAIRO_LOG_BLOWUP, base_trace_log_sizes, cairo_pay_components,
+    size_batches, tree_order,
 };
 
 struct Args {
     scale: u32,
+    unchecked: bool,
     threads: Option<usize>,
     reps: usize,
     cpu: bool,
@@ -39,7 +46,8 @@ struct Args {
 }
 
 fn parse_args() -> Args {
-    let mut args = Args { scale: 0, threads: None, reps: 3, cpu: true, gpu: true };
+    let mut args =
+        Args { scale: 0, unchecked: false, threads: None, reps: 3, cpu: true, gpu: true };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         let mut value = |name: &str| it.next().unwrap_or_else(|| panic!("{name} needs a value"));
@@ -48,9 +56,13 @@ fn parse_args() -> Args {
             "--threads" => args.threads = Some(value("--threads").parse().expect("--threads T")),
             "--reps" => args.reps = value("--reps").parse().expect("--reps R"),
             "--no-cpu" => args.cpu = false,
+            "--unchecked" => args.unchecked = true,
             "--no-gpu" => args.gpu = false,
             "-h" | "--help" => {
-                println!("bench_merkle [--scale N] [--threads T] [--reps R] [--no-cpu] [--no-gpu]");
+                println!(
+                    "bench_merkle [--scale N] [--threads T] [--reps R] [--unchecked] [--no-cpu] \
+                     [--no-gpu]"
+                );
                 std::process::exit(0);
             }
             other => panic!("unknown argument {other}"),
@@ -86,8 +98,8 @@ fn main() {
     let cells: u64 = sorted.iter().map(|&k| 1u64 << k).sum();
     let stripe_mib = cells as f64 * 4.0 / (1 << 20) as f64;
     println!(
-        "Cairo base trace, scale 2^-{}: {} columns in {} sizes, {:.1} M values ({stripe_mib:.1} MiB) per \
-         stripe, {n_stripes} stripes of height {height}",
+        "Cairo base trace, scale 2^-{}: {} columns in {} sizes, {:.1} M values ({stripe_mib:.1} \
+         MiB) per stripe, {n_stripes} stripes of height {height}",
         args.scale,
         sorted.len(),
         size_batches(&sorted).len(),
@@ -106,7 +118,10 @@ fn main() {
     if args.gpu {
         let gpu = GpuContext::new();
         let info = &gpu.adapter_info;
-        println!("GPU: {} ({:?}, {:?}, driver {} {})", info.name, info.backend, info.device_type, info.driver, info.driver_info);
+        println!(
+            "GPU: {} ({:?}, {:?}, driver {} {})",
+            info.name, info.backend, info.device_type, info.driver, info.driver_info
+        );
         let merkle = GpuMerkle::new(&gpu);
         let start = Instant::now();
         let uploaded = UploadedStripe::new(&gpu, &columns);
@@ -123,7 +138,8 @@ fn main() {
             .collect();
         let top = merkle.plan_top(&gpu, &tree, &layout);
         println!(
-            "plans: {} dispatches per stripe, {} above the stripes, states 2 x {:.1} MiB, layers {:.1} MiB ({})",
+            "plans: {} dispatches per stripe, {} above the stripes, states 2 x {:.1} MiB, layers \
+             {:.1} MiB ({})",
             stripe_plans[0].n_dispatches(),
             top.n_dispatches(),
             states.words as f64 * 4.0 / (1 << 20) as f64,
@@ -158,9 +174,36 @@ fn main() {
         let (best, median) = time(args.reps, with_upload);
         println!("GPU, with upload:      best {}  median {}", ms(best), ms(median));
 
+        if args.unchecked {
+            // Safety: the planner sizes and checks every buffer it binds.
+            let unchecked = unsafe { GpuMerkle::new_unchecked(&gpu) };
+            let stripe_plans: Vec<Plan> = (0..n_stripes as u32)
+                .map(|stripe| {
+                    unchecked.plan_stripe(&gpu, &batches, &states, &tree, &layout, stripe)
+                })
+                .collect();
+            let top = unchecked.plan_top(&gpu, &tree, &layout);
+            let resident = || {
+                let mut plans: Vec<&Plan> = stripe_plans.iter().collect();
+                plans.push(&top);
+                gpu.run_plans(&plans);
+            };
+            resident();
+            let (best, median) = time(args.reps, resident);
+            println!(
+                "GPU, unchecked kernels, inputs resident:  best {}  median {}",
+                ms(best),
+                ms(median)
+            );
+        }
+
         let start = Instant::now();
         let levels = merkle.read_levels(&gpu, &tree, &layout);
-        println!("read back the stored layers ({:.1} MiB): {}", layout.total_words as f64 * 4.0 / (1 << 20) as f64, ms(start.elapsed()));
+        println!(
+            "read back the stored layers ({:.1} MiB): {}",
+            layout.total_words as f64 * 4.0 / (1 << 20) as f64,
+            ms(start.elapsed())
+        );
         gpu_root = Some(levels.last().unwrap()[0]);
         println!("GPU root {}", gpu_root.unwrap());
     }
@@ -170,7 +213,8 @@ fn main() {
         let simd = simd_columns(&columns);
         println!("SIMD columns: {}", ms(start.elapsed()));
         let cpu_tree = || {
-            let subtrees: Vec<_> = (0..n_stripes).map(|_| simd_stripe_layers(&simd, height)).collect();
+            let subtrees: Vec<_> =
+                (0..n_stripes).map(|_| simd_stripe_layers(&simd, height)).collect();
             simd_tree_layers(&subtrees, height).last().unwrap()[0]
         };
         let mut pools = vec![(rayon::current_num_threads(), None)];

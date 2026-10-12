@@ -38,10 +38,10 @@ pub const SIGMA: [[usize; 16]; 10] = [
 /// The WGSL of Blake2s, to prepend to a kernel:
 ///
 /// - `blake2s_init() -> array<u32, 8>`: the chain value before the first block.
-/// - `blake2s_compress(h, m, t0, t1, last) -> array<u32, 8>`: one compression of the 16-word
-///   block `m` into the chain value `h`; `(t1, t0)` is the 64-bit count of the message's bytes
-///   up to and including this block, and `last` sets the finalization flag `f0` (`f1`, the last
-///   node flag of tree hashing, is always 0).
+/// - `blake2s_compress(h, m, t0, t1, last) -> array<u32, 8>`: one compression of the 16-word block
+///   `m` into the chain value `h`; `(t1, t0)` is the 64-bit count of the message's bytes up to and
+///   including this block, and `last` sets the finalization flag `f0` (`f1`, the last node flag of
+///   tree hashing, is always 0).
 /// - `blake2s_hash_pair(left, right) -> array<u32, 8>`: the hash of two hashes, a Merkle node.
 ///
 /// A message is hashed as Blake2s does: every block but the last with `last = false` and the
@@ -66,8 +66,8 @@ pub fn blake2s_wgsl() -> String {
     for i in 0..8 {
         writeln!(s, "    var v{i}: u32 = h[{i}];").unwrap();
     }
-    for i in 0..4 {
-        writeln!(s, "    var v{}: u32 = {:#010x}u;", i + 8, IV[i]).unwrap();
+    for (i, iv) in IV[..4].iter().enumerate() {
+        writeln!(s, "    var v{}: u32 = {iv:#010x}u;", i + 8).unwrap();
     }
     writeln!(s, "    var v12: u32 = {:#010x}u ^ t0;", IV[4]).unwrap();
     writeln!(s, "    var v13: u32 = {:#010x}u ^ t1;", IV[5]).unwrap();

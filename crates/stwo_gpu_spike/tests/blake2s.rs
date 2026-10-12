@@ -85,14 +85,20 @@ fn blake2s_matches_stwo() {
 
     let source = format!("{}\n{}", blake2s_wgsl(), kernel());
     let pipeline = gpu.pipeline("blake2s-test", &source, "main");
-    let (words_buffer, messages_buffer) = (gpu.upload("words", &words), gpu.upload("messages", &messages));
+    let (words_buffer, messages_buffer) =
+        (gpu.upload("words", &words), gpu.upload("messages", &messages));
     let out = gpu.storage("out", 8 * lens.len());
-    gpu.run(&pipeline, &[&words_buffer, &messages_buffer, &out], (lens.len().div_ceil(64) as u32, 1, 1));
+    gpu.run(
+        &pipeline,
+        &[&words_buffer, &messages_buffer, &out],
+        (lens.len().div_ceil(64) as u32, 1, 1),
+    );
     let out = gpu.read(&out, 8 * lens.len());
 
     for (i, &len) in lens.iter().enumerate() {
         let offset = messages[2 * i] as usize;
-        let message: Vec<u8> = words[offset..offset + len].iter().flat_map(|w| w.to_le_bytes()).collect();
+        let message: Vec<u8> =
+            words[offset..offset + len].iter().flat_map(|w| w.to_le_bytes()).collect();
         let expected = Blake2sHasher::hash(&message);
         assert_eq!(hash_from_words(&out[8 * i..8 * i + 8]), expected, "message of {len} words");
     }
