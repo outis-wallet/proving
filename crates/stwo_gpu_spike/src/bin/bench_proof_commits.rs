@@ -20,7 +20,8 @@
 //! counted. `--idle-ms MS` sleeps before each GPU commitment (the GPU idle, as while the prover
 //! computes on the CPU), without the CPU's work in between that `--no-cpu` leaves out.
 //! `--keep-warm-ms MS` sets the committer's keep-warm window (`GpuCommitter::set_keep_warm`, 0:
-//! off; default: the committer's, `STWO_GPU_KEEP_WARM_MS` or 3 s). `--rss-breakdown` first
+//! off; default 3000, `warm::DEFAULT_WINDOW`, set explicitly: the committer's own default is
+//! off). `--rss-breakdown` first
 //! measures what each part of a committer adds to the resident set (the device, the kernels, the
 //! rings, a mapped chunk written), before the committer.
 //!
@@ -84,7 +85,7 @@ fn parse_args() -> Args {
         cpu: true,
         gpu: true,
         idle: Duration::ZERO,
-        keep_warm: None,
+        keep_warm: Some(Some(stwo_gpu_spike::warm::DEFAULT_WINDOW)),
         rss_breakdown: false,
     };
     let mut it = std::env::args().skip(1);

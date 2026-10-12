@@ -658,9 +658,10 @@ fn streamed_full_shapes() {
     );
 }
 
-/// The committer's keep-warm thread: dispatching for its window after the committer's creation
-/// and after each commitment (the commitments still `new_striped`'s), stopping when its window
-/// passes or is unset.
+/// The committer's keep-warm thread: off by default, dispatching (once set) for its window after
+/// each commitment and a warm-up (the commitments still `new_striped`'s), and after the
+/// committer's creation when the environment sets a window, stopping when its window passes or
+/// is unset.
 #[test]
 fn committer_keeps_warm_after_commitments() {
     use std::time::{Duration, Instant};
@@ -672,10 +673,18 @@ fn committer_keeps_warm_after_commitments() {
         }
         assert!(committer.keep_warm_dispatches() > than, "no dispatch");
     };
-    // Warm from the committer's creation (the default window, unless the environment sets one).
-    if std::env::var_os("STWO_GPU_KEEP_WARM_MS").is_none() {
-        assert!(committer.keep_warm().is_some());
-        wait_for_more(0);
+    // Off by default: no dispatch from the committer's creation, unless the environment asks.
+    match stwo_gpu_spike::warm::window_from_env() {
+        None => {
+            assert_eq!(committer.keep_warm(), None);
+            std::thread::sleep(Duration::from_millis(200));
+            assert_eq!(committer.keep_warm_dispatches(), 0, "dispatches while off");
+        }
+        // Warm from the committer's creation.
+        Some(window) => {
+            assert_eq!(committer.keep_warm(), Some(window));
+            wait_for_more(0);
+        }
     }
     committer.set_keep_warm(Some(Duration::from_millis(300)));
     assert_eq!(committer.keep_warm(), Some(Duration::from_millis(300)));

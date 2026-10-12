@@ -357,9 +357,10 @@ Before, the phases ran one after the other: upload 816 (429 of it waiting for th
 here, and 69 ms natively at full clocks (`bench_commit`, streamed); the interaction trace,
 committed right after it, 66-69 ms. The prover's CPU phases between commitments idle the GPU,
 which drops its clocks (P5: 495 MHz, memory 810 MHz, PCIe gen 2; `nvidia-smi` during a proof)
-and climbs back over the next few hundred ms of work. Natively the committer keeps the GPU's
-clocks up between commitments (`warm.rs`); the GPU worker doesn't (the GPU is the page's too).
-At full clocks the compute would be about a third of its 0.6-0.8 s.
+and climbs back over the next few hundred ms of work. Keep-warm (`warm.rs`: a tiny dispatch kept
+in flight between commitments) keeps the clocks up; it is an option, off by default, natively
+(`STWO_GPU_KEEP_WARM_MS`) as in the GPU worker (`keep_warm_ms`, see **Keep-warm in the GPU
+worker**), and was off here. At full clocks the compute would be about a third of its 0.6-0.8 s.
 
 The browser's GPU process isn't the bottleneck either: in a Chrome trace of a proof its main
 thread is busy about 0.9 s of the commitments' 1.5 s (Dawn's command handling and submits, and

@@ -17,6 +17,9 @@
 //!
 //! `--smi` prints `nvidia-smi`'s performance state, clocks and PCIe link before each commitment
 //! (its query takes some time of its own, taken from the sleep).
+//!
+//! Each mode's keep-warm is this bench's own thread, set explicitly by `--warm` (`off` included):
+//! the committer's (`warm.rs`, off by default) isn't involved.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};

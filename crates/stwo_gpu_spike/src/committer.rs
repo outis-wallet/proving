@@ -9,10 +9,10 @@
 //! when a tree needs more ([`CommitBuffers`]); every blowup's twiddles, computed once
 //! ([`TwiddleCache`]); and two staging rings, through which the coefficients go up and the
 //! result comes back, by all the CPU's threads ([`crate::transfer`]). Only the plans (uniforms
-//! and bind groups) are built per commitment. Natively, a thread keeps the GPU's clocks up for a
-//! few seconds after each commitment, as the next one of a proof usually follows within them,
-//! and after the committer's creation, for the first ([`crate::warm`]:
-//! [`GpuCommitter::set_keep_warm`]).
+//! and bind groups) are built per commitment. Natively, as an option (off by default:
+//! `STWO_GPU_KEEP_WARM_MS`, [`GpuCommitter::set_keep_warm`]), a thread keeps the GPU's clocks up
+//! for a few seconds after each commitment, as the next one of a proof usually follows within
+//! them, and after the committer's creation, for the first ([`crate::warm`]).
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Mutex;
@@ -143,22 +143,23 @@ impl GpuCommitter {
             .ok()
             .and_then(Result::ok);
         // A committer is made for proving: the first commitment usually follows within the
-        // window (a prover's process makes its committer, then proves).
+        // window (a prover's process makes its committer, then proves). Nothing if keep-warm is
+        // off (the default: no window).
         if let Some(warm) = &warm {
             warm.warm_up();
         }
         Ok(Self { warm, gpu, kernels, state: Mutex::new(Some(reused)), times: Mutex::new(None) })
     }
 
-    /// How long the GPU's clocks are kept up after each commitment (see [`crate::warm`]):
-    /// `STWO_GPU_KEEP_WARM_MS` (0: never), or [`crate::warm::DEFAULT_WINDOW`]. Natively only;
-    /// `None` in wasm too if set so.
+    /// How long the GPU's clocks are kept up after each commitment (see [`crate::warm`]): `None`
+    /// (never) unless `STWO_GPU_KEEP_WARM_MS` (in ms) or [`Self::set_keep_warm`] set a window.
+    /// Natively only; in wasm the window is kept but nothing is dispatched.
     pub fn keep_warm(&self) -> Option<Duration> {
         self.warm.as_ref().and_then(KeepWarm::window)
     }
 
     /// Sets how long the GPU's clocks are kept up after each commitment (`None`: never; it stops
-    /// at once).
+    /// at once): e.g. [`crate::warm::DEFAULT_WINDOW`] to turn keep-warm on.
     pub fn set_keep_warm(&self, window: Option<Duration>) {
         if let Some(warm) = &self.warm {
             warm.set_window(window);

@@ -1,4 +1,5 @@
-//! Keeping the GPU's clocks up between a prover's commitments.
+//! Keeping the GPU's clocks up between a prover's commitments: an option, off by default
+//! (`STWO_GPU_KEEP_WARM_MS`, or `GpuCommitter::set_keep_warm`).
 //!
 //! A discrete NVIDIA GPU lowers its clocks within a second or two of low use (on the RTX 3080:
 //! P0 at 1920 MHz and 9501 MHz memory, down through P3, 240-855 MHz and 5001 MHz memory, to P8,
@@ -15,9 +16,16 @@
 //! commitment takes 124 ms after 3 s of idle (`bench_idle`; a dispatch every 5 ms: 130 ms, the
 //! clocks at 1605-1680 MHz; every 20 ms: 190-210 ms, the memory down to 5001 MHz). The cost is
 //! the power of a GPU at full clocks, mostly idle: about 104 W on the RTX 3080 against 2.5 W at
-//! P8 (`nvidia-smi`), for the window after each commitment. It pauses during a commitment. The
-//! committer also warms for a window from its creation (a prover's process makes its committer,
-//! then proves: in a proof of the Outis prover, the first commitment started 0.7 s after it).
+//! P8 (`nvidia-smi`), for the window after each commitment. It pauses during a commitment. When
+//! on, the committer also warms for a window from its creation (a prover's process makes its
+//! committer, then proves: in a proof of the Outis prover, the first commitment started 0.7 s
+//! after it).
+//!
+//! Off unless asked for: it trades the GPU's (and on a laptop, the battery's) power for the
+//! commitments' time, and the GPU may be shared (with the display, other work), which the
+//! committer can't see. `STWO_GPU_KEEP_WARM_MS=N` turns it on with a window of N ms (0: off), and
+//! `GpuCommitter::set_keep_warm` sets it at run time; [`DEFAULT_WINDOW`] is the window to ask for
+//! when in doubt.
 //!
 //! Natively only: a thread with the device's handles. In wasm it does nothing; a browser's GPU
 //! worker (`web/gpu`) runs the same kernel ([`SpinKernel`]) from its own event loop, as an option.
@@ -95,16 +103,17 @@ pub fn spin_reference(i: u32, iterations: u32) -> u32 {
     (0..iterations).fold(i, |x, _| x.wrapping_mul(1664525).wrapping_add(1013904223))
 }
 
-/// The window after each commitment during which [`KeepWarm`] keeps the GPU's clocks up, unless
-/// the environment's `STWO_GPU_KEEP_WARM_MS` sets another (0: never).
+/// A window to keep the GPU warm after each commitment, for a caller turning keep-warm on
+/// without one of its own: a prover's commitments come 0.4-1.5 s of CPU work apart natively (more
+/// in a browser), so 3 s covers the gaps of a proof.
 pub const DEFAULT_WINDOW: Duration = Duration::from_secs(3);
 
-/// The window the environment asks for, or [`DEFAULT_WINDOW`]; `None` for never.
+/// The window the environment asks for (`STWO_GPU_KEEP_WARM_MS`, in ms); `None` (off) when it is
+/// unset, 0 or not a number.
 pub fn window_from_env() -> Option<Duration> {
     match std::env::var("STWO_GPU_KEEP_WARM_MS").ok().and_then(|ms| ms.trim().parse::<u64>().ok()) {
-        Some(0) => None,
-        Some(ms) => Some(Duration::from_millis(ms)),
-        None => Some(DEFAULT_WINDOW),
+        Some(ms) if ms > 0 => Some(Duration::from_millis(ms)),
+        _ => None,
     }
 }
 
