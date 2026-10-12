@@ -5,6 +5,7 @@
 use naga::valid::{Capabilities, ValidationFlags, Validator};
 use stwo_gpu_spike::extension::ExtensionKernels;
 use stwo_gpu_spike::merkle::{absorb_shader, nodes_shader};
+use stwo_gpu_spike::recompute::IfftKernels;
 
 fn check(name: &str, source: &str) {
     let module = naga::front::wgsl::parse_str(source)
@@ -47,4 +48,5 @@ fn kernels_are_portable() {
     let (out_of_place, in_place) = ExtensionKernels::merged_sources();
     check("extension out of place, merged", &out_of_place);
     check("extension in place, merged", &in_place);
+    check("inverse FFT (recompute)", &IfftKernels::source());
 }

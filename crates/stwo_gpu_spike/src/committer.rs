@@ -14,16 +14,22 @@
 //! for a few seconds after each commitment, as the next one of a proof usually follows within
 //! them, and after the committer's creation, for the first ([`crate::warm`]).
 
+use std::collections::HashMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use itertools::Itertools;
 use stwo::core::ColumnVec;
+use stwo::core::circle::Coset;
+use stwo::core::fields::m31::BaseField;
 use stwo::core::vcs_lifted::blake2_merkle::Blake2sM31MerkleChannel;
 use stwo::prover::CommitmentTreeProver;
+use stwo::prover::backend::Column;
 use stwo::prover::backend::simd::SimdBackend;
-use stwo::prover::poly::circle::CircleCoefficients;
+use stwo::prover::backend::simd::column::BaseColumn;
+use stwo::prover::poly::BitReversedOrder;
+use stwo::prover::poly::circle::{CircleCoefficients, CircleEvaluation};
 use stwo::prover::poly::twiddles::TwiddleTree;
 
 use crate::GpuContext;
@@ -31,8 +37,10 @@ use crate::commit::{
     CommitBuffers, CommitKernels, CommitOptions, StripedCommitment, TwiddleCache,
     takes_striped_path,
 };
-use crate::stream::{StreamedCommitment, group_words};
-use crate::transfer::{ReadbackRing, RingTimes, UploadRing};
+use crate::parts::{Found, PartStats, PartStore, PartsMode};
+use crate::recompute::Recomputer;
+use crate::stream::{DeviceStripes, KeepStripe1, StreamedCommitment, group_words};
+use crate::transfer::{Readback, ReadbackRing, RingTimes, UploadRing};
 use crate::warm::{KeepWarm, window_from_env};
 
 /// The tree `new_striped` returns.
@@ -61,6 +69,15 @@ pub struct GpuCommitter {
     state: Mutex<Option<Reused>>,
     /// Where the last commitment's time went.
     times: Mutex<Option<CommitTimes>>,
+    /// Stripe 1 of the columns committed, for constraint evaluation (see [`crate::parts`]).
+    /// Locked after `state` when both are.
+    parts: Mutex<PartStore>,
+    parts_mode: Mutex<PartsMode>,
+    /// A2's kernels and twiddles, made at its first request (locked after `state` and `parts`).
+    recomputer: Mutex<Option<Recomputer>>,
+    /// The root coset of the twiddle tree of the last commitment at each blowup, whose stripe
+    /// twiddles the commitments' cache keeps (A2 reuses them).
+    root_cosets: Mutex<HashMap<u32, Coset>>,
 }
 
 /// Where a commitment's time went (wall clock).
@@ -148,7 +165,17 @@ impl GpuCommitter {
         if let Some(warm) = &warm {
             warm.warm_up();
         }
-        Ok(Self { warm, gpu, kernels, state: Mutex::new(Some(reused)), times: Mutex::new(None) })
+        Ok(Self {
+            warm,
+            gpu,
+            kernels,
+            state: Mutex::new(Some(reused)),
+            times: Mutex::new(None),
+            parts: Mutex::new(PartStore::new()),
+            parts_mode: Mutex::new(PartsMode::from_env()),
+            recomputer: Mutex::new(None),
+            root_cosets: Mutex::new(HashMap::new()),
+        })
     }
 
     /// How long the GPU's clocks are kept up after each commitment (see [`crate::warm`]): `None`
@@ -208,6 +235,9 @@ impl GpuCommitter {
             return Err((polynomials, Declined::NotStriped));
         }
         let mut state = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut parts = self.parts.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        parts.commitment_starts();
+        let parts_mode = *self.parts_mode.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Some(warm) = &self.warm {
             warm.begin();
         }
@@ -220,6 +250,10 @@ impl GpuCommitter {
             reused.upload.take_times();
             reused.readback.take_times();
             let distinct = log_sizes.iter().copied().collect();
+            self.root_cosets
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .insert(log_blowup_factor, twiddles.root_coset);
             let twiddles = reused.twiddles.get(&self.gpu, &distinct, log_blowup_factor, twiddles);
             let group_words = group_words(
                 &self.gpu,
@@ -242,17 +276,38 @@ impl GpuCommitter {
                         lifting_log_size,
                         group_words,
                     );
+                    // Stripe 1 kept for constraint evaluation, as the mode says.
+                    let device_stripes = (parts_mode == PartsMode::Device).then(|| {
+                        let limits = self.gpu.device.limits();
+                        let max_bytes = limits.max_buffer_size.min(1 << 30);
+                        DeviceStripes::new(&self.gpu, &log_sizes, log_blowup_factor, max_bytes)
+                    });
+                    let keep = match (parts_mode, &device_stripes) {
+                        (PartsMode::Host, _) => KeepStripe1::Host,
+                        (_, Some(stripes)) => KeepStripe1::Device(stripes),
+                        _ => KeepStripe1::No,
+                    };
                     times.setup = start.elapsed();
-                    let (output, phases) = commitment.commit_timed(
+                    let (output, phases, host_stripes) = commitment.commit_keeping(
                         &self.gpu,
                         &self.kernels,
                         &mut reused.upload,
                         &mut reused.readback,
                         &polynomials,
+                        keep,
                     );
                     times.commit = start.elapsed() - times.setup;
                     times.phases = phases;
-                    commitment.tree_prover(output)
+                    let tree = commitment.tree_prover(output);
+                    let stripe0 =
+                        tree.polynomials.iter().map(|poly| &poly.evals.values).collect_vec();
+                    if let Some(stripes) = host_stripes {
+                        parts.keep_host(&stripe0, stripes, &log_sizes, log_blowup_factor);
+                    }
+                    if let Some(stripes) = device_stripes {
+                        parts.keep_device(&stripe0, stripes, &log_sizes, log_blowup_factor);
+                    }
+                    tree
                 }
                 None => {
                     let commitment = StripedCommitment::with_buffers(
@@ -296,9 +351,191 @@ impl GpuCommitter {
             Err(panic) => {
                 // Whatever the failure left behind goes; the next commitment starts afresh.
                 *state = None;
+                parts.clear();
                 Err((polynomials, Declined::Gpu(panic_message(&panic))))
             }
         }
+    }
+
+    /// Where stripe 1 of the columns committed from now on comes from, for constraint evaluation
+    /// (see [`crate::parts`]); `STWO_GPU_PARTS` sets it at the committer's creation.
+    pub fn set_parts_mode(&self, mode: PartsMode) {
+        *self.parts_mode.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = mode;
+    }
+
+    pub fn parts_mode(&self) -> PartsMode {
+        *self.parts_mode.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Drops whatever the commitments kept for constraint evaluation (e.g. at a proof's start, or
+    /// when a commitment is made elsewhere).
+    pub fn clear_parts(&self) {
+        self.parts.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clear();
+    }
+
+    /// The counts of the part extension's lookups since the last call.
+    pub fn take_part_stats(&self) -> PartStats {
+        self.parts.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take_stats()
+    }
+
+    /// Stripe 1 of `columns` (`(tree, committed column)`, each holding its stripe 0 of the
+    /// committed domain split into `2^log_parts` parts), as constraint-framework's
+    /// `TracePartHook` asks for it: each column's evaluations on part `part`, or `None` (the CPU
+    /// evaluates it). Only part 1 is kept.
+    pub fn trace_part(
+        &self,
+        part: usize,
+        log_parts: u32,
+        columns: &[(usize, &CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>)],
+    ) -> Vec<Option<BaseColumn>> {
+        let mode = self.parts_mode();
+        let none = || columns.iter().map(|_| None).collect();
+        if mode == PartsMode::Off || part != 1 {
+            return none();
+        }
+        if mode == PartsMode::Recompute {
+            return crate::recompute::trace_part(self, part, log_parts, columns);
+        }
+        let start = Instant::now();
+        // The readback ring, for stripes kept on the GPU (`state` before `parts`).
+        let mut state = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut parts = self.parts.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        parts.request(columns.len());
+        let mut answers: Vec<Option<BaseColumn>> = Vec::with_capacity(columns.len());
+        let mut device_reads = vec![];
+        for (k, (tree, column)) in columns.iter().enumerate() {
+            let found = parts.find(*tree, &column.values, column.domain.log_size(), log_parts);
+            answers.push(match found {
+                Some(Found::Host(values)) => Some(values),
+                Some(Found::Device { set, buffer, offset }) => {
+                    device_reads.push((k, set, buffer, offset));
+                    // Safety: read back below, every word.
+                    Some(unsafe { BaseColumn::uninitialized(column.values.length) })
+                }
+                None => None,
+            });
+        }
+        let mut transfer = Duration::ZERO;
+        if !device_reads.is_empty() {
+            let transfer_start = Instant::now();
+            let read = catch_unwind(AssertUnwindSafe(|| {
+                let reused = state.get_or_insert_with(|| Reused::new(&self.gpu));
+                let mut destinations: Vec<Option<&mut [u8]>> = answers
+                    .iter_mut()
+                    .map(|answer| {
+                        answer.as_mut().map(|values| {
+                            bytemuck::cast_slice_mut::<BaseField, u8>(values.as_mut_slice())
+                        })
+                    })
+                    .collect();
+                let pieces = device_reads
+                    .iter()
+                    .map(|&(k, set, buffer, offset)| Readback {
+                        src: parts.device_buffer(set, buffer),
+                        src_offset: offset,
+                        dst: destinations[k].take().expect("a column read back"),
+                    })
+                    .collect_vec();
+                reused.readback.take_times();
+                reused.readback.read(&self.gpu, pieces);
+                reused.readback.take_times()
+            }));
+            transfer = transfer_start.elapsed();
+            if let Ok(ring) = &read {
+                parts.add_readback_times(ring.wait, ring.copy);
+            }
+            if read.is_err() {
+                // The columns read back are dropped: the CPU evaluates them.
+                *state = None;
+                for &(k, ..) in &device_reads {
+                    answers[k] = None;
+                }
+            }
+        }
+        parts.add_lookup_time(start.elapsed(), transfer);
+        answers
+    }
+
+    /// Stripe 1 of `values` (each the stripe 0, of `2^log_size` values, of a column committed at
+    /// blowup `log_blowup`), recomputed on the GPU (A2, see [`crate::recompute`]); `None` if the
+    /// GPU failed.
+    pub fn recompute_stripe1(
+        &self,
+        values: &[&BaseColumn],
+        log_size: u32,
+        log_blowup: u32,
+    ) -> Option<Vec<BaseColumn>> {
+        let start = Instant::now();
+        let mut state = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut parts = self.parts.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut recomputer =
+            self.recomputer.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        parts.request(values.len());
+        let root_coset = self
+            .root_cosets
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(&log_blowup)
+            .copied();
+        let result = crate::recompute::guarded(|| {
+            let reused = state.get_or_insert_with(|| Reused::new(&self.gpu));
+            let recomputer = recomputer.get_or_insert_with(|| Recomputer::new(&self.gpu));
+            // The commitments' stripe twiddles of this blowup, if they cover the size.
+            let cached = root_coset.and_then(|root_coset| {
+                let log_sizes = [log_size].into_iter().collect();
+                reused
+                    .twiddles
+                    .try_get_with(&self.gpu, &log_sizes, log_blowup, root_coset, || Err(()))
+                    .ok()
+            });
+            recomputer.stripe1(
+                &self.gpu,
+                &self.kernels.extension,
+                &mut reused.upload,
+                &mut reused.readback,
+                values,
+                log_size,
+                log_blowup,
+                cached,
+                false,
+            )
+        });
+        let Some((stripes, _, times)) = result else {
+            *state = None;
+            *recomputer = None;
+            parts.add_lookup_time(start.elapsed(), Duration::ZERO);
+            return None;
+        };
+        parts.recomputed(values.len(), times.bytes, &times);
+        parts.add_lookup_time(start.elapsed(), times.upload + times.readback);
+        Some(stripes)
+    }
+
+    /// [`Self::recompute_stripe1`], with the coefficients interpolated on the GPU too (for tests),
+    /// and the times.
+    pub fn recompute_stripe1_with_coefficients(
+        &self,
+        values: &[&BaseColumn],
+        log_size: u32,
+        log_blowup: u32,
+    ) -> (Vec<BaseColumn>, Vec<BaseColumn>, crate::recompute::RecomputeTimes) {
+        let mut state = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut recomputer =
+            self.recomputer.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let reused = state.get_or_insert_with(|| Reused::new(&self.gpu));
+        let recomputer = recomputer.get_or_insert_with(|| Recomputer::new(&self.gpu));
+        let (stripes, coefficients, times) = recomputer.stripe1(
+            &self.gpu,
+            &self.kernels.extension,
+            &mut reused.upload,
+            &mut reused.readback,
+            values,
+            log_size,
+            log_blowup,
+            None,
+            true,
+        );
+        (stripes, coefficients.unwrap(), times)
     }
 
     /// Where the last commitment made on the GPU spent its time.

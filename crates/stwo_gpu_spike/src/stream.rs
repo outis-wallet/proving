@@ -584,6 +584,23 @@ impl StreamedCommitment {
         readback: &mut ReadbackRing,
         polys: &'a [CircleCoefficients<SimdBackend>],
     ) -> (CommitOutput, [Duration; 4]) {
+        let (output, phases, _) =
+            self.commit_keeping(gpu, kernels, upload, readback, polys, KeepStripe1::No);
+        (output, phases)
+    }
+
+    /// [`Self::commit_timed`], keeping stripe 1 of the columns not kept whole as `keep` says
+    /// (see [`KeepStripe1`]): read back with stripe 0 (returned, by column, `None` for a column
+    /// kept whole), or copied on the GPU into a [`DeviceStripes`]. The tree is the same.
+    pub fn commit_keeping<'a>(
+        &'a self,
+        gpu: &GpuContext,
+        kernels: &CommitKernels,
+        upload: &mut UploadRing,
+        readback: &mut ReadbackRing,
+        polys: &'a [CircleCoefficients<SimdBackend>],
+        keep: KeepStripe1<'_>,
+    ) -> (CommitOutput, [Duration; 4], Option<Vec<Option<BaseColumn>>>) {
         let mut phases = [Duration::ZERO; 4];
         let mut start = Instant::now();
         let mut lap = |phase: usize| {
@@ -597,7 +614,20 @@ impl StreamedCommitment {
         let n_stripes = self.n_stripes();
         let coefficients =
             |i: usize| bytemuck::cast_slice::<BaseField, u8>(polys[i].coeffs.as_slice());
-        let mut reads = Reads::new(self.log_sizes.len());
+        // Kept on the host, stripe 1 of column `i` is read back as column `n + i`.
+        let n = self.log_sizes.len();
+        let keep_host = matches!(keep, KeepStripe1::Host);
+        let read_log_sizes = match keep_host {
+            true => self.log_sizes.iter().chain(&self.log_sizes).copied().collect_vec(),
+            false => self.log_sizes.clone(),
+        };
+        let stripe1_reads = |places: Vec<Place<'a>>, stripe_offset: u64| {
+            places
+                .into_iter()
+                .map(|(i, buffer, offset)| (n + i, buffer, offset + stripe_offset))
+                .collect_vec()
+        };
+        let mut reads = Reads::new(read_log_sizes.len());
 
         let uploads = |places: Vec<Place<'a>>| {
             places
@@ -614,10 +644,20 @@ impl StreamedCommitment {
                 .device
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("group") });
             self.encode_group(kernels, &mut encoder, group);
+            if let KeepStripe1::Device(stripes) = &keep {
+                // Stripe 1 of the group's columns (not kept whole), into place.
+                let places = self.group_reads(group);
+                stripes.encode_copies(&mut encoder, &places, self.slot_words * 4, &self.log_sizes);
+            }
             gpu.queue.submit([encoder.finish()]);
 
             // Stripe 0's columns of the group (not kept whole), read back.
-            reads.read(gpu, readback, &self.log_sizes, &self.group_reads(group));
+            reads.read(gpu, readback, &read_log_sizes, &self.group_reads(group));
+            if keep_host {
+                // And stripe 1's, in slot 1.
+                let places = stripe1_reads(self.group_reads(group), self.slot_words * 4);
+                reads.read(gpu, readback, &read_log_sizes, &places);
+            }
         }
         lap(0);
 
@@ -631,11 +671,19 @@ impl StreamedCommitment {
                     .device
                     .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("top") });
                 self.encode_top(kernels, &mut encoder, stripe);
+                if let (1, KeepStripe1::Device(stripes)) = (stripe, &keep) {
+                    stripes.encode_copies(&mut encoder, &self.top_reads(), 0, &self.log_sizes);
+                }
                 gpu.queue.submit([encoder.finish()]);
                 if stripe == 0 {
                     // Started before stripe 1 overwrites them (the ring's chunks are copied out
                     // to make room if needed).
-                    reads.read(gpu, readback, &self.log_sizes, &self.top_reads());
+                    reads.read(gpu, readback, &read_log_sizes, &self.top_reads());
+                }
+                if stripe == 1 && keep_host {
+                    // Started before stripe 2 overwrites them.
+                    let places = stripe1_reads(self.top_reads(), 0);
+                    reads.read(gpu, readback, &read_log_sizes, &places);
                 }
             }
         }
@@ -650,6 +698,7 @@ impl StreamedCommitment {
         self.encode_levels(&mut encoder);
         gpu.queue.submit([encoder.finish()]);
         let mut evaluations = reads.drain(gpu, readback);
+        let stripe1 = keep_host.then(|| evaluations.split_off(n));
         lap(2);
 
         // The columns kept whole and the tree's levels, read back.
@@ -704,7 +753,7 @@ impl StreamedCommitment {
             .enumerate()
             .map(|(i, column)| column.unwrap_or_else(|| panic!("column {i} not read back")))
             .collect();
-        (CommitOutput { layers: levels, evaluations }, phases)
+        (CommitOutput { layers: levels, evaluations }, phases, stripe1)
     }
 
     /// [`CommitOutput`] as `new_striped` returns it (see [`tree_prover`]).
@@ -811,5 +860,124 @@ impl Reads {
             self.finish(gpu, ring);
         }
         self.columns
+    }
+}
+
+/// What a streamed commitment keeps of stripe 1 of its columns (those not kept whole) besides
+/// the tree, for constraint evaluation's part extension (see [`crate::parts`]).
+pub enum KeepStripe1<'k> {
+    /// Nothing, as `new_striped`.
+    No,
+    /// Read back with stripe 0, through the same ring.
+    Host,
+    /// Copied on the GPU, after the stripe's hashing, into these buffers.
+    Device(&'k DeviceStripes),
+}
+
+/// Buffers on the GPU holding stripe 1 of a tree's columns (those not kept whole), each column's
+/// `2^log_size` words at its place, for constraint evaluation to read back later.
+pub struct DeviceStripes {
+    pub buffers: Vec<wgpu::Buffer>,
+    /// Per column (polynomial order): `(buffer, byte offset)`, `None` for a column kept whole.
+    pub places: Vec<Option<(usize, u64)>>,
+}
+
+impl DeviceStripes {
+    /// Buffers for stripe 1 of columns of coefficients log sizes `log_sizes` (in polynomial
+    /// order) committed with blowup `log_blowup`, of at most `max_buffer_bytes` each.
+    pub fn new(
+        gpu: &GpuContext,
+        log_sizes: &[u32],
+        log_blowup: u32,
+        max_buffer_bytes: u64,
+    ) -> Self {
+        let mut sizes: Vec<u64> = vec![];
+        let places = log_sizes
+            .iter()
+            .map(|&log_size| {
+                if kept_whole(log_size, log_blowup) {
+                    return None;
+                }
+                let bytes = 4u64 << log_size;
+                assert!(bytes <= max_buffer_bytes, "a column exceeds a buffer");
+                let n = sizes.len();
+                match sizes.last_mut() {
+                    Some(size) if *size + bytes <= max_buffer_bytes => {
+                        *size += bytes;
+                        Some((n - 1, *size - bytes))
+                    }
+                    _ => {
+                        sizes.push(bytes);
+                        Some((n, 0))
+                    }
+                }
+            })
+            .collect();
+        let buffers = sizes
+            .iter()
+            .map(|&size| {
+                gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("stripe 1"),
+                    size,
+                    usage: wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                })
+            })
+            .collect();
+        Self { buffers, places }
+    }
+
+    /// The bytes of its buffers.
+    pub fn bytes(&self) -> u64 {
+        self.buffers.iter().map(wgpu::Buffer::size).sum()
+    }
+
+    /// Records the copies of stripe 1 of the columns at `places` (`(column, buffer, byte offset
+    /// of stripe 0)`; stripe 1 at `stripe_offset` bytes further) into their places; adjacent
+    /// columns adjacent on both sides go in one copy.
+    fn encode_copies(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        places: &[Place<'_>],
+        stripe_offset: u64,
+        log_sizes: &[u32],
+    ) {
+        // (source buffer, source offset, destination buffer, destination offset, bytes)
+        let mut run: Option<(&wgpu::Buffer, u64, usize, u64, u64)> = None;
+        let flush = |encoder: &mut wgpu::CommandEncoder,
+                     run: (&wgpu::Buffer, u64, usize, u64, u64)| {
+            let (src, src_offset, dst, dst_offset, bytes) = run;
+            encoder.copy_buffer_to_buffer(src, src_offset, &self.buffers[dst], dst_offset, bytes);
+        };
+        for &(i, src, offset) in places {
+            let (dst, dst_offset) = self.places[i].expect("a column read back is striped");
+            let bytes = 4u64 << log_sizes[i];
+            let src_offset = offset + stripe_offset;
+            run = match run {
+                Some((s, so, d, dof, b))
+                    if std::ptr::eq(s, src)
+                        && so + b == src_offset
+                        && d == dst
+                        && dof + b == dst_offset =>
+                {
+                    Some((s, so, d, dof, b + bytes))
+                }
+                Some(previous) => {
+                    flush(encoder, previous);
+                    Some((src, src_offset, dst, dst_offset, bytes))
+                }
+                None => Some((src, src_offset, dst, dst_offset, bytes)),
+            };
+        }
+        if let Some(run) = run {
+            flush(encoder, run);
+        }
+    }
+
+    /// Frees its buffers now.
+    pub fn destroy(&self) {
+        for buffer in &self.buffers {
+            buffer.destroy();
+        }
     }
 }
