@@ -90,6 +90,27 @@ fn tw_low(kb: u32, idx: u32) -> u32 {
 
 /*RADIX*/
 
+// The index in the input of the coefficient of batch index g. stwo stores the coefficients of a
+// column larger than 2^CACHED_FFT_LOG_SIZE with its vectors of 16 words transposed, vector index
+// (a, b, c) <-> (c, b, a) with |a| = |c| (`transpose_vecs`), as the first phase of `rfft::fft`
+// reads them; a permutation of 64-byte runs.
+fn src_index(g: u32) -> u32 {
+    if (params.transposed == 0u) {
+        return params.src_base + g;
+    }
+    let l = params.log_n;
+    let gi = g & ((1u << l) - 1u);
+    let v = gi >> 4u;
+    let n_vecs_log = l - 4u;
+    let half = n_vecs_log >> 1u;
+    let mid = n_vecs_log & 1u;
+    let a = v & ((1u << half) - 1u);
+    let b = (v >> half) & ((1u << mid) - 1u);
+    let c = v >> (half + mid);
+    let m = (a << (half + mid)) | (b << half) | c;
+    return params.src_base + ((g >> l) << l) + (m << 4u) + (gi & 15u);
+}
+
 // The batch index of tile word i: its bits [0, c) and [lo, lo + TILE_LOG - c) come from i, the
 // others (`mid`) from the workgroup.
 fn batch_index(i: u32, mid: u32) -> u32 {

@@ -18,8 +18,17 @@ use stwo_gpu_spike::extension::{
     ColumnsLayout, ExtensionKernels, GpuColumns, StripeExtension, TILE_LOG, max_buffer_words, passes,
 };
 
-/// The log sizes of the Cairo base trace's columns (`data/cairo_trace_shapes_pay.txt`).
-const CAIRO_LOG_SIZES: [u32; 13] = [4, 6, 7, 8, 11, 13, 14, 15, 16, 17, 18, 19, 20];
+/// The distinct log sizes of the Cairo base trace's columns (`data/cairo_trace_shapes_pay.txt`).
+fn cairo_log_sizes() -> Vec<u32> {
+    let text = include_str!("../data/cairo_trace_shapes_pay.txt");
+    let log_sizes = text
+        .lines()
+        .filter(|line| !line.trim().is_empty() && !line.starts_with('#'))
+        .map(|line| line.split_whitespace().nth(1).unwrap().parse::<u32>().unwrap())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(log_sizes.iter().copied().collect::<Vec<_>>(), [4, 6, 7, 8, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]);
+    log_sizes.into_iter().collect()
+}
 
 /// stwo's evaluation of `poly` on stripe `stripe` of its domain, as `new_striped` makes it.
 fn simd_stripe(
@@ -130,9 +139,9 @@ fn repeated(log_sizes: &[u32], copies: impl Fn(u32) -> usize) -> Vec<u32> {
 fn cairo_log_sizes_blowup_3_every_stripe() {
     let gpu = GpuContext::new();
     let kernels = ExtensionKernels::new(&gpu);
-    let log_sizes = repeated(&CAIRO_LOG_SIZES, |l| match l {
+    let log_sizes = repeated(&cairo_log_sizes(), |l| match l {
         ..=11 => 5,
-        ..=18 => 3,
+        12..=18 => 3,
         _ => 1,
     });
     check(&gpu, &kernels, &Case::new(&log_sizes, 3, &[0, 1, 2, 3, 4, 5, 6, 7]), 3);
@@ -142,7 +151,7 @@ fn cairo_log_sizes_blowup_3_every_stripe() {
 fn cairo_log_sizes_blowup_2_every_stripe() {
     let gpu = GpuContext::new();
     let kernels = ExtensionKernels::new(&gpu);
-    let log_sizes = repeated(&CAIRO_LOG_SIZES, |l| if l <= 16 { 3 } else { 1 });
+    let log_sizes = repeated(&cairo_log_sizes(), |l| if l <= 16 { 3 } else { 1 });
     check(&gpu, &kernels, &Case::new(&log_sizes, 2, &[0, 1, 2, 3]), 2);
 }
 
@@ -195,6 +204,23 @@ fn edge_coefficients() {
         })
         .collect();
     check_columns(&gpu, &kernels, &Case::new(&log_sizes, 3, &[0, 1, 2, 3, 4, 5, 6, 7]), columns);
+}
+
+/// Coefficients equal to P, the other representation of 0, which stwo's SIMD arithmetic accepts
+/// (it keeps values in [0, P]): the GPU's butterflies are the same as the SIMD backend's, so the
+/// outputs are still equal word for word. (Log size 4 is left out: there stwo evaluates on the CPU
+/// backend, whose arithmetic reduces differently; stwo's coefficients are canonical anyway.)
+#[test]
+fn coefficients_equal_to_p() {
+    let gpu = GpuContext::new();
+    let kernels = ExtensionKernels::new(&gpu);
+    let log_sizes = [5, 12, 13, 17, 18];
+    let mut rng = SmallRng::seed_from_u64(12);
+    let columns = log_sizes
+        .iter()
+        .map(|&l| (0..1u32 << l).map(|_| if rng.random_bool(0.3) { P } else { rng.random_range(0..P) }).collect())
+        .collect();
+    check_columns(&gpu, &kernels, &Case::new(&log_sizes, 3, &[0, 4, 7]), columns);
 }
 
 /// Within WebGPU's default limits (a browser's, unless it asks for more), with buffers small

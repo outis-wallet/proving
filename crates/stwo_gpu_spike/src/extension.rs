@@ -379,28 +379,7 @@ fn shader_source(in_place: bool) -> String {
     } else {
         (
             "@group(0) @binding(0) var<storage, read> src: array<u32>;\n\
-             @group(0) @binding(1) var<storage, read_write> dst: array<u32>;\n\
-             \n\
-             // The index in `src` of the coefficient of batch index g. stwo stores the coefficients\n\
-             // of a column larger than 2^CACHED_FFT_LOG_SIZE with the vectors of 16 words transposed:\n\
-             // vector index (a, b, c) <-> (c, b, a), |a| = |c| (`transpose_vecs`), as the first phase of\n\
-             // `rfft::fft` reads them.\n\
-             fn src_index(g: u32) -> u32 {\n\
-             \x20   if (params.transposed == 0u) {\n\
-             \x20       return params.src_base + g;\n\
-             \x20   }\n\
-             \x20   let l = params.log_n;\n\
-             \x20   let gi = g & ((1u << l) - 1u);\n\
-             \x20   let v = gi >> 4u;\n\
-             \x20   let n_vecs_log = l - 4u;\n\
-             \x20   let half = n_vecs_log >> 1u;\n\
-             \x20   let mid = n_vecs_log & 1u;\n\
-             \x20   let a = v & ((1u << half) - 1u);\n\
-             \x20   let b = (v >> half) & ((1u << mid) - 1u);\n\
-             \x20   let c = v >> (half + mid);\n\
-             \x20   let m = (a << (half + mid)) | (b << half) | c;\n\
-             \x20   return params.src_base + ((g >> l) << l) + (m << 4u) + (gi & 15u);\n\
-             }",
+             @group(0) @binding(1) var<storage, read_write> dst: array<u32>;",
             "src[src_index(g)]",
         )
     };
@@ -555,7 +534,7 @@ impl StripeExtension {
                 gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: Some(&format!("twiddles of stripe {stripe}")),
                     contents: bytemuck::cast_slice(if words.is_empty() { &[0u32][..] } else { words }),
-                    usage: wgpu::BufferUsages::STORAGE,
+                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
                 })
             })
             .collect::<Vec<_>>();
@@ -664,6 +643,15 @@ impl StripeExtension {
     /// The number of dispatches of a stripe.
     pub fn n_dispatches(&self) -> usize {
         self.dispatches.len()
+    }
+
+    /// Queues the writes of the twiddles of every stripe again (`twiddles` as in
+    /// [`Self::with_twiddle_words`]).
+    pub fn write_twiddles(&self, gpu: &GpuContext, twiddles: &[Vec<u32>]) {
+        assert_eq!(twiddles.len(), self.twiddles.len());
+        for (buffer, words) in self.twiddles.iter().zip(twiddles) {
+            gpu.queue.write_buffer(buffer, 0, bytemuck::cast_slice(words));
+        }
     }
 
     /// The bytes of twiddles on the GPU, all stripes.
