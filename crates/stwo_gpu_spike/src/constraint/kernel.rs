@@ -170,7 +170,7 @@ impl ConstraintKernels {
                     layout: Some(&pipeline_layout),
                     module: &module,
                     entry_point: Some("main"),
-                    compilation_options: Default::default(),
+                    compilation_options: crate::compilation_options(),
                     cache,
                 })
             })

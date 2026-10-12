@@ -64,6 +64,20 @@ pub mod warm;
 /// M31 arithmetic in WGSL (`m31_add`, `m31_sub`, `m31_mul`, ...), to prepend to a kernel's source.
 pub const M31_WGSL: &str = include_str!("shaders/m31.wgsl");
 
+/// The pipelines' compilation options: without wgpu's zero-initialization of workgroup memory.
+/// naga's MSL backend emits it as one thread clearing the whole array (`if (tid == 0u) { tile =
+/// {}; }`) before a barrier, which made the extension 10x slower on Metal (Apple M5 Pro: 1230 ms
+/// against 124 ms for the Cairo base trace's 8 stripes). Every kernel writes the workgroup words it
+/// reads into an output before reading them (the extension and the IFFT reads past a batch's end
+/// only into words they never store). `STWO_GPU_ZERO_INIT=1` turns it back on.
+pub fn compilation_options() -> wgpu::PipelineCompilationOptions<'static> {
+    wgpu::PipelineCompilationOptions {
+        zero_initialize_workgroup_memory: std::env::var("STWO_GPU_ZERO_INIT")
+            .is_ok_and(|v| v == "1"),
+        ..Default::default()
+    }
+}
+
 /// A device and its queue, with blocking helpers.
 pub struct GpuContext {
     pub adapter_info: wgpu::AdapterInfo,
@@ -185,7 +199,7 @@ impl GpuContext {
             layout: None,
             module: &module,
             entry_point: Some(entry),
-            compilation_options: Default::default(),
+            compilation_options: compilation_options(),
             cache: None,
         })
     }
@@ -217,7 +231,7 @@ impl GpuContext {
             layout: None,
             module: &module,
             entry_point: Some(entry),
-            compilation_options: Default::default(),
+            compilation_options: compilation_options(),
             cache: None,
         })
     }

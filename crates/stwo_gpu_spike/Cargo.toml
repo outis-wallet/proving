@@ -26,6 +26,7 @@ rayon = "1.10"
 ash = "0.38"
 
 [dev-dependencies]
+log = "0.4"
 num-traits = "0.2"
 # Translates the kernels to MSL and HLSL in a test, validated without optional capabilities.
 naga = { version = "30", features = ["wgsl-in", "msl-out", "hlsl-out"] }

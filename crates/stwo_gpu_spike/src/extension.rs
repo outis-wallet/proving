@@ -669,16 +669,17 @@ impl ExtensionKernels {
                     bind_group_layouts: &[Some(&layout)],
                     immediate_size: 0,
                 });
-            let module = gpu.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            let descriptor = wgpu::ShaderModuleDescriptor {
                 label: Some(label),
                 source: wgpu::ShaderSource::Wgsl(shader_source(kind.in_place, kind.merged).into()),
-            });
+            };
+            let module = gpu.device.create_shader_module(descriptor);
             let pipeline = gpu.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: Some(label),
                 layout: Some(&pipeline_layout),
                 module: &module,
                 entry_point: Some("main"),
-                compilation_options: Default::default(),
+                compilation_options: crate::compilation_options(),
                 cache: None,
             });
             (pipeline, layout)

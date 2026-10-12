@@ -1412,6 +1412,7 @@ dependencies = [
  "ash",
  "bytemuck",
  "itertools 0.12.1",
+ "log",
  "naga",
  "num-traits",
  "pollster",
