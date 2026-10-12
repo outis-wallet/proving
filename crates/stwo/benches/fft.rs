@@ -71,7 +71,7 @@ pub fn simd_ifft_parts(c: &mut Criterion) {
         b.iter_batched(
             || values.clone().data,
             |mut values| unsafe {
-                ifft3_loop(
+                ifft3_loop::<false>(
                     transmute::<*mut PackedBaseField, *mut u32>(values.as_mut_ptr()),
                     black_box(&twiddle_dbls_refs[3..]),
                     black_box(7),
