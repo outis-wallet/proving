@@ -50,7 +50,7 @@ use stwo::prover::{CommitmentTreeProver, Poly};
 
 use crate::GpuContext;
 use crate::extension::{
-    ColumnsLayout, ExtensionKernels, GpuColumns, StripeExtension, max_buffer_words,
+    ColumnsLayout, ExtensionKernels, GpuColumns, Merge, StripeExtension, max_buffer_words,
     stripe_twiddle_words,
 };
 use crate::merkle::{
@@ -229,6 +229,17 @@ impl PassTimestamps {
     }
 }
 
+/// How a [`StripedCommitment`] lays out and dispatches its columns.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CommitOptions {
+    /// The largest buffer of columns, in words (default: the device's largest binding): smaller
+    /// spreads the columns over more buffers.
+    pub max_buffer_words: Option<u64>,
+    /// How the extension's dispatches take the batches (default: one dispatch per batch and
+    /// pass).
+    pub merge: Merge,
+}
+
 /// The striped commitment of a tree of given shapes on the GPU (see the module docs): its
 /// buffers, its stripes' extension and Merkle plans, built once, run any number of times.
 pub struct StripedCommitment {
@@ -268,28 +279,28 @@ impl StripedCommitment {
         lifting_log_size: u32,
         twiddles: &TwiddleTree<SimdBackend>,
     ) -> Self {
-        Self::with_max_buffer_words(
+        Self::with_options(
             gpu,
             kernels,
             log_sizes,
             log_blowup,
             lifting_log_size,
             twiddles,
-            max_buffer_words(gpu),
+            CommitOptions::default(),
         )
     }
 
-    /// [`Self::new`] with buffers of at most `max_buffer_words` words (the device's largest by
-    /// default): to spread the columns over several buffers.
-    pub fn with_max_buffer_words(
+    /// [`Self::new`] with `options`.
+    pub fn with_options(
         gpu: &GpuContext,
         kernels: &CommitKernels,
         log_sizes: &[u32],
         log_blowup: u32,
         lifting_log_size: u32,
         twiddles: &TwiddleTree<SimdBackend>,
-        max_buffer_words: u64,
+        options: CommitOptions,
     ) -> Self {
+        let max_buffer_words = options.max_buffer_words.unwrap_or_else(|| max_buffer_words(gpu));
         assert!(
             takes_striped_path(log_sizes, log_blowup, lifting_log_size),
             "new_striped falls back to new for log sizes {log_sizes:?}, log blowup {log_blowup}, \
@@ -304,13 +315,14 @@ impl StripedCommitment {
             .into_par_iter()
             .map(|stripe| stripe_twiddle_words(&distinct, log_blowup, stripe, twiddles))
             .collect::<Vec<_>>();
-        let extension = StripeExtension::with_twiddle_words(
+        let extension = StripeExtension::with_twiddle_words_merged(
             gpu,
             &kernels.extension,
             &coeffs,
             &out,
             log_blowup,
             &twiddle_words,
+            options.merge,
         );
 
         // The extension's batches are the tree's order: by increasing size, input order within a

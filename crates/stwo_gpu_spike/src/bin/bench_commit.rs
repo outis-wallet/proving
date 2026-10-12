@@ -5,8 +5,8 @@
 //! height 20, lifting log size 23).
 //!
 //! ```text
-//! bench_commit [--scale N] [--blowup B] [--threads T1,T2,..] [--reps R] [--unchecked]
-//!     [--no-cpu] [--no-gpu]
+//! bench_commit [--scale N] [--blowup B] [--threads T1,T2,..] [--reps R]
+//!     [--merge off,small,all] [--unchecked] [--no-cpu] [--no-gpu]
 //! ```
 //!
 //! - CPU: `new_striped` on a rayon pool of each of `--threads` (default `18,36`: the physical
@@ -24,8 +24,11 @@
 //!   adapter has them (`TIMESTAMP_QUERY`), and from separate submissions (each pass submitted and
 //!   waited for on its own: the submission's overhead included).
 //!
-//! The GPU's root is checked against every CPU run's, and its whole result (every layer, every
-//! column's kept evaluations) against the last CPU run's.
+//! Each of `--merge` (default: all three) is a GPU run of its own: how the extension dispatches its
+//! batches (`Merge`: one dispatch per batch and pass; the small batches of a buffer in one; the
+//! k-th passes of all of a buffer's batches in one). The GPU's root is checked against every CPU
+//! run's and every other mode's, and its whole result (every layer, every column's kept
+//! evaluations) against the last CPU run's. A summary ends the output.
 //!
 //! `--scale N` divides every component's rows by 2^N (columns of 2^4 at least; the tree 2^N
 //! times lower). `--blowup B` sets the log blowup (the tree's lifting log size is the largest
@@ -49,8 +52,10 @@ use stwo::prover::mempool::BaseColumnPool;
 use stwo::prover::poly::circle::{CircleCoefficients, PolyOps};
 use stwo_gpu_spike::GpuContext;
 use stwo_gpu_spike::commit::{
-    CommitKernels, PassTimestamps, StripedCommitment, kept_whole, stripe_order, takes_striped_path,
+    CommitKernels, CommitOptions, PassTimestamps, StripedCommitment, kept_whole, stripe_order,
+    takes_striped_path,
 };
+use stwo_gpu_spike::extension::Merge;
 use stwo_gpu_spike::shapes::{base_trace_log_sizes, cairo_pay_components};
 
 type TreeProver = CommitmentTreeProver<SimdBackend, Blake2sM31MerkleChannel>;
@@ -61,6 +66,7 @@ struct Args {
     threads: Vec<usize>,
     reps: usize,
     unchecked: bool,
+    merges: Vec<Merge>,
     cpu: bool,
     gpu: bool,
 }
@@ -72,6 +78,7 @@ fn parse_args() -> Args {
         threads: vec![18, 36],
         reps: 3,
         unchecked: false,
+        merges: vec![Merge::Off, Merge::Small, Merge::All],
         cpu: true,
         gpu: true,
     };
@@ -89,12 +96,23 @@ fn parse_args() -> Args {
             }
             "--reps" => args.reps = value("--reps").parse().expect("--reps R"),
             "--unchecked" => args.unchecked = true,
+            "--merge" => {
+                args.merges = value("--merge")
+                    .split(',')
+                    .map(|m| match m.trim() {
+                        "off" => Merge::Off,
+                        "small" => Merge::Small,
+                        "all" => Merge::All,
+                        other => panic!("--merge: {other} (off, small or all)"),
+                    })
+                    .collect()
+            }
             "--no-cpu" => args.cpu = false,
             "--no-gpu" => args.gpu = false,
             "-h" | "--help" => {
                 println!(
                     "bench_commit [--scale N] [--blowup B] [--threads T1,T2,..] [--reps R] \
-                     [--unchecked] [--no-cpu] [--no-gpu]"
+                     [--merge off,small,all] [--unchecked] [--no-cpu] [--no-gpu]"
                 );
                 std::process::exit(0);
             }
@@ -179,6 +197,7 @@ fn main() {
     // CPU.
     let mut cpu_tree: Option<TreeProver> = None;
     let mut cpu_roots = vec![];
+    let mut cpu_best = vec![];
     if args.cpu {
         for &threads in &args.threads {
             let pool = rayon::ThreadPoolBuilder::new().num_threads(threads).build().unwrap();
@@ -203,6 +222,7 @@ fn main() {
                 ms(median)
             );
             cpu_roots.push((threads, tree.commitment.root()));
+            cpu_best.push((threads, best));
             cpu_tree = Some(tree);
         }
     }
@@ -227,147 +247,189 @@ fn main() {
     } else {
         CommitKernels::new(&gpu)
     };
-    let start = Instant::now();
-    let commitment =
-        StripedCommitment::new(&gpu, &kernels, &log_sizes, log_blowup, lifting_log_size, &twiddles);
-    gpu.device.poll(wgpu::PollType::wait_indefinitely()).expect("poll");
-    let setup = start.elapsed();
-    let bytes = commitment.gpu_bytes();
-    let (ext_dispatches, hash_dispatches, top_dispatches) = commitment.n_dispatches();
-    println!(
-        "GPU setup (buffers, every stripe's twiddles, plans; once per tree shape): {}",
-        ms(setup).trim()
-    );
-    println!(
-        "GPU layout: {} buffer(s), {} batches; per stripe {ext_dispatches} extension and \
-         {hash_dispatches} hashing dispatches, {top_dispatches} above the stripes{}",
-        commitment.layout().buffer_words.len(),
-        commitment.layout().batches.len(),
-        if args.unchecked { "; unchecked Merkle kernels" } else { "" },
-    );
-    println!(
-        "GPU memory: {} on the device (coefficients {}, one stripe's evaluations {}, twiddles {}, \
-         Merkle states {}, layers {}, columns kept whole {}) + {} of staging for the readback",
-        mib(bytes.device()),
-        mib(bytes.coefficients),
-        mib(bytes.evaluations),
-        mib(bytes.twiddles),
-        mib(bytes.states),
-        mib(bytes.tree),
-        mib(bytes.whole),
-        mib(bytes.staging),
-    );
-
-    // Warm-up: pipelines, first touch of every buffer.
-    commitment.upload(&gpu, &polys);
-    let _ = commitment.run_and_read(&gpu, &kernels);
-
-    commitment.upload(&gpu, &polys);
-    gpu.device.poll(wgpu::PollType::wait_indefinitely()).expect("poll");
-    let (best, median) = time(args.reps, || timed(|| commitment.run(&gpu, &kernels)));
-    println!("GPU, coefficients resident:           best {}  median {}", ms(best), ms(median));
-
-    let (best, median) = time(args.reps, || {
-        timed(|| {
-            commitment.upload(&gpu, &polys);
-            commitment.run(&gpu, &kernels);
-        })
-    });
-    println!("GPU, with upload:                     best {}  median {}", ms(best), ms(median));
-
-    let mut output = None;
-    let (best, median) = time(args.reps, || {
-        drop(output.take());
-        timed(|| {
-            commitment.upload(&gpu, &polys);
-            output = Some(commitment.run_and_read(&gpu, &kernels));
-        })
-    });
-    println!("GPU, with upload and readback:        best {}  median {}", ms(best), ms(median));
-    let start = Instant::now();
-    let gpu_tree = commitment.tree_prover(output.take().unwrap());
-    let to_tree = start.elapsed();
-
-    // The split of each stripe: timestamps.
-    if let Some(timestamps) = PassTimestamps::new(&gpu, log_blowup) {
-        let mut encoder = gpu.device.create_command_encoder(&Default::default());
-        commitment.encode(&kernels, &mut encoder, Some(&timestamps));
-        gpu.queue.submit([encoder.finish()]);
-        let times = timestamps.read(&gpu);
-        println!("GPU passes, timestamp queries (coefficients resident):");
-        for &(stripe, extension, hashing) in &times.stripes {
-            println!(
-                "  stripe {stripe}: extension {}  hashing {}",
-                ms_ns(extension),
-                ms_ns(hashing)
-            );
-        }
-        let extension: f64 = times.stripes.iter().map(|s| s.1).sum();
-        let hashing: f64 = times.stripes.iter().map(|s| s.2).sum();
-        println!(
-            "  all stripes: extension {}  hashing {}; above the stripes {}; first pass start to \
-             last pass end {}",
-            ms_ns(extension),
-            ms_ns(hashing),
-            ms_ns(times.top),
-            ms_ns(times.total),
-        );
-    } else {
-        println!("GPU passes, timestamp queries: not supported by the adapter");
-    }
-
-    // The split of each stripe: separate submissions.
-    let wait = || gpu.device.poll(wgpu::PollType::wait_indefinitely()).expect("poll");
-    let submit_and_time = |record: &dyn Fn(&mut wgpu::CommandEncoder)| {
+    let mut gpu_root = None;
+    let mut summary = vec![];
+    for &merge in &args.merges {
+        println!("-- the extension's dispatches: {merge:?} (see Merge)");
         let start = Instant::now();
-        let mut encoder = gpu.device.create_command_encoder(&Default::default());
-        record(&mut encoder);
-        gpu.queue.submit([encoder.finish()]);
-        wait();
-        start.elapsed()
-    };
-    println!("GPU passes, separate submissions (each waited for; coefficients resident):");
-    let (mut extension, mut hashing) = (Duration::ZERO, Duration::ZERO);
-    for stripe in stripe_order(log_blowup) {
-        let e = submit_and_time(&|encoder| {
-            commitment.encode_extension(&kernels, encoder, stripe, None)
-        });
-        let h = submit_and_time(&|encoder| commitment.encode_hashing(encoder, stripe, None));
-        println!("  stripe {stripe}: extension {}  hashing {}", ms(e), ms(h));
-        extension += e;
-        hashing += h;
-    }
-    let top = submit_and_time(&|encoder| commitment.encode_top(encoder, None));
-    println!(
-        "  all stripes: extension {}  hashing {}; above the stripes {}",
-        ms(extension),
-        ms(hashing),
-        ms(top)
-    );
-    println!(
-        "  (the readback's CommitmentTreeProver assembly, outside the GPU timings above: {})",
-        ms(to_tree).trim()
-    );
+        let options = CommitOptions { merge, ..Default::default() };
+        let commitment = StripedCommitment::with_options(
+            &gpu,
+            &kernels,
+            &log_sizes,
+            log_blowup,
+            lifting_log_size,
+            &twiddles,
+            options,
+        );
+        gpu.device.poll(wgpu::PollType::wait_indefinitely()).expect("poll");
+        let setup = start.elapsed();
+        let bytes = commitment.gpu_bytes();
+        let (ext_dispatches, hash_dispatches, top_dispatches) = commitment.n_dispatches();
+        println!(
+            "GPU setup (buffers, every stripe's twiddles, plans; once per tree shape): {}",
+            ms(setup).trim()
+        );
+        println!(
+            "GPU layout: {} buffer(s), {} batches; per stripe {ext_dispatches} extension and \
+             {hash_dispatches} hashing dispatches, {top_dispatches} above the stripes{}",
+            commitment.layout().buffer_words.len(),
+            commitment.layout().batches.len(),
+            if args.unchecked { "; unchecked Merkle kernels" } else { "" },
+        );
+        println!(
+            "GPU memory: {} on the device (coefficients {}, one stripe's evaluations {}, twiddles \
+             {}, Merkle states {}, layers {}, columns kept whole {}) + {} of staging for the \
+             readback",
+            mib(bytes.device()),
+            mib(bytes.coefficients),
+            mib(bytes.evaluations),
+            mib(bytes.twiddles),
+            mib(bytes.states),
+            mib(bytes.tree),
+            mib(bytes.whole),
+            mib(bytes.staging),
+        );
 
-    // Checks.
-    let gpu_root = gpu_tree.commitment.root();
-    println!("GPU root {gpu_root}");
-    for (threads, root) in &cpu_roots {
-        assert_eq!(*root, gpu_root, "the GPU's root is not the CPU's ({threads} threads)");
-    }
-    if let Some(cpu) = &cpu_tree {
-        assert_eq!(gpu_tree.commitment.layers, cpu.commitment.layers, "layers differ");
-        for (i, (g, c)) in gpu_tree.polynomials.iter().zip(&cpu.polynomials).enumerate() {
-            assert_eq!(g.evals.domain, c.evals.domain, "column {i}: domain");
-            assert!(
-                g.evals.values.as_slice() == c.evals.values.as_slice(),
-                "column {i}: kept evaluations differ"
+        // Warm-up: pipelines, first touch of every buffer.
+        commitment.upload(&gpu, &polys);
+        let _ = commitment.run_and_read(&gpu, &kernels);
+
+        commitment.upload(&gpu, &polys);
+        gpu.device.poll(wgpu::PollType::wait_indefinitely()).expect("poll");
+        let (best, median) = time(args.reps, || timed(|| commitment.run(&gpu, &kernels)));
+        println!("GPU, coefficients resident:           best {}  median {}", ms(best), ms(median));
+        let resident = best;
+
+        let (best, median) = time(args.reps, || {
+            timed(|| {
+                commitment.upload(&gpu, &polys);
+                commitment.run(&gpu, &kernels);
+            })
+        });
+        println!("GPU, with upload:                     best {}  median {}", ms(best), ms(median));
+        let with_upload = best;
+
+        let mut output = None;
+        let (best, median) = time(args.reps, || {
+            drop(output.take());
+            timed(|| {
+                commitment.upload(&gpu, &polys);
+                output = Some(commitment.run_and_read(&gpu, &kernels));
+            })
+        });
+        println!("GPU, with upload and readback:        best {}  median {}", ms(best), ms(median));
+        let with_readback = best;
+        let start = Instant::now();
+        let gpu_tree = commitment.tree_prover(output.take().unwrap());
+        let to_tree = start.elapsed();
+
+        // The split of each stripe: timestamps.
+        if let Some(timestamps) = PassTimestamps::new(&gpu, log_blowup) {
+            let mut encoder = gpu.device.create_command_encoder(&Default::default());
+            commitment.encode(&kernels, &mut encoder, Some(&timestamps));
+            gpu.queue.submit([encoder.finish()]);
+            let times = timestamps.read(&gpu);
+            println!("GPU passes, timestamp queries (coefficients resident):");
+            for &(stripe, extension, hashing) in &times.stripes {
+                println!(
+                    "  stripe {stripe}: extension {}  hashing {}",
+                    ms_ns(extension),
+                    ms_ns(hashing)
+                );
+            }
+            let extension: f64 = times.stripes.iter().map(|s| s.1).sum();
+            let hashing: f64 = times.stripes.iter().map(|s| s.2).sum();
+            println!(
+                "  all stripes: extension {}  hashing {}; above the stripes {}; first pass start \
+                 to last pass end {}",
+                ms_ns(extension),
+                ms_ns(hashing),
+                ms_ns(times.top),
+                ms_ns(times.total),
+            );
+        } else {
+            println!("GPU passes, timestamp queries: not supported by the adapter");
+        }
+
+        // The split of each stripe: separate submissions.
+        let wait = || gpu.device.poll(wgpu::PollType::wait_indefinitely()).expect("poll");
+        let submit_and_time = |record: &dyn Fn(&mut wgpu::CommandEncoder)| {
+            let start = Instant::now();
+            let mut encoder = gpu.device.create_command_encoder(&Default::default());
+            record(&mut encoder);
+            gpu.queue.submit([encoder.finish()]);
+            wait();
+            start.elapsed()
+        };
+        println!("GPU passes, separate submissions (each waited for; coefficients resident):");
+        let (mut extension, mut hashing) = (Duration::ZERO, Duration::ZERO);
+        for stripe in stripe_order(log_blowup) {
+            let e = submit_and_time(&|encoder| {
+                commitment.encode_extension(&kernels, encoder, stripe, None)
+            });
+            let h = submit_and_time(&|encoder| commitment.encode_hashing(encoder, stripe, None));
+            println!("  stripe {stripe}: extension {}  hashing {}", ms(e), ms(h));
+            extension += e;
+            hashing += h;
+        }
+        let top = submit_and_time(&|encoder| commitment.encode_top(encoder, None));
+        println!(
+            "  all stripes: extension {}  hashing {}; above the stripes {}",
+            ms(extension),
+            ms(hashing),
+            ms(top)
+        );
+        println!(
+            "  (the readback's CommitmentTreeProver assembly, outside the GPU timings above: {})",
+            ms(to_tree).trim()
+        );
+
+        // Checks.
+        let root = gpu_tree.commitment.root();
+        println!("GPU root {root}");
+        assert_eq!(*gpu_root.get_or_insert(root), root, "the GPU's roots differ between modes");
+        for (threads, cpu_root) in &cpu_roots {
+            assert_eq!(*cpu_root, root, "the GPU's root is not the CPU's ({threads} threads)");
+        }
+        if let Some(cpu) = &cpu_tree {
+            assert_eq!(gpu_tree.commitment.layers, cpu.commitment.layers, "layers differ");
+            for (i, (g, c)) in gpu_tree.polynomials.iter().zip(&cpu.polynomials).enumerate() {
+                assert_eq!(g.evals.domain, c.evals.domain, "column {i}: domain");
+                assert!(
+                    g.evals.values.as_slice() == c.evals.values.as_slice(),
+                    "column {i}: kept evaluations differ"
+                );
+            }
+            println!(
+                "check: roots equal ({} CPU runs), every layer equal, every column's kept \
+                 evaluations equal (stripe 0, or whole)",
+                cpu_roots.len()
             );
         }
+        summary.push((merge, resident, with_upload, with_readback));
+        drop(commitment);
+    }
+
+    println!("summary (best of {}):", args.reps);
+    for (threads, best) in &cpu_best {
+        println!("  CPU new_striped, {threads:2} threads:        {}", ms(*best));
+    }
+    for (merge, resident, with_upload, with_readback) in summary {
+        let speedup = |gpu: Duration| {
+            cpu_best
+                .iter()
+                .map(|(threads, cpu)| {
+                    format!("{:.1}x vs {threads}", cpu.as_secs_f64() / gpu.as_secs_f64())
+                })
+                .join(", ")
+        };
         println!(
-            "check: roots equal ({} CPU runs), every layer equal, every column's kept evaluations \
-             equal (stripe 0, or whole)",
-            cpu_roots.len()
+            "  GPU {merge:?}: resident {}  +upload {}  +upload+readback {}  ({})",
+            ms(resident),
+            ms(with_upload),
+            ms(with_readback),
+            speedup(with_readback),
         );
     }
 }

@@ -15,8 +15,8 @@ use stwo::prover::poly::circle::{CircleCoefficients, PolyOps, part_domain};
 use stwo::prover::poly::twiddles::TwiddleTree;
 use stwo_gpu_spike::GpuContext;
 use stwo_gpu_spike::extension::{
-    ColumnsLayout, ExtensionKernels, GpuColumns, StripeExtension, TILE_LOG, max_buffer_words,
-    passes,
+    ColumnsLayout, ExtensionKernels, GpuColumns, Merge, StripeExtension, TILE_LOG,
+    max_buffer_words, passes, stripe_twiddle_words,
 };
 
 /// The distinct log sizes of the Cairo base trace's columns (`data/cairo_trace_shapes_pay.txt`).
@@ -62,11 +62,19 @@ struct Case<'a> {
     max_buffer_words: Option<u64>,
     /// The twiddle tree's domain exceeds the largest column domain by this many bits.
     tree_extra_bits: u32,
+    merge: Merge,
 }
 
 impl Case<'_> {
     fn new<'a>(log_sizes: &'a [u32], log_blowup: u32, stripes: &'a [usize]) -> Case<'a> {
-        Case { log_sizes, log_blowup, stripes, max_buffer_words: None, tree_extra_bits: 0 }
+        Case {
+            log_sizes,
+            log_blowup,
+            stripes,
+            max_buffer_words: None,
+            tree_extra_bits: 0,
+            merge: Merge::Off,
+        }
     }
 }
 
@@ -95,7 +103,18 @@ fn check_columns(gpu: &GpuContext, kernels: &ExtensionKernels, case: &Case, coef
         polys.iter().map(|poly| bytemuck::cast_slice(poly.coeffs.as_slice())).collect::<Vec<_>>();
     gpu_coeffs.write(gpu, &words);
     let out = GpuColumns::alloc(gpu, layout.clone());
-    let extension = StripeExtension::new(gpu, kernels, &gpu_coeffs, &out, case.log_blowup, &tree);
+    let twiddles = (0..1 << case.log_blowup)
+        .map(|stripe| stripe_twiddle_words(&layout.log_sizes(), case.log_blowup, stripe, &tree))
+        .collect::<Vec<_>>();
+    let extension = StripeExtension::with_twiddle_words_merged(
+        gpu,
+        kernels,
+        &gpu_coeffs,
+        &out,
+        case.log_blowup,
+        &twiddles,
+        case.merge,
+    );
     for &stripe in case.stripes {
         extension.submit(gpu, kernels, stripe);
         let got = out.read(gpu);
@@ -119,7 +138,7 @@ fn check_columns(gpu: &GpuContext, kernels: &ExtensionKernels, case: &Case, coef
     }
     eprintln!(
         "ok: {} columns, log sizes {:?}, blowup {}, stripes {:?}, {} buffer(s), {} batch(es), {} \
-         dispatches per stripe",
+         dispatches per stripe ({:?})",
         case.log_sizes.len(),
         case.log_sizes,
         case.log_blowup,
@@ -127,6 +146,7 @@ fn check_columns(gpu: &GpuContext, kernels: &ExtensionKernels, case: &Case, coef
         layout.buffer_words.len(),
         layout.batches.len(),
         extension.n_dispatches(),
+        case.merge,
     );
 }
 
@@ -163,6 +183,36 @@ fn cairo_log_sizes_blowup_2_every_stripe() {
     let kernels = ExtensionKernels::new(&gpu);
     let log_sizes = repeated(&cairo_log_sizes(), |l| if l <= 16 { 3 } else { 1 });
     check(&gpu, &kernels, &Case::new(&log_sizes, 2, &[0, 1, 2, 3]), 2);
+}
+
+/// The batches merged into fewer dispatches: the small ones (one pass each) of a buffer, or the
+/// k-th passes of all of a buffer's; every stripe, every word.
+#[test]
+fn cairo_log_sizes_merged_dispatches() {
+    let gpu = GpuContext::new();
+    let kernels = ExtensionKernels::new(&gpu);
+    let log_sizes = repeated(&cairo_log_sizes(), |l| match l {
+        ..=11 => 5,
+        12..=18 => 3,
+        _ => 1,
+    });
+    for merge in [Merge::Small, Merge::All] {
+        let case = Case { merge, ..Case::new(&log_sizes, 3, &[0, 1, 2, 3, 4, 5, 6, 7]) };
+        check(&gpu, &kernels, &case, 3);
+    }
+    // Three passes (log sizes past 20), and every log size from 4.
+    let log_sizes = (4..=23).rev().collect::<Vec<_>>();
+    let case = Case { merge: Merge::All, ..Case::new(&log_sizes, 2, &[0, 3]) };
+    check(&gpu, &kernels, &case, 31);
+    // Many buffers, sizes split across them, within WebGPU's default limits.
+    let gpu = GpuContext::with_limits(wgpu::Limits::default());
+    let kernels = ExtensionKernels::new(&gpu);
+    let log_sizes = repeated(&[4, 8, 12, 13, 16, 17, 18, 19], |l| if l <= 16 { 5 } else { 3 });
+    for merge in [Merge::Small, Merge::All] {
+        let case =
+            Case { max_buffer_words: Some(1 << 20), merge, ..Case::new(&log_sizes, 3, &[0, 3, 6]) };
+        check(&gpu, &kernels, &case, 32);
+    }
 }
 
 #[test]

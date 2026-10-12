@@ -399,13 +399,46 @@ fn radix_function(r: u32) -> String {
     s
 }
 
-/// The kernel source, out of place (from the coefficients) or in place.
-fn shader_source(in_place: bool) -> String {
+/// The most batches a merged dispatch takes (see [`Merge`]).
+pub const MAX_MERGED: usize = 32;
+
+/// The parameters of one dispatch of a single batch.
+const SINGLE_PARAMS: &str = "@group(0) @binding(3) var<uniform> params: Params;";
+const SINGLE_PROLOGUE: &str = "    let p = params;
+    let w = wid.x + wid.y * p.n_wg_x;";
+
+/// The parameters of a merged dispatch: its batches' parameters, each batch's workgroups side by
+/// side in the dispatch (the first in `pad0`), found by a workgroup from its index.
+const MERGED_PARAMS: &str = "struct Merged {
+    n_wg_x: u32,
+    n_wg: u32,
+    n_batches: u32,
+    pad: u32,
+    batches: array<Params, MAX_MERGED>,
+}
+@group(0) @binding(3) var<uniform> merged: Merged;
+// The workgroup's batch's parameters, for the functions `main` calls.
+var<private> params: Params;";
+const MERGED_PROLOGUE: &str = "    let gw = wid.x + wid.y * merged.n_wg_x;
+    if (gw >= merged.n_wg) {
+        return;
+    }
+    // The last batch whose first workgroup is at most gw.
+    var batch = 0u;
+    for (var b = 1u; b < merged.n_batches; b++) {
+        if (merged.batches[b].pad0 <= gw) {
+            batch = b;
+        }
+    }
+    let p = merged.batches[batch];
+    params = p;
+    let w = gw - p.pad0;";
+
+/// The kernel source, out of place (from the coefficients) or in place, for a dispatch of one
+/// batch or a merged one.
+fn shader_source(in_place: bool, merged: bool) -> String {
     let (bindings, load) = if in_place {
-        (
-            "@group(0) @binding(1) var<storage, read_write> dst: array<u32>;",
-            "dst[params.dst_base + g]",
-        )
+        ("@group(0) @binding(1) var<storage, read_write> dst: array<u32>;", "dst[p.dst_base + g]")
     } else {
         (
             "@group(0) @binding(0) var<storage, read> src: array<u32>;\n@group(0) @binding(1) \
@@ -414,22 +447,75 @@ fn shader_source(in_place: bool) -> String {
         )
     };
     let radix = (1..=4).map(radix_function).collect::<String>();
+    let (params, prologue) = if merged {
+        (MERGED_PARAMS.replace("MAX_MERGED", &MAX_MERGED.to_string()), MERGED_PROLOGUE)
+    } else {
+        (SINGLE_PARAMS.to_string(), SINGLE_PROLOGUE)
+    };
     let body = SHADER_TEMPLATE
         .replace("/*BINDINGS*/", bindings)
+        .replace("/*PARAMS*/", &params)
+        .replace("/*PROLOGUE*/", prologue)
         .replace("/*LOAD*/", load)
         .replace("/*RADIX*/", &radix);
     format!("{M31_WGSL}\n{body}")
 }
 
-/// The compute pipelines of the extension, for one device.
+/// How a stripe's dispatches take the batches. A dispatch waits for the previous one (wgpu puts
+/// a barrier between dispatches writing one buffer), so the dispatches of small batches, a few
+/// workgroups each, leave most of a GPU idle; merging them fills it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Merge {
+    /// One dispatch per batch and pass.
+    #[default]
+    Off,
+    /// The batches of columns of at most `2^TILE_LOG` values (one pass each) of a buffer in one
+    /// dispatch; the others one dispatch per batch and pass.
+    Small,
+    /// The `k`-th passes of all the batches of a buffer in one dispatch, for each `k`.
+    All,
+}
+
+/// The parameters of a merged dispatch (`Merged` in the shader).
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct MergedParams {
+    n_wg_x: u32,
+    n_wg: u32,
+    n_batches: u32,
+    pad: u32,
+    batches: [Params; MAX_MERGED],
+}
+
+/// The compute pipelines of the extension, for one device: per [`Kind`], a pipeline and its bind
+/// group layout.
 pub struct ExtensionKernels {
-    out_of_place: wgpu::ComputePipeline,
-    in_place: wgpu::ComputePipeline,
-    out_of_place_layout: wgpu::BindGroupLayout,
-    in_place_layout: wgpu::BindGroupLayout,
-    /// The distance between two dispatches' parameters, in bytes.
+    pipelines: [(wgpu::ComputePipeline, wgpu::BindGroupLayout); 4],
+    /// The distance between two dispatches' parameters, in bytes, single and merged.
     params_stride: u64,
+    merged_stride: u64,
     max_workgroups_per_dimension: u32,
+}
+
+/// A kernel: out of place (the first pass, from the coefficients) or in place, of one batch or
+/// merged.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Kind {
+    in_place: bool,
+    merged: bool,
+}
+
+impl Kind {
+    const ALL: [Kind; 4] = [
+        Kind { in_place: false, merged: false },
+        Kind { in_place: true, merged: false },
+        Kind { in_place: false, merged: true },
+        Kind { in_place: true, merged: true },
+    ];
+
+    fn index(self) -> usize {
+        usize::from(self.in_place) + 2 * usize::from(self.merged)
+    }
 }
 
 impl ExtensionKernels {
@@ -447,17 +533,17 @@ impl ExtensionKernels {
             },
             count: None,
         };
-        let params = wgpu::BindGroupLayoutEntry {
+        let params = |size: usize| wgpu::BindGroupLayoutEntry {
             binding: 3,
             visibility: wgpu::ShaderStages::COMPUTE,
             ty: wgpu::BindingType::Buffer {
                 ty: wgpu::BufferBindingType::Uniform,
                 has_dynamic_offset: true,
-                min_binding_size: wgpu::BufferSize::new(size_of::<Params>() as u64),
+                min_binding_size: wgpu::BufferSize::new(size as u64),
             },
             count: None,
         };
-        let make = |label: &str, in_place: bool, entries: &[wgpu::BindGroupLayoutEntry]| {
+        let make = |label: &str, kind: Kind, entries: &[wgpu::BindGroupLayoutEntry]| {
             let layout = gpu.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some(label),
                 entries,
@@ -470,7 +556,7 @@ impl ExtensionKernels {
                 });
             let module = gpu.device.create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some(label),
-                source: wgpu::ShaderSource::Wgsl(shader_source(in_place).into()),
+                source: wgpu::ShaderSource::Wgsl(shader_source(kind.in_place, kind.merged).into()),
             });
             let pipeline = gpu.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: Some(label),
@@ -482,32 +568,53 @@ impl ExtensionKernels {
             });
             (pipeline, layout)
         };
-        let (out_of_place, out_of_place_layout) = make(
-            "extension out of place",
-            false,
-            &[storage(0, true), storage(1, false), storage(2, true), params],
-        );
-        let (in_place, in_place_layout) =
-            make("extension in place", true, &[storage(1, false), storage(2, true), params]);
+        let pipelines = Kind::ALL.map(|kind| {
+            let size = if kind.merged { size_of::<MergedParams>() } else { size_of::<Params>() };
+            let label = format!(
+                "extension {}{}",
+                if kind.in_place { "in place" } else { "out of place" },
+                if kind.merged { ", merged" } else { "" }
+            );
+            if kind.in_place {
+                make(&label, kind, &[storage(1, false), storage(2, true), params(size)])
+            } else {
+                make(
+                    &label,
+                    kind,
+                    &[storage(0, true), storage(1, false), storage(2, true), params(size)],
+                )
+            }
+        });
+        let align = u64::from(limits.min_uniform_buffer_offset_alignment);
         Self {
-            out_of_place,
-            in_place,
-            out_of_place_layout,
-            in_place_layout,
-            params_stride: (size_of::<Params>() as u64)
-                .next_multiple_of(u64::from(limits.min_uniform_buffer_offset_alignment)),
+            pipelines,
+            params_stride: (size_of::<Params>() as u64).next_multiple_of(align),
+            merged_stride: (size_of::<MergedParams>() as u64).next_multiple_of(align),
             max_workgroups_per_dimension: limits.max_compute_workgroups_per_dimension,
         }
     }
 
     /// The WGSL of the kernels (out of place, in place), for inspection.
     pub fn sources() -> (String, String) {
-        (shader_source(false), shader_source(true))
+        (shader_source(false, false), shader_source(true, false))
+    }
+
+    /// The WGSL of the merged kernels (out of place, in place), for inspection.
+    pub fn merged_sources() -> (String, String) {
+        (shader_source(false, true), shader_source(true, true))
+    }
+
+    /// The workgroup grid of `n_wg` workgroups.
+    fn grid(&self, n_wg: u32) -> (u32, u32) {
+        let n_wg_x = n_wg.min(self.max_workgroups_per_dimension);
+        let n_wg_y = n_wg.div_ceil(n_wg_x);
+        assert!(n_wg_y <= self.max_workgroups_per_dimension);
+        (n_wg_x, n_wg_y)
     }
 }
 
 struct Dispatch {
-    in_place: bool,
+    kind: Kind,
     buffer: usize,
     params_offset: u32,
     workgroups: (u32, u32),
@@ -519,10 +626,9 @@ pub struct StripeExtension {
     log_blowup: u32,
     /// Per stripe.
     twiddles: Vec<wgpu::Buffer>,
-    _params: wgpu::Buffer,
-    /// Per stripe, per buffer of the layout.
-    out_of_place_groups: Vec<Vec<wgpu::BindGroup>>,
-    in_place_groups: Vec<Vec<wgpu::BindGroup>>,
+    _params: [wgpu::Buffer; 2],
+    /// Per kind, per stripe, per buffer of the layout.
+    groups: [Vec<Vec<wgpu::BindGroup>>; 4],
     dispatches: Vec<Dispatch>,
 }
 
@@ -553,6 +659,19 @@ impl StripeExtension {
         log_blowup: u32,
         twiddles: &[Vec<u32>],
     ) -> Self {
+        Self::with_twiddle_words_merged(gpu, kernels, coeffs, out, log_blowup, twiddles, Merge::Off)
+    }
+
+    /// [`Self::with_twiddle_words`], the batches dispatched as `merge` says.
+    pub fn with_twiddle_words_merged(
+        gpu: &GpuContext,
+        kernels: &ExtensionKernels,
+        coeffs: &GpuColumns,
+        out: &GpuColumns,
+        log_blowup: u32,
+        twiddles: &[Vec<u32>],
+        merge: Merge,
+    ) -> Self {
         assert_eq!(coeffs.layout, out.layout, "the evaluations take the coefficients' layout");
         assert_eq!(twiddles.len(), 1 << log_blowup);
         let layout = &coeffs.layout;
@@ -574,24 +693,16 @@ impl StripeExtension {
             })
             .collect::<Vec<_>>();
 
-        let mut params = vec![];
-        let mut dispatches = vec![];
-        for batch in &layout.batches {
+        // Every pass of every batch: (batch, its k-th pass, its parameters).
+        let mut items = vec![];
+        for (b, batch) in layout.batches.iter().enumerate() {
             let log_size = batch.log_size;
             let total = batch.n_words();
             assert!(total < 1 << 32);
             for (k, pass) in passes(log_size).into_iter().enumerate() {
                 let n_wg = total.div_ceil(1 << TILE_LOG) as u32;
-                let n_wg_x = n_wg.min(kernels.max_workgroups_per_dimension);
-                let n_wg_y = n_wg.div_ceil(n_wg_x);
-                assert!(n_wg_y <= kernels.max_workgroups_per_dimension);
-                dispatches.push(Dispatch {
-                    in_place: k > 0,
-                    buffer: batch.buffer,
-                    params_offset: (params.len() as u64 * kernels.params_stride) as u32,
-                    workgroups: (n_wg_x, n_wg_y),
-                });
-                params.push(Params {
+                let (n_wg_x, _) = kernels.grid(n_wg);
+                let params = Params {
                     log_n: log_size,
                     lo: pass.lo,
                     hi: pass.hi,
@@ -604,72 +715,134 @@ impl StripeExtension {
                     n_wg_x,
                     n_wg,
                     pad: [0; 5],
-                });
+                };
+                items.push((b, k, params));
             }
         }
-        let stride = kernels.params_stride as usize;
-        let mut params_bytes = vec![0u8; (params.len() * stride).max(stride)];
-        for (i, p) in params.iter().enumerate() {
-            params_bytes[i * stride..i * stride + size_of::<Params>()]
-                .copy_from_slice(bytemuck::bytes_of(p));
+        let mergeable = |b: usize| match merge {
+            Merge::Off => false,
+            Merge::Small => layout.batches[b].log_size <= TILE_LOG,
+            Merge::All => true,
+        };
+
+        let mut params: Vec<Params> = vec![];
+        let mut merged_params: Vec<MergedParams> = vec![];
+        let mut dispatches = vec![];
+        let mut single = |dispatches: &mut Vec<Dispatch>, b: usize, k: usize, p: Params| {
+            dispatches.push(Dispatch {
+                kind: Kind { in_place: k > 0, merged: false },
+                buffer: layout.batches[b].buffer,
+                params_offset: (params.len() as u64 * kernels.params_stride) as u32,
+                workgroups: kernels.grid(p.n_wg),
+            });
+            params.push(p);
+        };
+        if merge == Merge::Off {
+            // Batch by batch, each batch's passes in order.
+            for &(b, k, p) in &items {
+                single(&mut dispatches, b, k, p);
+            }
+        } else {
+            // Pass by pass (a batch's passes stay in order), buffer by buffer: the mergeable
+            // batches' k-th passes of a buffer in one dispatch (several past MAX_MERGED).
+            let max_passes = items.iter().map(|&(_, k, _)| k + 1).max().unwrap_or(0);
+            for k in 0..max_passes {
+                for buffer in 0..layout.buffer_words.len() {
+                    let at = |&&(b, kk, _): &&(usize, usize, Params)| {
+                        kk == k && layout.batches[b].buffer == buffer
+                    };
+                    let (to_merge, alone): (Vec<_>, Vec<_>) =
+                        items.iter().filter(at).partition(|&&(b, _, _)| mergeable(b));
+                    for &&(b, k, p) in &alone {
+                        single(&mut dispatches, b, k, p);
+                    }
+                    for chunk in to_merge.chunks(MAX_MERGED) {
+                        if let &[&(b, k, p)] = chunk {
+                            single(&mut dispatches, b, k, p);
+                            continue;
+                        }
+                        let mut m = MergedParams::zeroed();
+                        let mut n_wg = 0u32;
+                        for (j, &&(_, _, p)) in chunk.iter().enumerate() {
+                            m.batches[j] = Params { pad: [n_wg, 0, 0, 0, 0], ..p };
+                            n_wg = n_wg.checked_add(p.n_wg).unwrap();
+                        }
+                        let workgroups = kernels.grid(n_wg);
+                        m.n_wg_x = workgroups.0;
+                        m.n_wg = n_wg;
+                        m.n_batches = chunk.len() as u32;
+                        dispatches.push(Dispatch {
+                            kind: Kind { in_place: k > 0, merged: true },
+                            buffer,
+                            params_offset: (merged_params.len() as u64 * kernels.merged_stride)
+                                as u32,
+                            workgroups,
+                        });
+                        merged_params.push(m);
+                    }
+                }
+            }
         }
-        let params_buffer = gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("extension params"),
-            contents: &params_bytes,
-            usage: wgpu::BufferUsages::UNIFORM,
-        });
-        let params_binding = wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-            buffer: &params_buffer,
-            offset: 0,
-            size: wgpu::BufferSize::new(size_of::<Params>() as u64),
-        });
+
+        /// One uniform buffer of `params`, each at a multiple of `stride` bytes.
+        fn uniforms<T: Pod>(
+            gpu: &GpuContext,
+            params: &[T],
+            stride: u64,
+            label: &str,
+        ) -> wgpu::Buffer {
+            let stride = stride as usize;
+            let mut bytes = vec![0u8; (params.len() * stride).max(stride.max(size_of::<T>()))];
+            for (i, p) in params.iter().enumerate() {
+                bytes[i * stride..i * stride + size_of::<T>()]
+                    .copy_from_slice(bytemuck::bytes_of(p));
+            }
+            gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some(label),
+                contents: &bytes,
+                usage: wgpu::BufferUsages::UNIFORM,
+            })
+        }
+        let params_buffers = [
+            uniforms(gpu, &params, kernels.params_stride, "extension params"),
+            uniforms(gpu, &merged_params, kernels.merged_stride, "extension merged params"),
+        ];
 
         let entry = |binding, resource| wgpu::BindGroupEntry { binding, resource };
-        let out_of_place_groups = twiddles
-            .iter()
-            .map(|tw| {
-                (0..layout.buffer_words.len())
-                    .map(|b| {
-                        gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                            label: None,
-                            layout: &kernels.out_of_place_layout,
-                            entries: &[
-                                entry(0, coeffs.buffers[b].as_entire_binding()),
-                                entry(1, out.buffers[b].as_entire_binding()),
-                                entry(2, tw.as_entire_binding()),
-                                entry(3, params_binding.clone()),
-                            ],
+        let groups = Kind::ALL.map(|kind| {
+            let (size, params_buffer) = if kind.merged {
+                (size_of::<MergedParams>(), &params_buffers[1])
+            } else {
+                (size_of::<Params>(), &params_buffers[0])
+            };
+            let params_binding = wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                buffer: params_buffer,
+                offset: 0,
+                size: wgpu::BufferSize::new(size as u64),
+            });
+            twiddles
+                .iter()
+                .map(|tw| {
+                    (0..layout.buffer_words.len())
+                        .map(|b| {
+                            let mut entries = vec![];
+                            if !kind.in_place {
+                                entries.push(entry(0, coeffs.buffers[b].as_entire_binding()));
+                            }
+                            entries.push(entry(1, out.buffers[b].as_entire_binding()));
+                            entries.push(entry(2, tw.as_entire_binding()));
+                            entries.push(entry(3, params_binding.clone()));
+                            gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                                label: None,
+                                layout: &kernels.pipelines[kind.index()].1,
+                                entries: &entries,
+                            })
                         })
-                    })
-                    .collect()
-            })
-            .collect();
-        let in_place_groups = twiddles
-            .iter()
-            .map(|tw| {
-                (0..layout.buffer_words.len())
-                    .map(|b| {
-                        gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                            label: None,
-                            layout: &kernels.in_place_layout,
-                            entries: &[
-                                entry(1, out.buffers[b].as_entire_binding()),
-                                entry(2, tw.as_entire_binding()),
-                                entry(3, params_binding.clone()),
-                            ],
-                        })
-                    })
-                    .collect()
-            })
-            .collect();
-        Self {
-            log_blowup,
-            twiddles,
-            _params: params_buffer,
-            out_of_place_groups,
-            in_place_groups,
-            dispatches,
-        }
+                        .collect()
+                })
+                .collect()
+        });
+        Self { log_blowup, twiddles, _params: params_buffers, groups, dispatches }
     }
 
     pub fn n_stripes(&self) -> usize {
@@ -719,17 +892,16 @@ impl StripeExtension {
     ) {
         let mut current = None;
         for dispatch in &self.dispatches {
-            if current != Some(dispatch.in_place) {
-                pass.set_pipeline(if dispatch.in_place {
-                    &kernels.in_place
-                } else {
-                    &kernels.out_of_place
-                });
-                current = Some(dispatch.in_place);
+            let kind = dispatch.kind.index();
+            if current != Some(kind) {
+                pass.set_pipeline(&kernels.pipelines[kind].0);
+                current = Some(kind);
             }
-            let groups =
-                if dispatch.in_place { &self.in_place_groups } else { &self.out_of_place_groups };
-            pass.set_bind_group(0, &groups[stripe][dispatch.buffer], &[dispatch.params_offset]);
+            pass.set_bind_group(
+                0,
+                &self.groups[kind][stripe][dispatch.buffer],
+                &[dispatch.params_offset],
+            );
             pass.dispatch_workgroups(dispatch.workgroups.0, dispatch.workgroups.1, 1);
         }
     }

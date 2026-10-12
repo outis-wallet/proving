@@ -3,6 +3,7 @@
 //! way wgpu does natively. Browsers compile WGSL with their own compilers (Tint, WebKit's), which
 //! this does not cover.
 use naga::valid::{Capabilities, ValidationFlags, Validator};
+use stwo_gpu_spike::extension::ExtensionKernels;
 use stwo_gpu_spike::merkle::{absorb_shader, nodes_shader};
 
 fn check(name: &str, source: &str) {
@@ -40,4 +41,10 @@ fn check(name: &str, source: &str) {
 fn kernels_are_portable() {
     check("absorb", &absorb_shader());
     check("nodes", &nodes_shader());
+    let (out_of_place, in_place) = ExtensionKernels::sources();
+    check("extension out of place", &out_of_place);
+    check("extension in place", &in_place);
+    let (out_of_place, in_place) = ExtensionKernels::merged_sources();
+    check("extension out of place, merged", &out_of_place);
+    check("extension in place, merged", &in_place);
 }

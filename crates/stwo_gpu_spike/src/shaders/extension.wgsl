@@ -2,7 +2,9 @@
 // columns of 2^L coefficients each, laid out one after the other. Prepended: M31_WGSL. Filled in
 // by `extension.rs` (at the markers in block comments): the bindings and the load of an input
 // word, for the two variants, out of place (the first pass, from the coefficients) and in place
-// (the others), and the radix-2^r butterfly units.
+// (the others); the radix-2^r butterfly units; and the parameters and the workgroup's index in its
+// batch, for a dispatch of one batch (`params`, a uniform) or of several (merged: a table of
+// batches, each the workgroups of a dispatch of its own, side by side).
 //
 // The FFT. In a column of n = 2^L values, for the bits k = L-1 down to 0, every pair (i, i + 2^k)
 // with bit k of i clear goes through the butterfly (a, b) -> (a + t b, a - t b), whose twiddle t
@@ -41,6 +43,7 @@ struct Params {
     // The workgroups: n_wg in all, laid out n_wg_x per row of the dispatch grid.
     n_wg_x: u32,
     n_wg: u32,
+    // Merged dispatches: the batch's first workgroup in the dispatch.
     pad0: u32,
     pad1: u32,
     pad2: u32,
@@ -54,7 +57,7 @@ const THREADS: u32 = 256u;
 
 /*BINDINGS*/
 @group(0) @binding(2) var<storage, read> tw: array<u32>;
-@group(0) @binding(3) var<uniform> params: Params;
+/*PARAMS*/
 
 var<workgroup> tile: array<u32, TILE>;
 
@@ -123,26 +126,28 @@ fn main(
     @builtin(workgroup_id) wid: vec3<u32>,
     @builtin(local_invocation_index) tid: u32,
 ) {
-    let w = wid.x + wid.y * params.n_wg_x;
-    if (w >= params.n_wg) {
+    // The parameters of the workgroup's batch, `p` (uniform: barriers depend on it), and the
+    // workgroup's index in the batch, `w`.
+/*PROLOGUE*/
+    if (w >= p.n_wg) {
         return;
     }
-    let c = params.c;
-    let lo = params.lo;
+    let c = p.c;
+    let lo = p.lo;
     let n_mid = lo - c;
     let mid = ((w & ((1u << n_mid) - 1u)) << c) | ((w >> n_mid) << (lo + TILE_LOG - c));
-    let col_mask = (1u << params.log_n) - 1u;
+    let col_mask = (1u << p.log_n) - 1u;
 
     for (var i = tid; i < TILE; i += THREADS) {
         let g = batch_index(i, mid);
-        if (g < params.total) {
+        if (g < p.total) {
             tile[sw(i)] = /*LOAD*/;
         }
     }
     workgroupBarrier();
 
     // The rounds, from the top layer down.
-    var top = params.hi;
+    var top = p.hi;
     loop {
         if (top <= lo) {
             break;
@@ -177,8 +182,8 @@ fn main(
 
     for (var i = tid; i < TILE; i += THREADS) {
         let g = batch_index(i, mid);
-        if (g < params.total) {
-            dst[params.dst_base + g] = tile[sw(i)];
+        if (g < p.total) {
+            dst[p.dst_base + g] = tile[sw(i)];
         }
     }
 }

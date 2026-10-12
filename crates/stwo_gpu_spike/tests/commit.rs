@@ -23,9 +23,9 @@ use stwo::prover::poly::circle::{CircleCoefficients, PolyOps};
 use stwo::prover::poly::twiddles::TwiddleTree;
 use stwo_gpu_spike::GpuContext;
 use stwo_gpu_spike::commit::{
-    CommitKernels, StripedCommitment, commit_striped, kept_whole, takes_striped_path,
+    CommitKernels, CommitOptions, StripedCommitment, commit_striped, kept_whole, takes_striped_path,
 };
-use stwo_gpu_spike::extension::max_buffer_words;
+use stwo_gpu_spike::extension::Merge;
 use stwo_gpu_spike::shapes::{
     CAIRO_LIFTING_LOG_SIZE, CAIRO_LOG_BLOWUP, CIRCUIT_LIFTING_LOG_SIZE, CIRCUIT_LOG_BLOWUP,
     base_trace_log_sizes, cairo_pay_components,
@@ -125,28 +125,29 @@ fn check(
     log_sizes: &[u32],
     log_blowup: u32,
     lifting_log_size: u32,
-    max_words: Option<u64>,
+    options: CommitOptions,
     seed: u64,
 ) {
     let polys = random_polys(log_sizes, seed);
     let twiddles = twiddles(lifting_log_size);
     let cpu = cpu_commit(&polys, log_blowup, &twiddles, lifting_log_size);
-    let commitment = StripedCommitment::with_max_buffer_words(
+    let commitment = StripedCommitment::with_options(
         gpu,
         kernels,
         log_sizes,
         log_blowup,
         lifting_log_size,
         &twiddles,
-        max_words.unwrap_or_else(|| max_buffer_words(gpu)),
+        options,
     );
     commitment.upload(gpu, &polys);
     let output = commitment.run_and_read(gpu, kernels);
     let gpu_tree = commitment.tree_prover(output);
     let what = format!(
-        "{} columns, log sizes {:?}, blowup {log_blowup}, lifting {lifting_log_size}",
+        "{} columns, log sizes {:?}, blowup {log_blowup}, lifting {lifting_log_size}, {:?}",
         log_sizes.len(),
-        log_sizes.iter().copied().sorted().dedup().collect_vec()
+        log_sizes.iter().copied().sorted().dedup().collect_vec(),
+        options.merge,
     );
     assert_trees_eq(&gpu_tree, &cpu, &what);
     let bytes = commitment.gpu_bytes();
@@ -167,26 +168,43 @@ fn check(
 /// The Cairo base trace's columns, every component's rows divided by `2^scale` (columns of 2^4
 /// coefficients at least), at blowup 3 in a tree of lifting log size `23 - scale`: 8 stripes as
 /// tall as the largest column.
-fn cairo(scale: u32) {
+fn cairo(scale: u32, merges: &[Merge]) {
     let gpu = GpuContext::new();
     let kernels = CommitKernels::new(&gpu);
     let log_sizes = base_trace_log_sizes(&cairo_pay_components(), scale, 4);
     let lifting_log_size = CAIRO_LIFTING_LOG_SIZE - scale;
     assert_eq!(log_sizes.iter().max().unwrap() + CAIRO_LOG_BLOWUP, lifting_log_size);
-    check(&gpu, &kernels, &log_sizes, CAIRO_LOG_BLOWUP, lifting_log_size, None, 100 + scale as u64);
+    for &merge in merges {
+        let options = CommitOptions { merge, ..Default::default() };
+        check(
+            &gpu,
+            &kernels,
+            &log_sizes,
+            CAIRO_LOG_BLOWUP,
+            lifting_log_size,
+            options,
+            100 + scale as u64,
+        );
+    }
 }
 
 /// Columns up to 2^17: the FFT's input transposed (past `CACHED_FFT_LOG_SIZE`, 16) and two
 /// passes, columns of every size kept whole at blowup 3 (2^4 to 2^10), several stripes high.
 #[test]
 fn cairo_shapes_scaled_blowup_3() {
-    cairo(3);
+    cairo(3, &[Merge::Off]);
+}
+
+/// The same, with the extension's batches merged into fewer dispatches (see `Merge`).
+#[test]
+fn cairo_shapes_scaled_blowup_3_merged() {
+    cairo(3, &[Merge::Small, Merge::All]);
 }
 
 /// Smaller: every column at most 2^12, one FFT pass.
 #[test]
 fn cairo_shapes_scaled_small_blowup_3() {
-    cairo(8);
+    cairo(8, &[Merge::Off, Merge::All]);
 }
 
 #[test]
@@ -195,12 +213,12 @@ fn cairo_shapes_full_blowup_3() {
         eprintln!("skipped: STWO_GPU_SPIKE_FULL=1 runs it");
         return;
     }
-    cairo(0);
+    cairo(0, &[Merge::Off, Merge::Small, Merge::All]);
 }
 
 /// A spread of sizes like the circuit leg's trace (whose shapes are not in `data/`), every
 /// column count not a multiple of 16, less `scale`, at blowup 2: 4 stripes.
-fn circuit(scale: u32) {
+fn circuit(scale: u32, merge: Merge) {
     let gpu = GpuContext::new();
     let kernels = CommitKernels::new(&gpu);
     let mut log_sizes = vec![];
@@ -215,14 +233,16 @@ fn circuit(scale: u32) {
         log_sizes.swap(i, rng.random_range(0..=i));
     }
     let lifting_log_size = CIRCUIT_LIFTING_LOG_SIZE - scale;
-    check(&gpu, &kernels, &log_sizes, CIRCUIT_LOG_BLOWUP, lifting_log_size, None, 300);
+    let options = CommitOptions { merge, ..Default::default() };
+    check(&gpu, &kernels, &log_sizes, CIRCUIT_LOG_BLOWUP, lifting_log_size, options, 300);
 }
 
 #[test]
 fn circuit_shapes_scaled_blowup_2() {
-    circuit(4);
+    circuit(4, Merge::Off);
+    circuit(4, Merge::All);
     // The largest columns 2^12: the smallest that blowup 2 stripes.
-    circuit(9);
+    circuit(9, Merge::Off);
 }
 
 #[test]
@@ -231,7 +251,8 @@ fn circuit_shapes_full_blowup_2() {
         eprintln!("skipped: STWO_GPU_SPIKE_FULL=1 runs it");
         return;
     }
-    circuit(0);
+    circuit(0, Merge::Off);
+    circuit(0, Merge::All);
 }
 
 /// A tree taller than its largest column (stwo keeps every level, the leaves too, and the leaves
@@ -242,11 +263,11 @@ fn tree_taller_than_the_columns() {
     let kernels = CommitKernels::new(&gpu);
     let log_sizes = base_trace_log_sizes(&cairo_pay_components(), 9, 4);
     let max = *log_sizes.iter().max().unwrap();
-    check(&gpu, &kernels, &log_sizes, 3, max + 3 + 2, None, 400);
+    check(&gpu, &kernels, &log_sizes, 3, max + 3 + 2, CommitOptions::default(), 400);
     // At blowup 2, columns of 2^12 at least are striped.
     let log_sizes = base_trace_log_sizes(&cairo_pay_components(), 8, 4);
     let max = *log_sizes.iter().max().unwrap();
-    check(&gpu, &kernels, &log_sizes, 2, max + 2 + 1, None, 401);
+    check(&gpu, &kernels, &log_sizes, 2, max + 2 + 1, CommitOptions::default(), 401);
 }
 
 /// Within WebGPU's default limits, with buffers of 2^16 words: the columns spread over many
@@ -262,7 +283,10 @@ fn webgpu_default_limits_and_several_buffers() {
     let distinct = log_sizes.iter().copied().sorted().dedup().count();
     assert!(layout.buffer_words.len() >= 8);
     assert!(layout.batches.len() > distinct + 4, "some size split across buffers");
-    check(&gpu, &kernels, &log_sizes, CAIRO_LOG_BLOWUP, lifting_log_size, Some(max_words), 500);
+    for merge in [Merge::Off, Merge::Small, Merge::All] {
+        let options = CommitOptions { max_buffer_words: Some(max_words), merge };
+        check(&gpu, &kernels, &log_sizes, CAIRO_LOG_BLOWUP, lifting_log_size, options, 500);
+    }
 }
 
 /// The smallest stripes `new_striped` takes (height 10), 16 of them (blowup 4: the smallest
@@ -273,10 +297,12 @@ fn smallest_stripes_blowup_4() {
     let gpu = GpuContext::new();
     let kernels = CommitKernels::new(&gpu);
     let log_sizes = [vec![4; 20], vec![10; 3], vec![7; 5], vec![5; 1], vec![9; 17]].concat();
-    check(&gpu, &kernels, &log_sizes, 4, 14, None, 600);
+    check(&gpu, &kernels, &log_sizes, 4, 14, CommitOptions::default(), 600);
+    let merged = CommitOptions { merge: Merge::All, ..Default::default() };
+    check(&gpu, &kernels, &log_sizes, 4, 14, merged, 600);
     // And 2 stripes (blowup 1) of height 13, columns of 2^13 striped.
     let log_sizes = [vec![13; 2], vec![4; 3], vec![12; 18], vec![8; 1]].concat();
-    check(&gpu, &kernels, &log_sizes, 1, 14, None, 601);
+    check(&gpu, &kernels, &log_sizes, 1, 14, CommitOptions::default(), 601);
 }
 
 /// One commitment's buffers and plans, run on two traces of the same shapes; and the one-shot
