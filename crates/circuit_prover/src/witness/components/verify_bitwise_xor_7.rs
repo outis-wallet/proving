@@ -40,8 +40,7 @@ impl ClaimGenerator {
     }
 
     pub fn add_input(&self, input: &InputType, relation_index: usize) {
-        self.mults[relation_index]
-            .increase_at(self.input_to_row.row(input).try_into().unwrap());
+        self.mults[relation_index].increase_at(self.input_to_row.row(input).try_into().unwrap());
     }
 
     pub fn add_packed_inputs(&self, packed_inputs: &[PackedInputType], relation_index: usize) {
@@ -70,12 +69,12 @@ fn write_trace_simd(
     };
 
     let relation_id = PackedM31::broadcast(M31::from(62225763));
-    let bitwise_xor_7_0 =
-        preprocessed_trace.get_packed_column(&PreProcessedColumnId { id: "bitwise_xor_7_0".to_owned() });
-    let bitwise_xor_7_1 =
-        preprocessed_trace.get_packed_column(&PreProcessedColumnId { id: "bitwise_xor_7_1".to_owned() });
-    let bitwise_xor_7_2 =
-        preprocessed_trace.get_packed_column(&PreProcessedColumnId { id: "bitwise_xor_7_2".to_owned() });
+    let bitwise_xor_7_0 = preprocessed_trace
+        .get_packed_column(&PreProcessedColumnId { id: "bitwise_xor_7_0".to_owned() });
+    let bitwise_xor_7_1 = preprocessed_trace
+        .get_packed_column(&PreProcessedColumnId { id: "bitwise_xor_7_1".to_owned() });
+    let bitwise_xor_7_2 = preprocessed_trace
+        .get_packed_column(&PreProcessedColumnId { id: "bitwise_xor_7_2".to_owned() });
 
     (trace.par_iter_mut(), lookup_data.par_iter_mut()).into_par_iter().enumerate().for_each(
         |(row_index, (row, lookup_data))| {
