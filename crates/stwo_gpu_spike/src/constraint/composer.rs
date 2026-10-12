@@ -21,13 +21,12 @@
 //! arithmetic is exact in the field and every value canonical (see the crate's
 //! `tests/constraint.rs` and the proofs' identity checks).
 
-use std::collections::HashMap;
+use std::collections::{BinaryHeap, HashMap};
 use std::fs;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{Receiver, Sender, channel};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use itertools::Itertools;
@@ -65,11 +64,14 @@ impl KernelKey {
         )
     }
 
-    fn parse(line: &str) -> Option<Self> {
+    /// The key of a library line, and its evaluation domain's log size if noted (` rows <log>`
+    /// after the key, a hint for the order of compilation).
+    fn parse(line: &str) -> Option<(Self, Option<u32>)> {
         let w: Vec<&str> = line.split_whitespace().collect();
-        if w.len() != 11 || w[0] != "key" {
+        if (w.len() != 11 && w.len() != 13) || w[0] != "key" {
             return None;
         }
+        let rows = (w.len() == 13 && w[11] == "rows").then(|| w[12].parse().ok()).flatten();
         let n = |i: usize| w[i].parse::<u64>().ok();
         Some(Self {
             component: w[1].to_owned(),
@@ -77,6 +79,7 @@ impl KernelKey {
             n_constraints: n(6)? as usize,
             n_columns: [n(7)? as usize, n(8)? as usize, n(9)? as usize, n(10)? as usize],
         })
+        .map(|key| (key, rows))
     }
 
     /// The library file's name.
@@ -235,8 +238,73 @@ impl RunBuffers {
 }
 
 struct CompileJob {
+    /// Higher first: rows over row nodes (the GPU's gain per unit of compilation, roughly: a
+    /// kernel's compilation grows with its size, a component's CPU time with both).
+    priority: u64,
+    /// Earlier first among equals.
+    seq: u64,
     key: KernelKey,
     program: Program,
+}
+
+impl PartialEq for CompileJob {
+    fn eq(&self, other: &Self) -> bool {
+        (self.priority, self.seq) == (other.priority, other.seq)
+    }
+}
+impl Eq for CompileJob {}
+impl PartialOrd for CompileJob {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for CompileJob {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        (self.priority, std::cmp::Reverse(self.seq))
+            .cmp(&(other.priority, std::cmp::Reverse(other.seq)))
+    }
+}
+
+/// The kernels to compile, by priority; closed when the composer shuts down.
+#[derive(Default)]
+struct CompileQueue {
+    jobs: Mutex<(BinaryHeap<CompileJob>, bool, u64)>,
+    added: Condvar,
+}
+
+impl CompileQueue {
+    fn push(&self, key: KernelKey, program: Program, eval_log: Option<u32>) {
+        let nodes = program.row_nodes(0..program.constraints.len()).len().max(1) as u64;
+        // Without a size, as a 2^16 component.
+        let rows = 1u64 << eval_log.unwrap_or(16);
+        let mut jobs = lock(&self.jobs);
+        if jobs.1 {
+            return;
+        }
+        jobs.2 += 1;
+        let seq = jobs.2;
+        jobs.0.push(CompileJob { priority: (rows << 10) / nodes, seq, key, program });
+        self.added.notify_one();
+    }
+
+    /// The next job, waiting for one; `None` once closed and empty.
+    fn pop(&self) -> Option<CompileJob> {
+        let mut jobs = lock(&self.jobs);
+        loop {
+            if let Some(job) = jobs.0.pop() {
+                return Some(job);
+            }
+            if jobs.1 {
+                return None;
+            }
+            jobs = self.added.wait(jobs).unwrap_or_else(|poisoned| poisoned.into_inner());
+        }
+    }
+
+    fn close(&self) {
+        lock(&self.jobs).1 = true;
+        self.added.notify_all();
+    }
 }
 
 /// See the module docs.
@@ -244,7 +312,7 @@ pub struct GpuComposer {
     committer: Arc<GpuCommitter>,
     config: ComposerConfig,
     registry: Arc<Mutex<HashMap<KernelKey, KernelState>>>,
-    queue: Mutex<Option<Sender<CompileJob>>>,
+    queue: Arc<CompileQueue>,
     run: Mutex<RunBuffers>,
     stats: Arc<Mutex<ComposerStats>>,
     shadow: AtomicBool,
@@ -293,14 +361,13 @@ impl GpuComposer {
     pub fn new(committer: Arc<GpuCommitter>, config: ComposerConfig) -> Arc<Self> {
         let registry = Arc::new(Mutex::new(HashMap::new()));
         let stats = Arc::new(Mutex::new(ComposerStats::default()));
-        let (sender, receiver) = channel::<CompileJob>();
-        let receiver = Arc::new(Mutex::new(receiver));
+        let queue = Arc::new(CompileQueue::default());
         if let Some(library) = &config.library {
             let _ = fs::create_dir_all(library);
         }
         let cache = Self::pipeline_cache(committer.gpu(), config.library.as_deref());
         for _ in 0..config.compile_threads.max(1) {
-            let receiver = receiver.clone();
+            let queue = queue.clone();
             let registry = registry.clone();
             let stats = stats.clone();
             let committer = committer.clone();
@@ -308,9 +375,7 @@ impl GpuComposer {
             let options = config.options;
             std::thread::Builder::new()
                 .name("constraint-compile".into())
-                .spawn(move || {
-                    compile_loop(&committer, &receiver, &registry, &stats, cache, options)
-                })
+                .spawn(move || compile_loop(&committer, &queue, &registry, &stats, cache, options))
                 .expect("compile thread");
         }
         let shadow = AtomicBool::new(config.shadow);
@@ -321,7 +386,7 @@ impl GpuComposer {
             timestamps,
             config,
             registry,
-            queue: Mutex::new(Some(sender)),
+            queue,
             run: Mutex::new(RunBuffers::default()),
             stats,
         });
@@ -367,26 +432,26 @@ impl GpuComposer {
         for path in files {
             let Ok(text) = fs::read_to_string(&path) else { continue };
             let Some((first, rest)) = text.split_once('\n') else { continue };
-            let (Some(key), Ok(program)) = (KernelKey::parse(first), Program::from_text(rest))
+            let (Some((key, eval_log)), Ok(program)) =
+                (KernelKey::parse(first), Program::from_text(rest))
             else {
                 continue;
             };
             if program.constraints.len() != key.n_constraints {
                 continue;
             }
-            self.queue_compile(key, program);
+            self.queue_compile(key, program, eval_log);
         }
     }
 
-    fn queue_compile(&self, key: KernelKey, program: Program) {
+    fn queue_compile(&self, key: KernelKey, program: Program, eval_log: Option<u32>) {
         let mut registry = lock(&self.registry);
         if registry.contains_key(&key) {
             return;
         }
         registry.insert(key.clone(), KernelState::Compiling);
-        if let Some(queue) = lock(&self.queue).as_ref() {
-            let _ = queue.send(CompileJob { key, program });
-        }
+        drop(registry);
+        self.queue.push(key, program, eval_log);
     }
 
     /// Sets shadow mode (see the module docs).
@@ -396,7 +461,7 @@ impl GpuComposer {
 
     /// Stops the compilation threads once their queue is done.
     pub fn shutdown(&self) {
-        lock(&self.queue).take();
+        self.queue.close();
     }
 
     /// The counts since the last call.
@@ -851,24 +916,23 @@ impl GpuComposer {
             }
         };
         if let Some(library) = &self.config.library {
-            let text = format!("{}\n{}", key.line(), program.to_text());
+            let text = format!("{} rows {}\n{}", key.line(), job.eval_log_size, program.to_text());
             let _ = write_atomic(&library.join(key.file_name()), text.as_bytes());
         }
-        self.queue_compile(key, program);
+        self.queue_compile(key, program, Some(job.eval_log_size));
     }
 }
 
 fn compile_loop(
     committer: &GpuCommitter,
-    receiver: &Mutex<Receiver<CompileJob>>,
+    queue: &CompileQueue,
     registry: &Mutex<HashMap<KernelKey, KernelState>>,
     stats: &Mutex<ComposerStats>,
     cache: Option<(wgpu::PipelineCache, PathBuf)>,
     options: KernelOptions,
 ) {
     loop {
-        let job = { lock(receiver).recv() };
-        let Ok(CompileJob { key, program }) = job else { return };
+        let Some(CompileJob { key, program, .. }) = queue.pop() else { return };
         let start = Instant::now();
         let gpu = committer.gpu();
         let compiled = catch_unwind(AssertUnwindSafe(|| {
