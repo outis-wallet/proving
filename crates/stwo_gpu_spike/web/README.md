@@ -395,6 +395,52 @@ A page proving several times holds more than one proof's wasm memory at once (7.
 renderer RSS for 3 proofs), with or without the GPU: the engine's ended workers' memories are
 not freed at once.
 
+## Keep-warm in the GPU worker
+
+An option, off by default on every adapter: the page sets `keep_warm_ms` (the window in ms; absent
+or 0: off) in the worker's configure (js/gpu.mjs: `startGpu({configure})`, or `configure()` between
+proofs; switching it off stops it at once). Natively the same option is `STWO_GPU_KEEP_WARM_MS` or
+`GpuCommitter::set_keep_warm`, also off by default (`warm.rs`).
+
+**What it does** (`gpu/src/warm.rs`): while a proof is attached, one dispatch of the native
+keep-warm kernel in flight, submitted again 1 ms after `onSubmittedWorkDone`, for the window after
+the attach, the proof's start (the engine's `{warm}` message just before `prove()`) and each
+commitment's end; paused during a commitment; stopped at the detach, when the window ends, when
+the option is switched off, and when the device is lost. The kernel loops 2^20 steps rather than
+native's 2^16: Chrome's compiler makes it about 20 times faster than wgpu's on the RTX 3080 (0.16
+ms for 2^16 steps), and a submission's round trip in Chrome takes about 4 ms, so with 2^16 steps
+the GPU stayed in P8 (busy 4 % of the time); with 2^20 (2.2 ms at full clocks) it stays in P0. A
+commitment waits for the dispatch in flight at most, 2.2 ms. The report: per commitment `warm` (0
+off, 1 warming when it began, 2 on but its window had ended) and `warm_dispatches`, `idle_ms` (the
+GPU's idle time before it); per proof `gpu.warm` (`window_ms`, `dispatches`).
+
+**Measured** in Chrome 154 on the RTX 3080, 16 threads, `keep_warm_ms: 3000` against off,
+interleaved, 2 reps each, one proof per page (load 11 to 15; `results/chrome154-rtx3080-keep-warm.jsonl`):
+
+| capture | prove s, on (best / median) | off | commitments through the hook, on / off (ms) |
+|---|---|---|---|
+| register | 10.58 / 10.61 | 10.75 / 10.85 | 1394 / 1716 |
+| deposit | 11.70 / 11.74 | 12.11 / 12.13 | 1404 / 1827 |
+| pay | 10.56 / 10.69 | 10.93 / 11.04 | 1419 / 1840 |
+| withdraw | 10.51 / 10.54 | 10.89 / 11.03 | 1416 / 1878 |
+
+- Every proof byte-identical and verified, with all 8 commitments on the GPU, each begun warm
+  (`warm: 1`): the GPU sat idle 1.4 s before a commitment (median), 2.6 s at most, within the 3 s
+  window.
+- The GPU's compute (timestamp runs): 236-245 ms per proof with keep-warm, 583-752 without; the
+  Cairo base trace's 63-68 ms (69 natively at full clocks) against 192-330. The commitments are
+  then bound by the worker's own copies (about 0.8 s of the 1.4 s), no longer by the GPU (busy
+  0.6 s).
+- A page proving 3 times with keep-warm: 10.71, 10.24, 9.34 s (the commitments 1417, 1028,
+  984 ms).
+- The GPU (`nvidia-smi` every 100 ms): with keep-warm, P0 at 1905-1920 MHz from the attach to the
+  detach, 100 W on average over the proof (63 W for a proof without it, in the same page). After
+  the detach, with the page still open, P5 within 1 s and P8 (210 MHz, 12 W) within 2-3 s. A page
+  proving with it on, then off (`configure()`), then on, warmed only the first and the last
+  (`results/nvidia-smi-keep-warm-on-off-on.csv`: the three proofs with 6 s pauses between them;
+  columns: time, P-state, SM and memory clocks, PCIe generation, utilization, power).
+- Memory: unchanged (the kernel's buffer is 256 bytes).
+
 ## How the FFT and Merkle kernels plug in
 
 This is based on their branches: `gpu-fft` at 85dfe57e (`GpuColumns`,
