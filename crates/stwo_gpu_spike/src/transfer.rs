@@ -15,6 +15,13 @@
 //! next ones in: 516 MiB in about 48 ms, against 62 ms through one staging buffer of the whole
 //! (and that buffer's allocation, 275 ms, every time).
 //!
+//! Host memory: wgpu's Vulkan allocator takes host-visible memory in blocks of 64 MiB, then
+//! 128 MiB (its `MemoryHints::Performance`), which the NVIDIA driver pins: resident from the
+//! start. Two chunks of 32 MiB fill the first block, 64 MiB of resident set; a third took another
+//! block, 192 MiB in all, for no speed (`bench_commit --rings`: the streamed Cairo base trace in
+//! 121.4 ms with two, 122.6 ms with three). The upload ring's chunks, in the BAR, are no part of
+//! the resident set (64 MiB more of host memory where the BAR has no room).
+//!
 //! On wgpu's one queue, copies and compute run one after the other (`bench_transfer` measures
 //! it): a copy to or from the GPU never overlaps its compute. But the CPU's writes into a mapped
 //! chunk do, as does the CPU's copying out of one.
@@ -30,8 +37,9 @@ use crate::GpuContext;
 pub const DEFAULT_CHUNK_BYTES: u64 = 32 << 20;
 /// The default number of chunks of an upload ring (in the BAR when there is room: a few).
 pub const DEFAULT_UPLOAD_DEPTH: usize = 2;
-/// The default number of chunks of a readback ring.
-pub const DEFAULT_READBACK_DEPTH: usize = 3;
+/// The default number of chunks of a readback ring: two fill one block of host memory (see the
+/// module docs).
+pub const DEFAULT_READBACK_DEPTH: usize = 2;
 /// The largest copy of one rayon task, in bytes.
 const MAX_PART_BYTES: usize = 1 << 18;
 

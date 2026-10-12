@@ -606,10 +606,12 @@ fn u32_offset(words: u64) -> u32 {
     u32::try_from(words).expect("word offset past 2^32")
 }
 
-/// The two state buffers of a stripe's leaves (ping-pong), sized for its batches' shapes.
+/// The two state buffers of a stripe's leaves (ping-pong), sized for its batches' shapes: `words`
+/// words each, at byte `offset` of two buffers (which may hold other stripes' too).
 #[derive(Clone)]
 pub struct StateBuffers {
     buffers: [wgpu::Buffer; 2],
+    offset: u64,
     pub words: u64,
 }
 
@@ -621,13 +623,32 @@ impl StateBuffers {
                 gpu.storage("states a", words as usize),
                 gpu.storage("states b", words as usize),
             ],
+            offset: 0,
             words,
         }
     }
 
-    /// The bytes of both buffers.
+    /// `words` words at byte `offset` (a multiple of the device's storage offset alignment) of
+    /// each of `buffers`.
+    pub fn slice(buffers: [wgpu::Buffer; 2], offset: u64, words: u64) -> Self {
+        for buffer in &buffers {
+            assert!(offset + words.max(1) * 4 <= buffer.size(), "state slice past its buffer");
+        }
+        StateBuffers { buffers, offset, words }
+    }
+
+    /// The bytes of both halves.
     pub fn bytes(&self) -> u64 {
-        self.buffers.iter().map(wgpu::Buffer::size).sum()
+        2 * self.words * 4
+    }
+
+    /// Half `k`, as bound.
+    fn binding(&self, k: usize) -> wgpu::BindingResource<'_> {
+        wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+            buffer: &self.buffers[k],
+            offset: self.offset,
+            size: NonZeroU64::new(self.words.max(1) * 4),
+        })
     }
 }
 
@@ -871,8 +892,12 @@ impl GpuMerkle {
                 store_from: layout.min_stored_level,
                 level_base,
             });
-            let state_in = if step.prev.is_some() { &states.buffers[current] } else { &self.dummy };
-            let state_out = &states.buffers[1 - current];
+            let state_in = if step.prev.is_some() {
+                states.binding(current)
+            } else {
+                self.dummy.as_entire_binding()
+            };
+            let state_out = states.binding(1 - current);
             if !step.is_final {
                 assert!(step.state_words() <= states.words, "state buffers too small");
             }
@@ -894,11 +919,7 @@ impl GpuMerkle {
             schedule.iter().zip(bindings).enumerate()
         {
             let pipeline = if step.is_final { &self.absorb_final } else { &self.absorb };
-            let last = if step.is_final {
-                (4, tree.as_entire_binding())
-            } else {
-                (3, state_out.as_entire_binding())
-            };
+            let last = if step.is_final { (4, tree.as_entire_binding()) } else { (3, state_out) };
             let entries = [
                 (0, self.uniform_binding::<AbsorbParams>(&uniforms, k)),
                 (
@@ -909,7 +930,7 @@ impl GpuMerkle {
                         size: NonZeroU64::new(cols_size),
                     }),
                 ),
-                (2, state_in.as_entire_binding()),
+                (2, state_in),
                 last,
             ];
             let bind_group = self.bind_group(gpu, pipeline, &entries);

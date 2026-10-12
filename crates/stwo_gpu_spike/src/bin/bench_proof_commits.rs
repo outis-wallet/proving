@@ -8,7 +8,7 @@
 //!
 //! ```text
 //! bench_proof_commits [--proofs N] [--threads T] [--check-all] [--no-cpu] [--no-gpu]
-//!     [--idle-ms MS] [--keep-warm-ms MS]
+//!     [--idle-ms MS] [--keep-warm-ms MS] [--rss-breakdown]
 //! ```
 //!
 //! The split of the GPU's `commit` (`CommitTimes`): the upload ring's CPU copies into its chunks
@@ -20,7 +20,9 @@
 //! counted. `--idle-ms MS` sleeps before each GPU commitment (the GPU idle, as while the prover
 //! computes on the CPU), without the CPU's work in between that `--no-cpu` leaves out.
 //! `--keep-warm-ms MS` sets the committer's keep-warm window (`GpuCommitter::set_keep_warm`, 0:
-//! off; default: the committer's, `STWO_GPU_KEEP_WARM_MS` or 3 s).
+//! off; default: the committer's, `STWO_GPU_KEEP_WARM_MS` or 3 s). `--rss-breakdown` first
+//! measures what each part of a committer adds to the resident set (the device, the kernels, the
+//! rings, a mapped chunk written), before the committer.
 //!
 //! A proof's trees, as the prover commits them (random coefficients):
 //! - the Cairo leg, blowup 3, lifting log size 23: the base trace and the interaction trace of
@@ -71,6 +73,7 @@ struct Args {
     gpu: bool,
     idle: Duration,
     keep_warm: Option<Option<Duration>>,
+    rss_breakdown: bool,
 }
 
 fn parse_args() -> Args {
@@ -82,6 +85,7 @@ fn parse_args() -> Args {
         gpu: true,
         idle: Duration::ZERO,
         keep_warm: None,
+        rss_breakdown: false,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -92,6 +96,7 @@ fn parse_args() -> Args {
             "--check-all" => args.check_all = true,
             "--no-cpu" => args.cpu = false,
             "--no-gpu" => args.gpu = false,
+            "--rss-breakdown" => args.rss_breakdown = true,
             "--keep-warm-ms" => {
                 let ms: u64 = value("--keep-warm-ms").parse().expect("--keep-warm-ms MS");
                 args.keep_warm = Some((ms > 0).then(|| Duration::from_millis(ms)));
@@ -102,7 +107,7 @@ fn parse_args() -> Args {
             "-h" | "--help" => {
                 println!(
                     "bench_proof_commits [--proofs N] [--threads T] [--check-all] [--no-cpu] \
-                     [--no-gpu] [--idle-ms MS] [--keep-warm-ms MS]"
+                     [--no-gpu] [--idle-ms MS] [--keep-warm-ms MS] [--rss-breakdown]"
                 );
                 std::process::exit(0);
             }
@@ -255,6 +260,9 @@ fn assert_trees_eq(gpu: &TreeProver, cpu: &TreeProver, what: &str) {
 fn main() {
     let args = parse_args();
     let pool = rayon::ThreadPoolBuilder::new().num_threads(args.threads).build().unwrap();
+    if args.gpu && args.rss_breakdown {
+        rss_breakdown();
+    }
     let (rss_before, _) = rss();
     let start = Instant::now();
     let committer = args.gpu.then(|| GpuCommitter::new().expect("a GPU adapter"));
@@ -488,6 +496,45 @@ fn main() {
     }
     let (rss, peak) = rss();
     println!("resident set at the end {}, peak {}", mib(rss), mib(peak));
+}
+
+/// What each part of a committer adds to the resident set, printed.
+fn rss_breakdown() {
+    use stwo_gpu_spike::GpuContext;
+    use stwo_gpu_spike::commit::CommitKernels;
+    use stwo_gpu_spike::transfer::{ReadbackRing, Upload, UploadRing};
+    let mut last = rss().0;
+    let mut step = |what: &str| {
+        let now = rss().0;
+        println!("  resident set: {what}: +{} (now {})", mib(now.saturating_sub(last)), mib(now));
+        last = now;
+    };
+    println!("resident set, a committer's parts:");
+    step("before");
+    let gpu = GpuContext::new();
+    step("the device (driver, instance, adapter, device)");
+    let kernels = CommitKernels::new(&gpu);
+    step("the kernels compiled");
+    let mut upload = UploadRing::with_defaults(&gpu);
+    step("the upload ring (MAP_WRITE chunks, mapped)");
+    let readback = ReadbackRing::with_defaults(&gpu);
+    step("the readback ring (MAP_READ chunks)");
+    let target = gpu.storage("target", (upload.bytes() / 4) as usize);
+    let data = vec![7u8; upload.bytes() as usize];
+    step("(a host buffer of the upload ring's size, written)");
+    upload.upload(&gpu, &[Upload { dst: &target, dst_offset: 0, src: &data }]);
+    gpu.device.poll(wgpu::PollType::wait_indefinitely()).expect("poll");
+    step("the upload ring's chunks written");
+    let mut back = vec![0u8; upload.bytes() as usize];
+    step("(a host buffer of the upload ring's size, written)");
+    let mut readback = readback;
+    readback.read(
+        &gpu,
+        vec![stwo_gpu_spike::transfer::Readback { src: &target, src_offset: 0, dst: &mut back }],
+    );
+    step("the readback ring's chunks read (two of three)");
+    drop((data, back, target, upload, readback, kernels, gpu));
+    step("all dropped");
 }
 
 /// Bytes in MiB, short.

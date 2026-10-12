@@ -257,13 +257,15 @@ pub struct CommitBuffers {
     coeffs: Vec<wgpu::Buffer>,
     out: Vec<wgpu::Buffer>,
     tree: Option<wgpu::Buffer>,
-    states: Option<StateBuffers>,
+    /// The Merkle states, both halves: every stripe's slices of a streamed commitment (a tree's
+    /// stripes' take `2^lifting_log_size` states, whatever its blowup), the first slices of a
+    /// striped one.
+    states: Option<[wgpu::Buffer; 2]>,
     whole: Option<wgpu::Buffer>,
     /// A streamed commitment's (see [`crate::stream`]): a group's coefficients, every stripe's
-    /// evaluations of a group, every stripe's Merkle states.
+    /// evaluations of a group.
     group: Option<wgpu::Buffer>,
     stripes: Option<wgpu::Buffer>,
-    stripe_states: Vec<StateBuffers>,
 }
 
 /// A storage buffer of `bytes` bytes (at least 4), uninitialized.
@@ -336,11 +338,7 @@ impl CommitBuffers {
     }
 
     fn states(&mut self, gpu: &GpuContext, words: u64) -> StateBuffers {
-        if self.states.as_ref().is_none_or(|states| states.words < words) {
-            drop(self.states.take());
-            self.states = Some(StateBuffers::new(gpu, words));
-        }
-        self.states.clone().unwrap()
+        self.stripe_states(gpu, 1, words).pop().unwrap()
     }
 
     pub(crate) fn whole(&mut self, gpu: &GpuContext, words: u64) -> wgpu::Buffer {
@@ -361,27 +359,29 @@ impl CommitBuffers {
         )
     }
 
-    /// `n` stripes' Merkle states, of `words` words each buffer at least: each stripe's grown
-    /// on its own (stripe `s`'s as large as the largest any tree of more than `s` stripes asked
-    /// for).
+    /// `n` stripes' Merkle states, of `words` words each half: slices of the same two buffers
+    /// (grown if needed, the old ones freed first).
     pub(crate) fn stripe_states(
         &mut self,
         gpu: &GpuContext,
         n: usize,
         words: u64,
     ) -> Vec<StateBuffers> {
-        for stripe in 0..n {
-            match self.stripe_states.get_mut(stripe) {
-                Some(states) if states.words >= words => {}
-                Some(_) => {
-                    // The old ones freed first.
-                    drop(self.stripe_states.remove(stripe));
-                    self.stripe_states.insert(stripe, StateBuffers::new(gpu, words));
-                }
-                None => self.stripe_states.push(StateBuffers::new(gpu, words)),
-            }
+        // Each slice at a multiple of the storage offset alignment (256 bytes at most).
+        let align = u64::from(gpu.device.limits().min_storage_buffer_offset_alignment).max(4) / 4;
+        let stride = words.max(1).next_multiple_of(align);
+        let bytes = n as u64 * stride * 4;
+        if self.states.as_ref().is_none_or(|states| states[0].size() < bytes) {
+            drop(self.states.take());
+            self.states = Some([
+                storage_buffer(gpu, "states a", bytes),
+                storage_buffer(gpu, "states b", bytes),
+            ]);
         }
-        self.stripe_states[..n].to_vec()
+        let states = self.states.as_ref().unwrap();
+        (0..n as u64)
+            .map(|stripe| StateBuffers::slice(states.clone(), stripe * stride * 4, words))
+            .collect()
     }
 
     pub(crate) fn tree_of(&mut self, gpu: &GpuContext, words: u64) -> wgpu::Buffer {
@@ -397,10 +397,9 @@ impl CommitBuffers {
             .chain(&self.whole)
             .chain(&self.group)
             .chain(&self.stripes)
+            .chain(self.states.iter().flatten())
             .map(wgpu::Buffer::size)
             .sum::<u64>()
-            + self.states.as_ref().map_or(0, StateBuffers::bytes)
-            + self.stripe_states.iter().map(StateBuffers::bytes).sum::<u64>()
     }
 }
 

@@ -273,8 +273,10 @@ fn main() {
             "-- keep-warm: {}",
             match warm {
                 None => "off".to_string(),
-                Some((p, i)) =>
-                    format!("a dispatch of {} words, {i} iterations, every {p} ms", args.warm_words),
+                Some((p, i)) => {
+                    let words = args.warm_words;
+                    format!("a dispatch of {words} words, {i} iterations, every {p} ms")
+                }
             }
         );
         let mut summary = vec![];

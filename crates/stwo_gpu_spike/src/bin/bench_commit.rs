@@ -7,7 +7,13 @@
 //! ```text
 //! bench_commit [--scale N] [--blowup B] [--threads T1,T2,..] [--reps R]
 //!     [--merge off,small,all] [--unchecked] [--no-cpu] [--no-gpu]
+//!     [--rings UP_MIB:UP_DEPTH,RB_MIB:RB_DEPTH] [--group-mib G] [--streamed-only]
 //! ```
+//!
+//! `--rings` sets the staging rings' chunks (MiB) and depths (default `32:2,32:2`, the
+//! committer's); the resident set they add is printed. `--group-mib` sets the streamed commitment's
+//! groups (default: as the committer, see `stream::group_words`); `--streamed-only` skips the
+//! stripe-by-stripe runs.
 //!
 //! - CPU: `new_striped` on a rayon pool of each of `--threads` (default `18,36`: the physical
 //!   cores, and all the hardware threads, of the i9-10980XE); the polynomials cloned and the result
@@ -71,6 +77,9 @@ struct Args {
     merges: Vec<Merge>,
     cpu: bool,
     gpu: bool,
+    rings: ((u64, usize), (u64, usize)),
+    group_mib: Option<u64>,
+    streamed_only: bool,
 }
 
 fn parse_args() -> Args {
@@ -83,6 +92,9 @@ fn parse_args() -> Args {
         merges: vec![Merge::Off, Merge::Small, Merge::All],
         cpu: true,
         gpu: true,
+        rings: ((32, 2), (32, 2)),
+        group_mib: None,
+        streamed_only: false,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -111,6 +123,19 @@ fn parse_args() -> Args {
             }
             "--no-cpu" => args.cpu = false,
             "--no-gpu" => args.gpu = false,
+            "--rings" => {
+                let v = value("--rings");
+                let ring = |r: &str| {
+                    let (mib, depth) = r.split_once(':').expect("MIB:DEPTH");
+                    (mib.parse().expect("MIB"), depth.parse().expect("DEPTH"))
+                };
+                let (up, rb) = v.split_once(',').expect("--rings UP_MIB:UP_DEPTH,RB_MIB:RB_DEPTH");
+                args.rings = (ring(up), ring(rb));
+            }
+            "--group-mib" => {
+                args.group_mib = Some(value("--group-mib").parse().expect("--group-mib G"))
+            }
+            "--streamed-only" => args.streamed_only = true,
             "-h" | "--help" => {
                 println!(
                     "bench_commit [--scale N] [--blowup B] [--threads T1,T2,..] [--reps R] \
@@ -251,8 +276,25 @@ fn main() {
     };
     let mut gpu_root = None;
     let mut summary = vec![];
-    let mut upload_ring = UploadRing::with_defaults(&gpu);
-    let mut readback_ring = ReadbackRing::with_defaults(&gpu);
+    let resident = || {
+        std::fs::read_to_string("/proc/self/status")
+            .unwrap_or_default()
+            .lines()
+            .find_map(|line| line.strip_prefix("VmRSS:"))
+            .and_then(|v| v.trim().trim_end_matches("kB").trim().parse::<u64>().ok())
+            .map_or(0, |kb| kb << 10)
+    };
+    let before_rings = resident();
+    let ((up_mib, up_depth), (rb_mib, rb_depth)) = args.rings;
+    let mut upload_ring = UploadRing::new(&gpu, up_mib << 20, up_depth);
+    let after_upload = resident();
+    let mut readback_ring = ReadbackRing::new(&gpu, rb_mib << 20, rb_depth);
+    let after_readback = resident();
+    println!(
+        "staging rings' resident set: upload +{}, readback +{}",
+        mib(after_upload - before_rings),
+        mib(after_readback - after_upload)
+    );
     println!(
         "staging rings: upload {} (MAP_WRITE: the BAR, or host memory), readback {} (MAP_READ, \
          host memory)",
@@ -262,7 +304,8 @@ fn main() {
     let mut buffers = CommitBuffers::new();
     let mut twiddle_cache = TwiddleCache::new();
     let distinct = log_sizes.iter().copied().collect();
-    for &merge in &args.merges {
+    let merges = if args.streamed_only { vec![] } else { args.merges.clone() };
+    for &merge in &merges {
         println!("-- the extension's dispatches: {merge:?} (see Merge)");
         let options = CommitOptions { merge, ..Default::default() };
         let start = Instant::now();
@@ -466,14 +509,18 @@ fn main() {
 
     // Streamed in groups, every stripe of a group at once (the committer's way).
     let mut streamed = None;
-    if let Some(group_words) = group_words(
-        &gpu,
-        &log_sizes,
-        log_blowup,
-        lifting_log_size,
-        upload_ring.chunk_bytes(),
-        readback_ring.chunk_bytes(),
-    ) {
+    let group_words = match args.group_mib {
+        Some(group_mib) => Some(group_mib << 18),
+        None => group_words(
+            &gpu,
+            &log_sizes,
+            log_blowup,
+            lifting_log_size,
+            upload_ring.chunk_bytes(),
+            readback_ring.chunk_bytes(),
+        ),
+    };
+    if let Some(group_words) = group_words {
         println!("-- streamed in groups of {} MiB (see stream.rs)", group_words >> 18);
         let mut setups = vec![];
         let mut commitment = None;
