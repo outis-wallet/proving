@@ -1,0 +1,28 @@
+# The demo's prover side: a threaded module built like the Outis prover's (wasm-bindgen =0.2.126,
+# atomics, shared memory up to 4 GiB, wasm-bindgen-rayon on Web Workers), whose threads call
+# `gpu_m31_mul` synchronously through the bridge and check it against stwo's M31 on the CPU.
+[package]
+name = "stwo-gpu-web-demo"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[workspace]
+
+[dependencies]
+stwo-gpu-bridge = { path = "../bridge" }
+stwo = { path = "../../../stwo" }
+# Pinned like the prover's (os_wasm_probe), with the installed wasm-bindgen-cli 0.2.126.
+wasm-bindgen = "=0.2.126"
+js-sys = "=0.3.103"
+# no-bundler: the worker helper imports the module by URL (no bundler resolving '../../..').
+wasm-bindgen-rayon = { version = "1.3", features = ["no-bundler"] }
+rayon = "1.11"
+getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }
+getrandom_03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
+
+[profile.release]
+opt-level = 3

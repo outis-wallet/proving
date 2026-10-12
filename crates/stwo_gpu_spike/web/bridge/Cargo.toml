@@ -1,0 +1,10 @@
+# The bridge's protocol: the layout of the job table in the prover's shared wasm memory, and the
+# prover-side client (wasm32 + atomics). No dependencies, so the prover's module and the GPU
+# module (different wasm-bindgen versions) can both use it.
+[package]
+name = "stwo-gpu-bridge"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]

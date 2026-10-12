@@ -1,0 +1,33 @@
+# The GPU worker's module: plain wasm32 (no threads, its own memory), wgpu 30 on its WebGPU
+# backend, so the kernels' host code is the same Rust as natively (stwo-gpu-spike). It serves the
+# bridge's jobs, reading inputs from and writing outputs to the prover's shared memory through JS
+# views (writeBuffer from a SharedArrayBuffer view; a mapped range copied into one): the data
+# never enters this module's own memory.
+#
+# wgpu 30's web backend needs wasm-bindgen >= 0.2.127, so this module can't share the prover's
+# wasm-bindgen =0.2.126 pin: it has its own (=0.2.128, with a matching CLI in ../.tools).
+[package]
+name = "stwo-gpu-web-worker"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[workspace]
+
+[dependencies]
+stwo-gpu-spike = { path = "../.." }
+stwo-gpu-bridge = { path = "../bridge" }
+wgpu = "30"
+wasm-bindgen = "=0.2.128"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+futures-channel = "0.3"
+# rand (through stwo and the spike) on wasm32: the JS backend (with --cfg getrandom_backend="wasm_js").
+getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }
+getrandom_03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
+
+[profile.release]
+opt-level = 3

@@ -1,0 +1,5 @@
+# wasm-bindgen-cli 0.2.128 for the GPU module (build.sh installs it here), build outputs.
+.tools/
+target/
+pkg/
+results.log
