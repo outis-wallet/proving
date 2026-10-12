@@ -21,7 +21,7 @@
 /// "GPUB".
 pub const MAGIC: u32 = 0x4255_5047;
 /// Bumped on any change to the layout or the ops.
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 
 /// Concurrent jobs (one per waiting thread; more than rayon's threads on any device).
 pub const NSLOTS: usize = 64;
@@ -98,9 +98,86 @@ pub mod op {
     /// `[a, b, out, n, flags]`: `out[i] = a[i] * b[i]` in M31, `n` words. With `flags & 1`, the
     /// phases are pipelined (one submit, no waits between them) and only the total is timed.
     pub const M31_MUL: u32 = 16;
-    // Reserved: 32.. for the polynomial extension (FFT), 48.. for the Merkle hashing.
+    /// `[descriptor, descriptor bytes]`: stwo's `CommitmentTreeProver::new_striped` (SimdBackend,
+    /// Blake2sM31MerkleChannel) for the polynomials and outputs the descriptor lists, laid out as
+    /// [`commit`](super::commit) says. The GPU worker fills every output and the stats.
+    pub const COMMIT_STRIPED: u32 = 32;
     /// Panics in the GPU module: exercises the failure path (the bridge is lost after it).
     pub const TEST_TRAP: u32 = 255;
+}
+
+/// The descriptor of [`op::COMMIT_STRIPED`]: u32 words in the prover's memory (4-byte aligned),
+/// a header, then a record per column (polynomial order), then a record per layer of the tree in
+/// stwo's order (the root first, `lifting_log_size + 1` layers). The prover allocates every
+/// output (stwo's own columns and layers, so it keeps them as they are) and the GPU worker fills
+/// them; it checks every length against its own layout first, and fails the job on any
+/// difference (the prover then commits on the CPU).
+pub mod commit {
+    /// The descriptor's own version ([`D_VERSION`]).
+    pub const DESCRIPTOR_VERSION: u32 = 1;
+
+    // Header words.
+    pub const D_VERSION: usize = 0;
+    pub const D_N_COLUMNS: usize = 1;
+    pub const D_LOG_BLOWUP: usize = 2;
+    pub const D_LIFTING_LOG_SIZE: usize = 3;
+    /// The prover's twiddle tree's `twiddles` (u32 words, stwo's doubled twiddles), or 0: the GPU
+    /// worker reads the tail it needs, or computes the twiddles itself.
+    pub const D_TWIDDLES_PTR: usize = 4;
+    /// Its length in words.
+    pub const D_TWIDDLES_LEN: usize = 5;
+    /// Reserved (0).
+    pub const D_FLAGS: usize = 6;
+    /// [`NSTATS`] f64, each as two words (low, high), written by the GPU worker.
+    pub const D_STATS: usize = 8;
+    pub const NSTATS: usize = 14;
+    pub const HEADER_WORDS: usize = D_STATS + 2 * NSTATS;
+
+    /// Per column: its coefficients (pointer; `2^log_size` words), its log size, and where its
+    /// kept evaluations go (pointer, words): stripe 0's `2^log_size` words, or, for a column kept
+    /// whole (`log_size + log_blowup < 14`), its whole evaluation, stripe 0 first.
+    pub const COLUMN_WORDS: usize = 4;
+    pub const C_COEFFS: usize = 0;
+    pub const C_LOG_SIZE: usize = 1;
+    pub const C_OUT: usize = 2;
+    pub const C_OUT_WORDS: usize = 3;
+
+    /// Per layer, the root first: where its hashes go (pointer; 32 bytes each) and how many there
+    /// are, 0 for a layer stwo leaves empty.
+    pub const LAYER_WORDS: usize = 2;
+    pub const L_PTR: usize = 0;
+    pub const L_HASHES: usize = 1;
+
+    /// The descriptor's words for `n_columns` columns and a tree of height `lifting_log_size`.
+    pub const fn descriptor_words(n_columns: usize, lifting_log_size: usize) -> usize {
+        HEADER_WORDS + n_columns * COLUMN_WORDS + (lifting_log_size + 1) * LAYER_WORDS
+    }
+
+    // The stats, in ms unless named otherwise.
+    /// The twiddles: read from the prover's tree (or computed), then laid out per stripe.
+    pub const ST_TWIDDLES: usize = 0;
+    /// The commitment's buffers and plans, the twiddles' upload.
+    pub const ST_SETUP: usize = 1;
+    /// The coefficients' `writeBuffer`s (and the waits that bound them).
+    pub const ST_UPLOAD: usize = 2;
+    /// From the submission to the queue's completion (the upload's tail included).
+    pub const ST_COMPUTE: usize = 3;
+    /// The outputs into the prover's memory.
+    pub const ST_READBACK: usize = 4;
+    /// Freeing the commitment's buffers.
+    pub const ST_DESTROY: usize = 5;
+    pub const ST_UPLOAD_BYTES: usize = 6;
+    pub const ST_READBACK_BYTES: usize = 7;
+    /// The commitment's device buffers.
+    pub const ST_GPU_BYTES: usize = 8;
+    /// The whole job, as the GPU worker timed it.
+    pub const ST_TOTAL: usize = 9;
+    /// 1 if the twiddles came from the prover's tree, 0 if computed (or cached) by the worker.
+    pub const ST_TWIDDLES_FROM_PROVER: usize = 10;
+    /// Of [`ST_UPLOAD`], the waits for the upload ring's buffers to be writable again.
+    pub const ST_UPLOAD_WAIT: usize = 11;
+    /// Of [`ST_READBACK`], the waits for the readback ring's buffers to be mapped.
+    pub const ST_READBACK_WAIT: usize = 12;
 }
 
 /// Why a call failed.

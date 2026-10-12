@@ -7,7 +7,9 @@
 //   notifies it, then waits on the slot's state (memory.atomic.wait32);
 //   this worker waits on the doorbell with Atomics.waitAsync, takes SUBMITTED slots (-> RUNNING),
 //   runs them one at a time on the GPU module, marks them DONE or ERROR and Atomics.notify()s.
-// Messages: from the page, { connect: port } (a port to a prover's worker); on that port,
+// Messages: from the page, { configure: { upload_chunk, upload_window, readback_chunk, kick_ms,
+// compute_twiddles, upload: "mapped" | "gather" | "write", upload_ring, readback_ring,
+// max_gpu_mib } } (each optional), { connect: port } (a port to a prover's worker); on that port,
 // { attach: { memory, base } } -> { attached, info } or { attached: false, error }, and
 // { detach: true } -> { detached: true }.
 import init, { Gpu, layout } from "./pkg/gpu/stwo_gpu_web_worker.js";
@@ -44,6 +46,8 @@ function applyIo() {
   const current = JSON.parse(gpu.info());
   const pick = (key) => io[key] ?? current[key];
   gpu.configure(pick("upload_chunk"), pick("upload_window"), pick("readback_chunk"));
+  // The striped commitment's twiddles: the prover's (default), or computed here and kept.
+  gpu.configure_commit(!!io.compute_twiddles, io.upload ?? "mapped", io.upload_ring ?? 0, io.readback_ring ?? 0, io.max_gpu_mib ?? 0);
 }
 
 const slotBase = (s) => L.HEADER_WORDS + s * L.SLOT_WORDS;

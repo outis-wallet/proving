@@ -20,6 +20,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use js_sys::{Float64Array, Object, Promise, Reflect, SharedArrayBuffer, Uint8Array};
+
+mod commit;
 use stwo_gpu_bridge as bridge;
 use stwo_gpu_spike::{GpuContext, M31_WGSL};
 use wasm_bindgen::prelude::*;
@@ -142,6 +144,8 @@ const STAGING: wgpu::BufferUsages = wgpu::BufferUsages::MAP_READ.union(wgpu::Buf
 struct Inner {
     gpu: GpuContext,
     m31_mul: wgpu::ComputePipeline,
+    /// The striped commitment's kernels (`op::COMMIT_STRIPED`).
+    committer: commit::Committer,
     pool: RefCell<Pool>,
     /// Elements per dispatch: what one binding and one dimension of workgroups allow.
     chunk_words: u64,
@@ -200,10 +204,15 @@ impl Gpu {
         let by_binding = limits.max_storage_buffer_binding_size as u64 / 4;
         let by_dispatch = limits.max_compute_workgroups_per_dimension as u64 * WORKGROUP;
         let chunk_words = by_binding.min(by_dispatch) / align_words * align_words;
+        // Compiled now, so a proof's first commitment doesn't wait for it: the browser compiles
+        // the pipelines in order with the queue's work, so the wait below includes them.
+        let committer = commit::Committer::new(&gpu);
+        queue_done(&gpu.queue).await;
         Ok(Gpu {
             inner: Rc::new(Inner {
                 gpu,
                 m31_mul,
+                committer,
                 pool: RefCell::default(),
                 chunk_words,
                 io: Cell::default(),
@@ -246,6 +255,41 @@ impl Gpu {
         for buffer in self.inner.pool.borrow_mut().staging.iter_mut().filter_map(Option::take) {
             buffer.destroy();
         }
+    }
+
+    /// Where `op::COMMIT_STRIPED` takes the twiddles from: the prover's twiddle tree (the
+    /// default), or, with `compute`, its own, computed once and kept.
+    /// And how it uploads the coefficients: `"mapped"` (the default), `"gather"` or `"write"`;
+    /// the depths of its upload and readback rings (0: the defaults, 4 and 4); and the most
+    /// device memory a commitment may take, in MiB (0: no limit), above which it goes to the CPU.
+    pub fn configure_commit(
+        &self,
+        compute_twiddles: bool,
+        upload: &str,
+        upload_ring: u32,
+        readback_ring: u32,
+        max_gpu_mib: u32,
+    ) -> Result<(), JsValue> {
+        let committer = &self.inner.committer;
+        committer.max_gpu_mib.set(max_gpu_mib);
+        if upload_ring > 0 {
+            committer.upload_ring_depth.set(upload_ring as usize);
+        }
+        if readback_ring > 0 {
+            committer.readback_ring_depth.set(readback_ring as usize);
+        }
+        self.inner.committer.twiddles.set(if compute_twiddles {
+            commit::TwiddleSource::Computed
+        } else {
+            commit::TwiddleSource::Prover
+        });
+        self.inner.committer.upload.set(match upload {
+            "mapped" => commit::UploadMode::Mapped,
+            "gather" => commit::UploadMode::Gather,
+            "write" => commit::UploadMode::Write,
+            _ => return Err(JsValue::from_str(&format!("unknown upload mode {upload}"))),
+        });
+        Ok(())
     }
 
     /// Whether the device was lost.
@@ -431,6 +475,7 @@ impl Inner {
             bridge::op::UPLOAD => self.upload_op(args, memory).await,
             bridge::op::READBACK => self.readback_op(args, memory).await,
             bridge::op::M31_MUL => self.m31_mul(args, memory).await,
+            bridge::op::COMMIT_STRIPED => commit::commit_striped(self, args, memory).await,
             _ => Err(format!("unknown op {op}")),
         };
         // Pops run in reverse order of the pushes.
