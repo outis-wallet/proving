@@ -25,6 +25,7 @@ use stwo_gpu_spike::GpuContext;
 use stwo_gpu_spike::commit::{
     CommitKernels, CommitOptions, StripedCommitment, commit_striped, kept_whole, takes_striped_path,
 };
+use stwo_gpu_spike::committer::{Declined, GpuCommitter};
 use stwo_gpu_spike::extension::Merge;
 use stwo_gpu_spike::shapes::{
     CAIRO_LIFTING_LOG_SIZE, CAIRO_LOG_BLOWUP, CIRCUIT_LIFTING_LOG_SIZE, CIRCUIT_LOG_BLOWUP,
@@ -339,4 +340,41 @@ fn striped_path_preconditions() {
     assert!(!takes_striped_path(&[3, 12], 3, 20)); // a column of fewer than 16 coefficients
     assert!(takes_striped_path(&[4, 10], 3, 13));
     assert!(takes_striped_path(&[4, 17], 3, 20));
+}
+
+/// The committer the prover's hook calls: `new_striped`'s tree for two traces in a row (it is
+/// reused), and the polynomials given back, untouched, for shapes `new_striped` doesn't stripe.
+#[test]
+fn committer_matches_new_striped_and_declines() {
+    let committer = GpuCommitter::new().expect("a GPU adapter");
+    let scale = 3;
+    let log_sizes = base_trace_log_sizes(&cairo_pay_components(), scale, 4);
+    let lifting_log_size = CAIRO_LIFTING_LOG_SIZE - scale;
+    let cairo_twiddles = twiddles(lifting_log_size);
+    for seed in [11, 12] {
+        let polys = random_polys(&log_sizes, seed);
+        let cpu = cpu_commit(&polys, CAIRO_LOG_BLOWUP, &cairo_twiddles, lifting_log_size);
+        let gpu = committer
+            .commit_striped(polys, CAIRO_LOG_BLOWUP, &cairo_twiddles, lifting_log_size)
+            .unwrap_or_else(|(_, declined)| panic!("declined: {declined:?}"));
+        assert_trees_eq(&gpu, &cpu, &format!("committer, seed {seed}"));
+    }
+
+    // A column of 2^3 coefficients: below the striped path's smallest.
+    let polys = random_polys(&[3, 12], 13);
+    let lifting_log_size = 12 + CAIRO_LOG_BLOWUP;
+    let given = polys.iter().map(|poly| poly.coeffs.to_cpu()).collect_vec();
+    match committer.commit_striped(
+        polys,
+        CAIRO_LOG_BLOWUP,
+        &twiddles(lifting_log_size),
+        lifting_log_size,
+    ) {
+        Err((back, Declined::NotStriped)) => {
+            let back = back.iter().map(|poly| poly.coeffs.to_cpu()).collect_vec();
+            assert_eq!(back, given, "the polynomials come back untouched");
+        }
+        Err((_, declined)) => panic!("declined for another reason: {declined:?}"),
+        Ok(_) => panic!("committed a shape new_striped doesn't stripe"),
+    }
 }

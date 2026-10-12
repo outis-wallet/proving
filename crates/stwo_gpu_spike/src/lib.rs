@@ -22,6 +22,7 @@ use wgpu::util::DeviceExt;
 
 pub mod blake2s;
 pub mod commit;
+pub mod committer;
 pub mod extension;
 pub mod merkle;
 pub mod reference;
@@ -65,11 +66,23 @@ impl GpuContext {
     }
 
     async fn create_async(limits: Option<wgpu::Limits>, optional: wgpu::Features) -> Self {
+        Self::try_create_async(limits, optional).await.unwrap_or_else(|error| panic!("{error}"))
+    }
+
+    /// [`Self::new`] that reports a missing adapter or device instead of panicking.
+    pub fn try_new() -> Result<Self, String> {
+        pollster::block_on(Self::try_create_async(None, wgpu::Features::empty()))
+    }
+
+    pub async fn try_create_async(
+        limits: Option<wgpu::Limits>,
+        optional: wgpu::Features,
+    ) -> Result<Self, String> {
         let instance =
             wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
         let adapter = wgpu::util::initialize_adapter_from_env_or_default(&instance, None)
             .await
-            .expect("no GPU adapter");
+            .map_err(|error| format!("no GPU adapter: {error}"))?;
         let adapter_info = adapter.get_info();
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
@@ -79,8 +92,8 @@ impl GpuContext {
                 ..Default::default()
             })
             .await
-            .expect("no GPU device");
-        Self { adapter_info, device, queue }
+            .map_err(|error| format!("no GPU device: {error}"))?;
+        Ok(Self { adapter_info, device, queue })
     }
 
     /// A storage buffer holding `data`, readable back (COPY_SRC) and writable (COPY_DST).
