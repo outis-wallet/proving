@@ -6,10 +6,21 @@
 //! `WGPU_ADAPTER_NAME=llvmpipe` picks Mesa's software Vulkan (lavapipe), slow but exact, for
 //! checking results on a machine without a working GPU; `WGPU_BACKEND=vulkan|metal|dx12|gl`
 //! restricts the backends.
+//!
+//! - [`blake2s`]: Blake2s-256 in WGSL, as stwo hashes.
+//! - [`merkle`]: the lifted Merkle tree of a commitment (leaves of a stripe's columns, its subtree,
+//!   the levels above the stripes), its input and output layouts, on the GPU.
+//! - [`shapes`]: the Cairo leg's trace shapes; [`reference`](mod@reference): stwo's SIMD results to
+//!   compare with.
+//! - `bench_merkle` (`src/bin`): the Merkle hashing of the Cairo base trace, GPU against SIMD.
 
 use wgpu::util::DeviceExt;
 
+pub mod blake2s;
 pub mod extension;
+pub mod merkle;
+pub mod reference;
+pub mod shapes;
 
 /// M31 arithmetic in WGSL (`m31_add`, `m31_sub`, `m31_mul`, ...), to prepend to a kernel's source.
 pub const M31_WGSL: &str = include_str!("shaders/m31.wgsl");
@@ -103,6 +114,38 @@ impl GpuContext {
             label: Some(label),
             source: wgpu::ShaderSource::Wgsl(source.into()),
         });
+        self.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some(label),
+            layout: None,
+            module: &module,
+            entry_point: Some(entry),
+            compilation_options: Default::default(),
+            cache: None,
+        })
+    }
+
+    /// [`Self::pipeline`] without the runtime checks wgpu adds to a shader (bounds checks on
+    /// every buffer access, loop bounding), which WebGPU in browsers always keeps.
+    ///
+    /// # Safety
+    ///
+    /// The kernel must never index out of bounds nor loop forever, whatever it is dispatched on.
+    pub unsafe fn pipeline_unchecked(
+        &self,
+        label: &str,
+        source: &str,
+        entry: &str,
+    ) -> wgpu::ComputePipeline {
+        // Safety: the caller's.
+        let module = unsafe {
+            self.device.create_shader_module_trusted(
+                wgpu::ShaderModuleDescriptor {
+                    label: Some(label),
+                    source: wgpu::ShaderSource::Wgsl(source.into()),
+                },
+                wgpu::ShaderRuntimeChecks::unchecked(),
+            )
+        };
         self.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some(label),
             layout: None,
