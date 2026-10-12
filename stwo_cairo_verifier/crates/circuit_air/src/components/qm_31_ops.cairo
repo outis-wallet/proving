@@ -255,7 +255,7 @@ mod tests {
     #[allow(unused_imports)]
     use stwo_constraint_framework::{CommonLookupElements, PreprocessedMaskValuesTrait};
     use stwo_verifier_core::fields::qm31::{QM31, QM31Impl, QM31Trait, qm31_const};
-    use crate::components::sample_evaluations::*;
+    use crate::components::sample_evaluations_test_data::*;
     #[allow(unused_imports)]
     use crate::preprocessed_columns::*;
     use super::{AirComponentImpl, Claim, Component};

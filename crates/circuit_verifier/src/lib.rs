@@ -5,6 +5,7 @@ pub mod circuit_proof;
 pub mod components;
 pub mod multiverifier;
 pub mod relations;
-pub mod sample_evaluations;
+#[cfg(test)]
+mod sample_evaluations_test_data;
 pub mod statement;
 pub mod verify;

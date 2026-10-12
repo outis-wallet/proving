@@ -29,8 +29,8 @@ pub fn generate_sample_evaluations_file(
         tokens.extend(quote! { pub const $(name): [M31; 4] = [M31 { inner: $(value_m31s[0].0) }, M31 { inner: $(value_m31s[1].0) }, M31 { inner: $(value_m31s[2].0) }, M31 { inner: $(value_m31s[3].0) }]; $("\n") });
     }
 
-    add_file_to_module(
-        &dest_dir.join("sample_evaluations.cairo"),
+    add_test_file_to_module(
+        &dest_dir.join("sample_evaluations_test_data.cairo"),
         format_cairo_code(tokens.to_string().unwrap()),
         &AutogenCodeType::CAIRO,
     );

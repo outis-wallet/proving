@@ -77,6 +77,25 @@ pub fn reformat_rust_code(code_text: String) -> String {
 /// Create the file `file_path` with the given content, and update the relevant module file
 /// to include the new file.
 pub fn add_file_to_module(file_path: &Path, file_content: String, code_type: &AutogenCodeType) {
+    add_file_to_module_with_visibility(file_path, file_content, code_type, "pub mod");
+}
+
+/// Same as [`add_file_to_module`], but declares the module as test-only.
+pub fn add_test_file_to_module(
+    file_path: &Path,
+    file_content: String,
+    code_type: &AutogenCodeType,
+) {
+    add_file_to_module_with_visibility(file_path, file_content, code_type, "#[cfg(test)]\nmod");
+}
+
+/// `mod_prefix` is what precedes the module name in its declaration, e.g. `pub mod`.
+fn add_file_to_module_with_visibility(
+    file_path: &Path,
+    file_content: String,
+    code_type: &AutogenCodeType,
+    mod_prefix: &str,
+) {
     let parent_dir = file_path.parent().expect("path should include directory name");
     let (mod_file_path, mod_file_name) = match code_type {
         AutogenCodeType::WITNESS | AutogenCodeType::AIR(_) | AutogenCodeType::CIRCUIT => {
@@ -116,7 +135,7 @@ pub fn add_file_to_module(file_path: &Path, file_content: String, code_type: &Au
 
     // Add mod file line for the new file
     let mod_file_line = &format!(
-        "pub mod {};",
+        "{mod_prefix} {};",
         file_path.file_stem().expect("Invalid filename").to_str().expect("Invalid filename")
     );
     if !mod_file_content.contains(mod_file_line) {

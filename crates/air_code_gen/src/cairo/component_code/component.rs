@@ -114,7 +114,7 @@ fn gen_tests_module(air_fn: &CompiledAirFn, assignment: &Assignment) -> rust::To
         #[cfg(and(test, feature: "qm31_opcode"))]
         mod tests {
             use super::{Component, Claim};
-            use crate::components::sample_evaluations::*;
+            use crate::components::sample_evaluations_test_data::*;
             use super::AirComponentImpl;
             use stwo_constraint_framework::AirComponent;
             use core::array::ArrayImpl;

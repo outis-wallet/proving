@@ -49,7 +49,7 @@ pub(crate) fn get_manual_cairo_constraints_components() -> Vec<String> {
 /// Returns the list of components whose circuit constraint evaluation code is manually written.
 /// The CI ensures that constraint evaluation code generation works for all components not
 /// listed here.
-fn get_manual_circuit_constraints_components() -> Vec<String> {
+pub(crate) fn get_manual_circuit_constraints_components() -> Vec<String> {
     // `eq` is manual too, but stwo-air-infra has no compiled JSON for it, so it is not listed here.
     vec![
         // CASM components
