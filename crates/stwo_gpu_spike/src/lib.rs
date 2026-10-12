@@ -9,6 +9,8 @@
 
 use wgpu::util::DeviceExt;
 
+pub mod extension;
+
 /// M31 arithmetic in WGSL (`m31_add`, `m31_sub`, `m31_mul`, ...), to prepend to a kernel's source.
 pub const M31_WGSL: &str = include_str!("shaders/m31.wgsl");
 
@@ -26,6 +28,16 @@ impl GpuContext {
     }
 
     pub async fn new_async() -> Self {
+        Self::with_limits_async(None).await
+    }
+
+    /// The adapter the environment picks, with `limits` instead of its own (e.g.
+    /// `wgpu::Limits::default()`, WebGPU's defaults, to check that kernels fit in a browser's).
+    pub fn with_limits(limits: wgpu::Limits) -> Self {
+        pollster::block_on(Self::with_limits_async(Some(limits)))
+    }
+
+    pub async fn with_limits_async(limits: Option<wgpu::Limits>) -> Self {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
         let adapter = wgpu::util::initialize_adapter_from_env_or_default(&instance, None)
             .await
@@ -34,7 +46,7 @@ impl GpuContext {
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("stwo-gpu-spike"),
-                required_limits: adapter.limits(),
+                required_limits: limits.unwrap_or_else(|| adapter.limits()),
                 ..Default::default()
             })
             .await
