@@ -9,6 +9,9 @@
 //! - [`capture`]: a constraint evaluation hook that observes a proof's components (shapes, checks)
 //!   and writes [`fixture`]s of the SIMD evaluation's inputs and output.
 pub mod capture;
+// Native only: its background compilation threads share the device, which on WebGPU (wasm32) is
+// not `Send`.
+#[cfg(not(target_arch = "wasm32"))]
 pub mod composer;
 pub mod fixture;
 pub mod interp;
