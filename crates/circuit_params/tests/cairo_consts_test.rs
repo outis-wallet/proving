@@ -58,10 +58,9 @@ fn repo_root() -> PathBuf {
 fn shared_target(definition: &RegistryDefinition) -> (ComponentSizes, PreprocessedCircuit) {
     let cairo_params = definition.cairo_params();
     let circuits_builder = CircuitsBuilder {
-        cairo_preprocessed_trace_variant: cairo_params.preprocessed_trace,
         cairo_roots_cache: Default::default(),
         leaf_program: load_program(&definition.program),
-        cairo_fri_params: cairo_params.fri_params,
+        cairo_prover_params: cairo_params,
         circuit_fri_params: definition.circuit_fri_params(),
         add_zk_blinding: definition.add_zk_blinding,
     };
@@ -291,7 +290,7 @@ fn test_cairo_verifier_consts_match_production_registry() {
     let small = RegistryDefinition::load(&repo_root(), "canonical_small");
     assert_eq!(
         small.pad_to_component_log_sizes.as_ref(),
-        Some(&circuit_registry::LogSizes::from(&target_sizes)),
+        Some(&circuit_registry::LogSizes::of(&target_sizes)),
         "canonical_small's pad_to_component_log_sizes must equal the production target"
     );
     assert_eq!(

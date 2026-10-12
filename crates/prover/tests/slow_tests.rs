@@ -38,6 +38,8 @@ fn test_all_cairo_constraints() {
 #[test]
 fn test_canonical_preprocessed_root_regression() {
     let log_blowup_factor = 1;
+    let canonical_trace = PreProcessedTraceVariant::Canonical;
+
     let expected = Blake2sHash::from(
         hex::decode("a98e22423bf5d235981f0b36d939ae56ef3be2751c58b032b2831e6e24ba0364")
             .expect("Invalid hex string"),
@@ -45,8 +47,8 @@ fn test_canonical_preprocessed_root_regression() {
 
     let root = generate_preprocessed_commitment_root::<Blake2sMerkleChannel>(
         log_blowup_factor,
-        PreProcessedTraceVariant::Canonical,
-        0,
+        canonical_trace,
+        canonical_trace.max_log_trace_size(),
     );
 
     assert_eq!(root, expected);
@@ -55,6 +57,8 @@ fn test_canonical_preprocessed_root_regression() {
 #[test]
 fn test_small_canonical_preprocessed_root_regression() {
     let log_blowup_factor = 1;
+    let small_trace = PreProcessedTraceVariant::CanonicalSmall;
+
     let expected = Blake2sHash::from(
         hex::decode("068d1166c9f9f0ec247641ca391ee8396170e69343dfcacc632f9638670d2bec")
             .expect("Invalid hex string"),
@@ -62,8 +66,8 @@ fn test_small_canonical_preprocessed_root_regression() {
 
     let root = generate_preprocessed_commitment_root::<Blake2sMerkleChannel>(
         log_blowup_factor,
-        PreProcessedTraceVariant::CanonicalSmall,
-        0,
+        small_trace,
+        small_trace.max_log_trace_size(),
     );
 
     assert_eq!(root, expected);

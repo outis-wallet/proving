@@ -232,7 +232,7 @@ pub fn get_recursive_circuit_config(
     } else {
         let config = leaf_verifier_config(preprocessed_root)?;
         let preprocessed_column_log_sizes =
-            layout_from_component_sizes(&(&config.component_log_sizes).into());
+            layout_from_component_sizes(&(config.component_log_sizes).to_component_sizes());
         Ok(CircuitConfig {
             config: pcs_config_from_circuit_proof_config(&config),
             preprocessed_column_log_sizes,
@@ -252,7 +252,7 @@ pub fn get_proof_config(preprocessed_root: &[u32; 8]) -> Result<ProofConfig, Box
     } else {
         let config = leaf_verifier_config(preprocessed_root)?;
         let n_preprocessed_columns =
-            layout_from_component_sizes(&(&config.component_log_sizes).into()).len();
+            layout_from_component_sizes(&(config.component_log_sizes).to_component_sizes()).len();
         let pcs_config = pcs_config_from_circuit_proof_config(&config);
         Ok(ProofConfig::new(
             &components,
@@ -265,8 +265,9 @@ pub fn get_proof_config(preprocessed_root: &[u32; 8]) -> Result<ProofConfig, Box
 
 fn pcs_config_from_circuit_proof_config(circuit_proof_config: &CircuitProofConfig) -> PcsConfig {
     // Compute the trace size
-    let preprocessed_column_log_sizes =
-        layout_from_component_sizes(&(&circuit_proof_config.component_log_sizes).into());
+    let preprocessed_column_log_sizes = layout_from_component_sizes(
+        &(circuit_proof_config.component_log_sizes).to_component_sizes(),
+    );
     let component_sizes = circuit_component_log_sizes(
         &all_circuit_components::<NoValue>(),
         &preprocessed_column_log_sizes,

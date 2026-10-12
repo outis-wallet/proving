@@ -126,13 +126,14 @@ pub fn witness_trace_cells(claim: &CairoClaim, pp_trace: &PreProcessedTrace) -> 
 /// needed.
 pub fn export_preprocessed_roots() {
     let max_log_blowup_factor = 2;
+    let canonical_trace = PreProcessedTraceVariant::Canonical;
 
     // Blake2s roots
     for log_blowup_factor in 1..=max_log_blowup_factor {
         let root = generate_preprocessed_commitment_root::<Blake2sMerkleChannel>(
             log_blowup_factor,
-            PreProcessedTraceVariant::Canonical,
-            0,
+            canonical_trace,
+            canonical_trace.max_log_trace_size(),
         );
         let root_bytes = root.0;
         let u32s_hex = root_bytes
@@ -149,12 +150,13 @@ pub fn export_preprocessed_roots() {
     #[cfg(not(any(target_arch = "wasm32", target_arch = "wasm64")))]
     {
         use stwo::core::vcs_lifted::poseidon252_merkle::Poseidon252MerkleChannel;
+        let no_pedersen_trace = PreProcessedTraceVariant::CanonicalWithoutPedersen;
         // Poseidon252 roots.
         for log_blowup_factor in 1..=max_log_blowup_factor {
             let root = generate_preprocessed_commitment_root::<Poseidon252MerkleChannel>(
                 log_blowup_factor,
-                PreProcessedTraceVariant::CanonicalWithoutPedersen,
-                0,
+                no_pedersen_trace,
+                no_pedersen_trace.max_log_trace_size(),
             );
             println!("log_blowup_factor: {log_blowup_factor}, poseidon root: [{root:#010x}]");
         }
@@ -166,12 +168,13 @@ pub fn export_preprocessed_roots() {
 /// needed.
 pub fn export_circuit_cairo_verifier_preprocessed_roots() {
     let max_log_blowup_factor = 3;
+    let small_trace = PreProcessedTraceVariant::CanonicalSmall;
 
     for log_blowup_factor in 1..=max_log_blowup_factor {
         let root = generate_preprocessed_commitment_root::<Blake2sMerkleChannel>(
             log_blowup_factor,
-            PreProcessedTraceVariant::CanonicalSmall,
-            20 + log_blowup_factor,
+            small_trace,
+            small_trace.max_log_trace_size(),
         );
 
         let root_bytes = root.0;

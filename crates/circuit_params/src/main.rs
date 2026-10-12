@@ -16,9 +16,6 @@
 //!
 //! With `--registry`, instead writes the registry JSON: the params above, the shared target sizes
 //! and every circuit's hash — everything a binary proving these circuits needs.
-//!
-//! Both modes commit the real Cairo preprocessed root per trace size — the most expensive step
-//! here — so the leaf circuits they build are exactly the ones the registry records.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
