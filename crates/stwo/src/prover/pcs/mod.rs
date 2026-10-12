@@ -26,7 +26,9 @@ use crate::prover::fri::{FriDecommitResult, FriProver};
 use crate::prover::mempool::BaseColumnPool;
 use crate::prover::pcs::quotient_ops::compute_fri_quotients;
 use crate::prover::poly::BitReversedOrder;
-use crate::prover::poly::circle::{CircleCoefficients, CircleEvaluation, part_domain};
+use crate::prover::poly::circle::{
+    CircleCoefficients, CircleEvaluation, PolyOps, SecureEvaluation, part_domain,
+};
 use crate::prover::poly::twiddles::TwiddleTree;
 use crate::prover::secure_column::SecureColumnByCoords;
 use crate::prover::vcs_lifted::prover::MerkleProverLifted;
@@ -190,6 +192,88 @@ fn ood_sample_hook<B: ColumnOps<BaseField> + 'static>() -> Option<std::sync::Arc
         .get(&std::any::TypeId::of::<B>())?
         .downcast_ref::<std::sync::Arc<OodSampleHook<B>>>()
         .cloned()
+}
+
+/// [`CommitmentSchemeProver`]'s FRI quotients to compute (as `compute_fri_quotients` takes
+/// them): the committed columns as the trees hold them, their out-of-domain samples, the
+/// random coefficient, the lifting domain's log size, the blowup and the prover's twiddles.
+pub struct FriQuotientsRequest<'a, B: ColumnOps<BaseField> + PolyOps> {
+    pub columns: &'a TreeVec<Vec<&'a CircleEvaluation<B, BaseField, BitReversedOrder>>>,
+    pub samples: &'a TreeVec<Vec<Vec<PointSample>>>,
+    pub random_coeff: SecureField,
+    pub lifting_log_size: u32,
+    pub log_blowup_factor: u32,
+    pub twiddles: &'a TwiddleTree<B>,
+}
+
+/// A replacement for [`CommitmentSchemeProver`]'s computation of the FRI quotients
+/// (`compute_fri_quotients`), on one backend, e.g. on a GPU that still holds the columns'
+/// coefficients. It returns the quotients' evaluation on the lifting domain, or `None`: they are
+/// then computed as without a hook. An answer on another domain is ignored.
+///
+/// A hook must return exactly what `compute_fri_quotients` returns, word for word: FRI commits
+/// to it and the proof depends on it; stwo does not check it (the verifier rejects a proof
+/// built on a wrong value).
+pub type FriQuotientsHook<B> = dyn Fn(&FriQuotientsRequest<'_, B>) -> Option<SecureEvaluation<B, BitReversedOrder>>
+    + Send
+    + Sync;
+
+/// The registered FRI quotients hooks, by backend: `Arc<FriQuotientsHook<B>>`s behind `Any`.
+static FRI_QUOTIENTS_HOOKS: std::sync::RwLock<
+    Option<HashMap<std::any::TypeId, std::sync::Arc<dyn std::any::Any + Send + Sync>>>,
+> = std::sync::RwLock::new(None);
+
+/// Sets the hook [`CommitmentSchemeProver`]'s FRI quotients try first, for backend `B`, or removes
+/// it (`None`). It applies to the proofs from then on, in every thread.
+pub fn set_fri_quotients_hook<B: ColumnOps<BaseField> + PolyOps + 'static>(
+    hook: Option<std::sync::Arc<FriQuotientsHook<B>>>,
+) {
+    let key = std::any::TypeId::of::<B>();
+    let mut hooks = FRI_QUOTIENTS_HOOKS.write().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let hooks = hooks.get_or_insert_with(HashMap::new);
+    match hook {
+        Some(hook) => {
+            hooks.insert(key, std::sync::Arc::new(hook));
+        }
+        None => {
+            hooks.remove(&key);
+        }
+    }
+}
+
+/// The FRI quotients hook registered for backend `B`, if any.
+fn fri_quotients_hook<B: ColumnOps<BaseField> + PolyOps + 'static>()
+-> Option<std::sync::Arc<FriQuotientsHook<B>>> {
+    let hooks = FRI_QUOTIENTS_HOOKS.read().unwrap_or_else(|poisoned| poisoned.into_inner());
+    hooks
+        .as_ref()?
+        .get(&std::any::TypeId::of::<B>())?
+        .downcast_ref::<std::sync::Arc<FriQuotientsHook<B>>>()
+        .cloned()
+}
+
+/// The FRI quotients of `request`: a registered hook's, if it answers on the lifting domain,
+/// otherwise `compute_fri_quotients`'.
+fn fri_quotients<B: BackendForChannel<MC>, MC: MerkleChannel>(
+    request: &FriQuotientsRequest<'_, B>,
+) -> SecureEvaluation<B, BitReversedOrder> {
+    let hooked = fri_quotients_hook::<B>().and_then(|hook| {
+        let _span =
+            span!(Level::INFO, "Compute FRI quotients (hook)", class = "FRIQuotients").entered();
+        let quotients = hook(request)?;
+        let domain = CanonicCoset::new(request.lifting_log_size).circle_domain();
+        (quotients.domain == domain && quotients.values.len() == domain.size()).then_some(quotients)
+    });
+    hooked.unwrap_or_else(|| {
+        compute_fri_quotients(
+            request.columns,
+            request.samples,
+            request.random_coeff,
+            request.lifting_log_size,
+            request.twiddles,
+            request.log_blowup_factor,
+        )
+    })
 }
 
 /// The prover side of a FRI polynomial commitment scheme. See [super].
@@ -540,14 +624,14 @@ impl<'a, B: BackendForChannel<MC>, MC: MerkleChannel> CommitmentSchemeProver<'a,
         let columns = self.evaluations();
         print_column_size_histogram::<B, MC>(&columns);
         // Compute oods quotients for boundary constraints on the sampled points.
-        let quotients = compute_fri_quotients(
-            &columns,
-            &samples,
-            channel.draw_secure_felt(),
+        let quotients = fri_quotients::<B, MC>(&FriQuotientsRequest {
+            columns: &columns,
+            samples: &samples,
+            random_coeff: channel.draw_secure_felt(),
             lifting_log_size,
-            self.twiddles,
-            self.config.fri_config.log_blowup_factor,
-        );
+            log_blowup_factor: self.config.fri_config.log_blowup_factor,
+            twiddles: self.twiddles,
+        });
 
         // Run FRI commitment phase on the oods quotients.
         let fri_prover =
@@ -1407,5 +1491,130 @@ mod ood_sample_hook_tests {
         // Removed.
         set_ood_sample_hook::<SimdBackend>(None);
         assert_eq!(samples(&scheme), cpu);
+    }
+}
+
+#[cfg(test)]
+mod fri_quotients_hook_tests {
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::core::circle::SECURE_FIELD_CIRCLE_GEN;
+    use crate::core::vcs_lifted::blake2_merkle::Blake2sM31MerkleChannel;
+    use crate::prover::backend::simd::SimdBackend;
+    use crate::prover::backend::simd::column::BaseColumn;
+
+    /// This test's requests only (a lifting log size and a blowup no other test proves with),
+    /// so that the hook, which is process-wide, leaves everyone else's quotients alone.
+    const LIFTING_LOG_SIZE: u32 = 17;
+    const LOG_BLOWUP: u32 = 4;
+
+    fn ours(request: &FriQuotientsRequest<'_, SimdBackend>) -> bool {
+        request.lifting_log_size == LIFTING_LOG_SIZE && request.log_blowup_factor == LOG_BLOWUP
+    }
+
+    fn cpu(
+        request: &FriQuotientsRequest<'_, SimdBackend>,
+    ) -> SecureEvaluation<SimdBackend, BitReversedOrder> {
+        compute_fri_quotients(
+            request.columns,
+            request.samples,
+            request.random_coeff,
+            request.lifting_log_size,
+            request.twiddles,
+            request.log_blowup_factor,
+        )
+    }
+
+    fn words(evaluation: &SecureEvaluation<SimdBackend, BitReversedOrder>) -> Vec<Vec<u32>> {
+        evaluation
+            .values
+            .columns
+            .iter()
+            .map(|c| c.as_slice().iter().map(|v| v.0).collect())
+            .collect()
+    }
+
+    #[test]
+    fn hook_quotients_or_declines() {
+        let twiddles = SimdBackend::precompute_twiddles(
+            CanonicCoset::new(LIFTING_LOG_SIZE).circle_domain().half_coset,
+        );
+        let evaluations = [13u32, 11, 13]
+            .iter()
+            .enumerate()
+            .map(|(c, &log_size)| {
+                CircleCoefficients::<SimdBackend>::new(
+                    (0..1u32 << log_size)
+                        .map(|i| {
+                            BaseField::from(
+                                i.wrapping_mul(2_246_822_519).wrapping_add(c as u32) >> 1,
+                            )
+                        })
+                        .collect::<BaseColumn>(),
+                )
+                .evaluate_with_twiddles(
+                    CanonicCoset::new(log_size + LOG_BLOWUP).circle_domain(),
+                    &twiddles,
+                )
+            })
+            .collect_vec();
+        let columns = TreeVec::new(vec![evaluations.iter().collect_vec()]);
+        let point = |k: u128| SECURE_FIELD_CIRCLE_GEN.mul(k * 1_000_003 + 5);
+        let samples = TreeVec::new(vec![
+            (0..3)
+                .map(|c| {
+                    vec![PointSample {
+                        point: point(c % 2),
+                        value: SecureField::from(c as u32 + 7),
+                    }]
+                })
+                .collect_vec(),
+        ]);
+        let request = FriQuotientsRequest {
+            columns: &columns,
+            samples: &samples,
+            random_coeff: SecureField::from(1234u32),
+            lifting_log_size: LIFTING_LOG_SIZE,
+            log_blowup_factor: LOG_BLOWUP,
+            twiddles: &twiddles,
+        };
+        let quotients = |request: &FriQuotientsRequest<'_, SimdBackend>| {
+            words(&fri_quotients::<SimdBackend, Blake2sM31MerkleChannel>(request))
+        };
+        let expected = words(&cpu(&request));
+        assert_eq!(quotients(&request), expected);
+
+        // A hook that answers as the CPU: the same quotients.
+        set_fri_quotients_hook::<SimdBackend>(Some(Arc::new(|request| {
+            ours(request).then(|| cpu(request))
+        })));
+        assert_eq!(quotients(&request), expected);
+
+        // A hook that answers wrong values: different quotients (the verifier would reject).
+        set_fri_quotients_hook::<SimdBackend>(Some(Arc::new(|request| {
+            let mut quotients = ours(request).then(|| cpu(request))?;
+            let first = quotients.values.columns[0].at(0);
+            quotients.values.columns[0].set(0, first + BaseField::from(1u32));
+            Some(quotients)
+        })));
+        assert_ne!(quotients(&request), expected);
+
+        // A hook that answers on another domain, or declines: the CPU's quotients.
+        set_fri_quotients_hook::<SimdBackend>(Some(Arc::new(|request| {
+            let quotients = ours(request).then(|| cpu(request))?;
+            let domain = CanonicCoset::new(LIFTING_LOG_SIZE).circle_domain().split(1).0;
+            let half = quotients.values.columns.map(|column| {
+                column.as_slice()[..domain.size()].iter().copied().collect::<BaseColumn>()
+            });
+            Some(SecureEvaluation::new(domain, SecureColumnByCoords { columns: half }))
+        })));
+        assert_eq!(quotients(&request), expected);
+        set_fri_quotients_hook::<SimdBackend>(Some(Arc::new(|_| None)));
+        assert_eq!(quotients(&request), expected);
+
+        // Removed.
+        set_fri_quotients_hook::<SimdBackend>(None);
+        assert_eq!(quotients(&request), expected);
     }
 }
