@@ -209,3 +209,73 @@ fn kept_stripe1_is_the_cpus() {
     }
     committer.set_parts_mode(PartsMode::Off);
 }
+
+/// Resident mode: every column's stripes 0 and 1, side by side, as constraint evaluation reads
+/// them (stripe 0 the tree's values, stripe 1 the CPU's `trace_part`), a column kept whole too;
+/// stripe 1 still answers `trace_part`; a budget too small keeps nothing.
+#[test]
+fn resident_stripes_are_the_cpus() {
+    use stwo::prover::backend::simd::SimdBackend as B;
+    let committer = GpuCommitter::new().expect("a GPU adapter");
+    let (log_blowup, lifting_log_size) = (3, 17);
+    let log_sizes = [10u32, 11, 12, 12, 13, 14];
+    let twiddles =
+        B::precompute_twiddles(CanonicCoset::new(lifting_log_size).circle_domain().half_coset);
+    let polys = || {
+        log_sizes
+            .iter()
+            .enumerate()
+            .map(|(i, &log_size)| {
+                let mut rng = SmallRng::seed_from_u64(7 + i as u64);
+                CircleCoefficients::<B>::new(
+                    (0..1 << log_size)
+                        .map(|_| BaseField::from_u32_unchecked(rng.random_range(0..P)))
+                        .collect::<BaseColumn>(),
+                )
+            })
+            .collect_vec()
+    };
+    committer.set_parts_mode(PartsMode::Resident);
+    committer.set_parts_budget(None);
+    committer.clear_parts();
+    let tree = committer
+        .commit_striped(polys(), log_blowup, &twiddles, lifting_log_size)
+        .unwrap_or_else(|(_, reason)| panic!("declined: {reason:?}"));
+    for (i, poly) in tree.polynomials.iter().enumerate() {
+        let evals = &poly.evals;
+        let size = 1usize << log_sizes[i];
+        let resident = committer
+            .resident_columns(&[(&evals.values, evals.domain.log_size())], log_blowup)
+            .unwrap_or_else(|| panic!("column {i} resident"))
+            .remove(0);
+        let mut words_back = vec![0u32; 2 * size];
+        let read = committer.gpu().read(&resident.buffer, resident.word_offset as usize + 2 * size);
+        words_back.copy_from_slice(&read[resident.word_offset as usize..]);
+        let stripe0: Vec<u32> = words(&evals.values)[..size].to_vec();
+        let stripe1 = match evals.values.length == evals.domain.size() {
+            true => words(&evals.values)[size..2 * size].to_vec(),
+            false => words(&cpu_part1(evals, log_blowup).0),
+        };
+        assert_eq!(&words_back[..size], &stripe0[..], "column {i}: stripe 0");
+        assert_eq!(&words_back[size..], &stripe1[..], "column {i}: stripe 1");
+        if i > 0 {
+            let answer = committer.trace_part(1, log_blowup, &[(0, evals)]).remove(0);
+            assert_eq!(words(&answer.expect("stripe 1")), stripe1, "column {i}: trace_part");
+        }
+    }
+    // A budget below the tree: nothing kept, every column not resident.
+    committer.clear_parts();
+    committer.set_parts_budget(Some(1 << 10));
+    let tree = committer
+        .commit_striped(polys(), log_blowup, &twiddles, lifting_log_size)
+        .unwrap_or_else(|(_, reason)| panic!("declined: {reason:?}"));
+    let evals = &tree.polynomials[3].evals;
+    assert!(
+        committer
+            .resident_columns(&[(&evals.values, evals.domain.log_size())], log_blowup)
+            .is_none()
+    );
+    assert_eq!(committer.take_part_stats().over_budget, 1);
+    committer.set_parts_budget(None);
+    committer.set_parts_mode(PartsMode::Off);
+}

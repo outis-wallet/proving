@@ -283,36 +283,39 @@ impl GpuCommitter {
                     );
                     // Stripe 1 kept for constraint evaluation, as the mode says.
                     let with_stripe0 = parts_mode == PartsMode::Resident;
-                    let device_stripes = matches!(parts_mode, PartsMode::Device | PartsMode::Resident)
-                        .then(|| {
-                            let limits = self.gpu.device.limits();
-                            // Resident: one storage binding per buffer (a tree in one, if it
-                            // fits, for the constraint kernels to bind).
-                            let max_bytes = match with_stripe0 {
-                                true => limits
-                                    .max_buffer_size
-                                    .min(limits.max_storage_buffer_binding_size)
-                                    / 256
-                                    * 256,
-                                false => limits.max_buffer_size.min(1 << 30),
-                            };
-                            let bytes = DeviceStripes::planned_bytes(
-                                &log_sizes,
-                                log_blowup_factor,
-                                max_bytes,
-                                with_stripe0,
-                            );
-                            parts.fits(bytes).then(|| {
-                                DeviceStripes::new(
-                                    &self.gpu,
+                    let device_stripes =
+                        matches!(parts_mode, PartsMode::Device | PartsMode::Resident)
+                            .then(|| {
+                                let limits = self.gpu.device.limits();
+                                // Resident: one storage binding per buffer (a tree in one, if it
+                                // fits, for the constraint kernels to bind).
+                                let max_bytes = match with_stripe0 {
+                                    true => {
+                                        limits
+                                            .max_buffer_size
+                                            .min(limits.max_storage_buffer_binding_size)
+                                            / 256
+                                            * 256
+                                    }
+                                    false => limits.max_buffer_size.min(1 << 30),
+                                };
+                                let bytes = DeviceStripes::planned_bytes(
                                     &log_sizes,
                                     log_blowup_factor,
                                     max_bytes,
                                     with_stripe0,
-                                )
+                                );
+                                parts.fits(bytes).then(|| {
+                                    DeviceStripes::new(
+                                        &self.gpu,
+                                        &log_sizes,
+                                        log_blowup_factor,
+                                        max_bytes,
+                                        with_stripe0,
+                                    )
+                                })
                             })
-                        })
-                        .flatten();
+                            .flatten();
                     let keep = match (parts_mode, &device_stripes) {
                         (PartsMode::Host, _) => KeepStripe1::Host,
                         (_, Some(stripes)) => KeepStripe1::Device(stripes),

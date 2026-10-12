@@ -199,6 +199,7 @@ impl ConstraintKernels {
     }
 
     /// The bind group of a run: `trees` in the table's `interactions` order.
+    #[allow(clippy::too_many_arguments)]
     pub fn bind_group(
         &self,
         gpu: &GpuContext,
@@ -246,13 +247,12 @@ impl ConstraintKernels {
     ) {
         let (x, y) = self.workgroups(eval_log);
         for (k, pipeline) in self.pipelines.iter().enumerate() {
-            let timestamp_writes = queries.map(|(query_set, first)| {
-                wgpu::ComputePassTimestampWrites {
+            let timestamp_writes =
+                queries.map(|(query_set, first)| wgpu::ComputePassTimestampWrites {
                     query_set,
                     beginning_of_pass_write_index: Some(first + 2 * k as u32),
                     end_of_pass_write_index: Some(first + 2 * k as u32 + 1),
-                }
-            });
+                });
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("constraint eval"),
                 timestamp_writes,
@@ -306,7 +306,11 @@ impl ConstraintKernels {
                 for j in 0..k {
                     let column = columns[i as usize][j];
                     assert_eq!(column.len(), n, "a column on the evaluation domain");
-                    gpu.queue.write_buffer(&buffer, (j * n * 4) as u64, bytemuck::cast_slice(column));
+                    gpu.queue.write_buffer(
+                        &buffer,
+                        (j * n * 4) as u64,
+                        bytemuck::cast_slice(column),
+                    );
                     offsets[self.table.index(i, j as u32)] = (j * n) as u32;
                 }
                 buffer
@@ -353,25 +357,26 @@ impl ConstraintKernels {
         eval_log: u32,
     ) -> (Option<Duration>, Duration) {
         let count = 2 * self.pipelines.len() as u32;
-        let timestamps = gpu.device.features().contains(wgpu::Features::TIMESTAMP_QUERY).then(|| {
-            let query_set = gpu.device.create_query_set(&wgpu::QuerySetDescriptor {
-                label: Some("constraint eval timestamps"),
-                ty: wgpu::QueryType::Timestamp,
-                count,
+        let timestamps =
+            gpu.device.features().contains(wgpu::Features::TIMESTAMP_QUERY).then(|| {
+                let query_set = gpu.device.create_query_set(&wgpu::QuerySetDescriptor {
+                    label: Some("constraint eval timestamps"),
+                    ty: wgpu::QueryType::Timestamp,
+                    count,
+                });
+                let buffer = |usage| {
+                    gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                        label: None,
+                        size: 8 * count as u64,
+                        usage,
+                        mapped_at_creation: false,
+                    })
+                };
+                let resolve =
+                    buffer(wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC);
+                let readback = buffer(wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST);
+                (query_set, resolve, readback)
             });
-            let buffer = |usage| {
-                gpu.device.create_buffer(&wgpu::BufferDescriptor {
-                    label: None,
-                    size: 8 * count as u64,
-                    usage,
-                    mapped_at_creation: false,
-                })
-            };
-            let resolve =
-                buffer(wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC);
-            let readback = buffer(wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST);
-            (query_set, resolve, readback)
-        });
         let mut encoder = gpu.device.create_command_encoder(&Default::default());
         self.encode(&mut encoder, bind_group, eval_log, timestamps.as_ref().map(|t| (&t.0, 0)));
         if let Some((query_set, resolve, readback)) = &timestamps {
@@ -397,7 +402,11 @@ impl ConstraintKernels {
     pub fn reset_out(&self, gpu: &GpuContext, inputs: &GpuInputs, accum: &[&[u32]; 4]) {
         let n = 1usize << inputs.eval_log;
         for (c, coordinate) in accum.iter().enumerate() {
-            gpu.queue.write_buffer(&inputs.out, (c * n * 4) as u64, bytemuck::cast_slice(coordinate));
+            gpu.queue.write_buffer(
+                &inputs.out,
+                (c * n * 4) as u64,
+                bytemuck::cast_slice(coordinate),
+            );
         }
         gpu.queue.submit([]);
         gpu.device.poll(wgpu::PollType::wait_indefinitely()).expect("poll");
@@ -409,7 +418,8 @@ pub fn read_timestamps(gpu: &GpuContext, readback: &wgpu::Buffer, count: u32) ->
     let slice = readback.slice(..);
     slice.map_async(wgpu::MapMode::Read, |result| result.expect("map"));
     gpu.device.poll(wgpu::PollType::wait_indefinitely()).expect("poll");
-    let ticks: Vec<u64> = bytemuck::cast_slice(&slice.get_mapped_range().expect("mapped")[..]).to_vec();
+    let ticks: Vec<u64> =
+        bytemuck::cast_slice(&slice.get_mapped_range().expect("mapped")[..]).to_vec();
     readback.unmap();
     let period = gpu.queue.get_timestamp_period() as f64;
     let ns: f64 = (0..count as usize / 2)

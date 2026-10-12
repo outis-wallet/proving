@@ -684,7 +684,13 @@ impl StreamedCommitment {
                 if let KeepStripe1::Device(stripes) = &keep
                     && (stripe == 1 || (stripe == 0 && stripes.with_stripe0))
                 {
-                    stripes.encode_copies(&mut encoder, &self.top_reads(), 0, &self.log_sizes, stripe);
+                    stripes.encode_copies(
+                        &mut encoder,
+                        &self.top_reads(),
+                        0,
+                        &self.log_sizes,
+                        stripe,
+                    );
                 }
                 gpu.queue.submit([encoder.finish()]);
                 if stripe == 0 {

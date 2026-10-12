@@ -10,8 +10,9 @@
 //! - 1: `coeffs: array<vec4<u32>>`, constraint `i`'s random coefficient at `i`;
 //! - 2: `denom_inv: array<u32>`;
 //! - 3: `out: array<u32>`, read-write, coordinate `c` of row `r` at `c * n + r`;
-//! - 4: `info: array<u32>` ("meta" is reserved in WGSL): `n` (the evaluation domain's size), the trace's log size, the
-//!   evaluation domain's log size, 0, then the columns' word offsets (see [`ColumnTable`]);
+//! - 4: `info: array<u32>` ("meta" is reserved in WGSL): `n` (the evaluation domain's size), the
+//!   trace's log size, the evaluation domain's log size, 0, then the columns' word offsets (see
+//!   [`ColumnTable`]);
 //! - 5 + k: `tree_<i>: array<u32>`, the buffer of the columns of interaction `i =
 //!   ColumnTable::interactions[k]`: column `j`'s row `r` (bit-reversed, on the whole evaluation
 //!   domain) at `info[4 + ColumnTable::index(i, j)] + r`.
@@ -137,7 +138,9 @@ pub fn emit(
             Ty::Base => {
                 format!("    acc = m31_add4(acc, qm31_mul_m31(coeffs[{i}], {}));\n", operand(id))
             }
-            Ty::Ext => format!("    acc = m31_add4(acc, qm31_mul(coeffs[{i}], {}));\n", operand(id)),
+            Ty::Ext => {
+                format!("    acc = m31_add4(acc, qm31_mul(coeffs[{i}], {}));\n", operand(id))
+            }
         }
     };
 
@@ -154,16 +157,20 @@ pub fn emit(
             .unwrap();
     }
     writeln!(s, "\n@compute @workgroup_size({workgroup_size})").unwrap();
-    s += "fn main(@builtin(global_invocation_id) gid: vec3<u32>, \
-          @builtin(num_workgroups) nwg: vec3<u32>) {\n";
+    s += "fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) nwg: \
+          vec3<u32>) {\n";
     s += "    let n = info[0];\n";
     writeln!(s, "    let row = gid.x + gid.y * nwg.x * {workgroup_size}u;").unwrap();
     s += "    if (row >= n) {\n        return;\n    }\n";
     s += "    let trace_log = info[1];\n";
     s += "    let eval_log = info[2];\n";
     for offset in program.offsets() {
-        writeln!(s, "    let {} = offset_row(row, trace_log, eval_log, {offset});", offset_name(offset))
-            .unwrap();
+        writeln!(
+            s,
+            "    let {} = offset_row(row, trace_log, eval_log, {offset});",
+            offset_name(offset)
+        )
+        .unwrap();
     }
     s += "    var acc = vec4<u32>(0u);\n";
     for &id in &row_nodes {

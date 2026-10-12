@@ -352,7 +352,8 @@ impl GpuComposer {
         for path in files {
             let Ok(text) = fs::read_to_string(&path) else { continue };
             let Some((first, rest)) = text.split_once('\n') else { continue };
-            let (Some(key), Ok(program)) = (KernelKey::parse(first), Program::from_text(rest)) else {
+            let (Some(key), Ok(program)) = (KernelKey::parse(first), Program::from_text(rest))
+            else {
                 continue;
             };
             if program.constraints.len() != key.n_constraints {
@@ -544,7 +545,11 @@ impl GpuComposer {
                 &uniforms,
                 &coeffs,
                 &denom,
-                wgpu::BufferBinding { buffer: &out, offset: 0, size: wgpu::BufferSize::new(out_bytes) },
+                wgpu::BufferBinding {
+                    buffer: &out,
+                    offset: 0,
+                    size: wgpu::BufferSize::new(out_bytes),
+                },
                 &info,
                 &tree_refs,
             );
@@ -613,7 +618,8 @@ impl GpuComposer {
                 }
                 if different > 0 || raw_different > 0 {
                     eprintln!(
-                        "constraint shadow: {name}: {different} words differ ({raw_different} as stored)"
+                        "constraint shadow: {name}: {different} words differ ({raw_different} as \
+                         stored)"
                     );
                 }
                 let mut stats = lock(&stats);
