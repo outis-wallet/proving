@@ -1010,3 +1010,164 @@ impl StripeExtension {
         gpu.queue.submit([encoder.finish()]);
     }
 }
+
+/// The extension of a tree whose columns go to the GPU a group at a time (the buffers of a
+/// [`ColumnsLayout`] are the groups; see [`crate::stream`]): every stripe of a group's columns at
+/// once. The group's coefficients are in `coeffs` (at the layout's offsets in its buffer), the
+/// evaluations of stripe `s` go to the slot of `out` at word `s * slot_words` (at the same
+/// offsets), and the twiddles of every stripe are in one [`StripeTwiddles`]. The dispatches are
+/// merged: one per pass, of every batch of the group and every stripe (up to [`MAX_MERGED`] of
+/// them a dispatch), so that even a group of small columns fills the GPU.
+pub struct GroupedExtension {
+    /// Per group.
+    groups: Vec<Vec<Dispatch>>,
+    _params: wgpu::Buffer,
+    /// Out of place, in place.
+    bind_groups: [wgpu::BindGroup; 2],
+}
+
+impl GroupedExtension {
+    pub fn new(
+        gpu: &GpuContext,
+        kernels: &ExtensionKernels,
+        layout: &ColumnsLayout,
+        coeffs: &wgpu::Buffer,
+        out: &wgpu::Buffer,
+        slot_words: u64,
+        twiddles: &StripeTwiddles,
+    ) -> Self {
+        assert!(twiddles.covers(&layout.log_sizes()), "twiddles missing for some log sizes");
+        let n_stripes = twiddles.n_stripes() as u64;
+        let max_group = layout.buffer_words.iter().copied().max().unwrap_or(0);
+        assert!(max_group <= slot_words && slot_words.is_multiple_of(BATCH_ALIGN_WORDS));
+        assert!(coeffs.size() >= max_group * 4, "the coefficients' buffer is too small");
+        assert!(out.size() >= n_stripes * slot_words * 4, "the evaluations' buffer is too small");
+        assert!(n_stripes * slot_words < 1 << 32 && twiddles.stripe_words * n_stripes < 1 << 32);
+
+        let mut merged_params: Vec<MergedParams> = vec![];
+        let mut groups = vec![];
+        for group in 0..layout.buffer_words.len() {
+            // Every pass of every (batch, stripe) of the group: (pass, its parameters).
+            let mut items = vec![];
+            for batch in layout.batches.iter().filter(|batch| batch.buffer == group) {
+                let log_size = batch.log_size;
+                let total = batch.n_words();
+                let n_wg = total.div_ceil(1 << TILE_LOG) as u32;
+                for stripe in 0..n_stripes {
+                    for (k, pass) in passes(log_size).into_iter().enumerate() {
+                        let params = Params {
+                            log_n: log_size,
+                            lo: pass.lo,
+                            hi: pass.hi,
+                            c: pass.c,
+                            total: total as u32,
+                            src_base: batch.offset as u32,
+                            dst_base: (stripe * slot_words + batch.offset) as u32,
+                            tw_base: (stripe * twiddles.stripe_words) as u32
+                                + twiddles.offsets[&log_size] as u32,
+                            transposed: u32::from(k == 0 && log_size > CACHED_FFT_LOG_SIZE),
+                            n_wg_x: 0,
+                            n_wg,
+                            pad: [0; 5],
+                        };
+                        items.push((k, params));
+                    }
+                }
+            }
+            // The k-th passes, MAX_MERGED to a dispatch; a batch's passes stay in order.
+            let max_passes = items.iter().map(|&(k, _)| k + 1).max().unwrap_or(0);
+            let mut dispatches = vec![];
+            for k in 0..max_passes {
+                let pass_items = items.iter().filter(|&&(kk, _)| kk == k).collect::<Vec<_>>();
+                for chunk in pass_items.chunks(MAX_MERGED) {
+                    let mut m = MergedParams::zeroed();
+                    let mut n_wg = 0u32;
+                    for (j, &&(_, p)) in chunk.iter().enumerate() {
+                        m.batches[j] = Params { pad: [n_wg, 0, 0, 0, 0], ..p };
+                        n_wg = n_wg.checked_add(p.n_wg).unwrap();
+                    }
+                    let workgroups = kernels.grid(n_wg);
+                    m.n_wg_x = workgroups.0;
+                    m.n_wg = n_wg;
+                    m.n_batches = chunk.len() as u32;
+                    dispatches.push(Dispatch {
+                        kind: Kind { in_place: k > 0, merged: true },
+                        buffer: 0,
+                        params_offset: (merged_params.len() as u64 * kernels.merged_stride) as u32,
+                        workgroups,
+                    });
+                    merged_params.push(m);
+                }
+            }
+            groups.push(dispatches);
+        }
+
+        let stride = kernels.merged_stride as usize;
+        let size = size_of::<MergedParams>();
+        let mut bytes = vec![0u8; (merged_params.len() * stride).max(stride.max(size))];
+        for (i, p) in merged_params.iter().enumerate() {
+            bytes[i * stride..i * stride + size].copy_from_slice(bytemuck::bytes_of(p));
+        }
+        let params = gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("grouped extension params"),
+            contents: &bytes,
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+        let params_binding = wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+            buffer: &params,
+            offset: 0,
+            size: wgpu::BufferSize::new(size as u64),
+        });
+        let bind_group = |in_place: bool| {
+            let kind = Kind { in_place, merged: true };
+            let entry = |binding, resource| wgpu::BindGroupEntry { binding, resource };
+            let mut entries = vec![];
+            if !in_place {
+                entries.push(entry(0, coeffs.as_entire_binding()));
+            }
+            entries.push(entry(1, out.as_entire_binding()));
+            entries.push(entry(2, twiddles.buffer.as_entire_binding()));
+            entries.push(entry(3, params_binding.clone()));
+            gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("grouped extension"),
+                layout: &kernels.pipelines[kind.index()].1,
+                entries: &entries,
+            })
+        };
+        let bind_groups = [bind_group(false), bind_group(true)];
+        Self { groups, _params: params, bind_groups }
+    }
+
+    pub fn n_groups(&self) -> usize {
+        self.groups.len()
+    }
+
+    /// The dispatches of every group.
+    pub fn n_dispatches(&self) -> usize {
+        self.groups.iter().map(Vec::len).sum()
+    }
+
+    /// Records the evaluation of every stripe of group `group`'s columns (its coefficients in
+    /// place) into `pass` (whose pipeline and bind group it changes).
+    pub fn record(
+        &self,
+        kernels: &ExtensionKernels,
+        pass: &mut wgpu::ComputePass<'_>,
+        group: usize,
+    ) {
+        let mut current = None;
+        for dispatch in &self.groups[group] {
+            let kind = dispatch.kind.index();
+            if current != Some(kind) {
+                pass.set_pipeline(&kernels.pipelines[kind].0);
+                current = Some(kind);
+            }
+            pass.set_bind_group(
+                0,
+                &self.bind_groups[usize::from(dispatch.kind.in_place)],
+                &[dispatch.params_offset],
+            );
+            pass.dispatch_workgroups(dispatch.workgroups.0, dispatch.workgroups.1, 1);
+        }
+    }
+}

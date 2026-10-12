@@ -636,6 +636,7 @@ impl StateBuffers {
 pub struct Plan {
     steps: Vec<(wgpu::ComputePipeline, wgpu::BindGroup, (u32, u32, u32))>,
     _uniforms: Option<wgpu::Buffer>,
+    _extra_uniforms: Option<wgpu::Buffer>,
 }
 
 impl Plan {
@@ -757,16 +758,17 @@ impl GpuMerkle {
         n.min(u32::MAX as u64) as u32
     }
 
-    /// The batches as dispatched: a batch larger than a binding is split at column boundaries.
-    fn dispatch_batches<'a>(&self, batches: &[ColumnBatch<'a>]) -> Vec<ColumnBatch<'a>> {
+    /// The batches as dispatched, each with the index of the batch it comes from: a batch
+    /// larger than a binding is split at column boundaries.
+    fn dispatch_batches<'a>(&self, batches: &[ColumnBatch<'a>]) -> Vec<(usize, ColumnBatch<'a>)> {
         let mut split = vec![];
-        for batch in batches {
+        for (origin, batch) in batches.iter().enumerate() {
             let max = self.max_columns_per_dispatch(batch.log_size);
             let mut first = 0;
             while first < batch.n_columns {
                 let n_columns = (batch.n_columns - first).min(max);
                 let word_offset = batch.word_offset + ((first as u64) << batch.log_size);
-                split.push(ColumnBatch { word_offset, n_columns, ..*batch });
+                split.push((origin, ColumnBatch { word_offset, n_columns, ..*batch }));
                 first += n_columns;
             }
         }
@@ -798,8 +800,30 @@ impl GpuMerkle {
         layout: &TreeLayout,
         stripe: u32,
     ) -> Plan {
+        let (per_batch, rest) = self.plan_stripe_split(gpu, batches, states, tree, layout, stripe);
+        let mut steps = per_batch.into_iter().flat_map(|plan| plan.steps).collect::<Vec<_>>();
+        steps.extend(rest.steps);
+        Plan { steps, _uniforms: rest._uniforms, _extra_uniforms: rest._extra_uniforms }
+    }
+
+    /// [`Self::plan_stripe`]'s dispatches, split: per batch of `batches`, the ones that absorb
+    /// it (to record once its columns are in place, after the previous batch's); and then the
+    /// others (a final dispatch without columns, if the tree is taller than its largest column,
+    /// and the levels of the subtree).
+    pub fn plan_stripe_split(
+        &self,
+        gpu: &GpuContext,
+        batches: &[ColumnBatch<'_>],
+        states: &StateBuffers,
+        tree: &wgpu::Buffer,
+        layout: &TreeLayout,
+        stripe: u32,
+    ) -> (Vec<Plan>, Plan) {
         assert!(stripe < 1 << layout.log_n_stripes);
-        let batches = &self.dispatch_batches(batches);
+        let n_batches = batches.len();
+        let (origins, batches): (Vec<usize>, Vec<ColumnBatch<'_>>) =
+            self.dispatch_batches(batches).into_iter().unzip();
+        let batches = &batches;
         let height = layout.stripe_height;
         let shapes: Vec<(u32, u32)> = batches.iter().map(|b| (b.log_size, b.n_columns)).collect();
         let schedule = absorb_schedule(&shapes, height);
@@ -857,7 +881,15 @@ impl GpuMerkle {
         }
         let uniforms = self.uniforms(gpu, &params);
 
-        let mut steps = vec![];
+        let mut per_batch = (0..n_batches)
+            .map(|_| Plan {
+                steps: vec![],
+                _uniforms: Some(uniforms.clone()),
+                _extra_uniforms: None,
+            })
+            .collect::<Vec<_>>();
+        let mut rest =
+            Plan { steps: vec![], _uniforms: Some(uniforms.clone()), _extra_uniforms: None };
         for (k, (step, ((cols, cols_offset, cols_size), state_in, state_out))) in
             schedule.iter().zip(bindings).enumerate()
         {
@@ -881,13 +913,17 @@ impl GpuMerkle {
                 last,
             ];
             let bind_group = self.bind_group(gpu, pipeline, &entries);
-            steps.push((pipeline.clone(), bind_group, workgroups(1 << step.log_rows)));
+            let plan = match step.batch {
+                Some(i) => &mut per_batch[origins[i]],
+                None => &mut rest,
+            };
+            plan.steps.push((pipeline.clone(), bind_group, workgroups(1 << step.log_rows)));
         }
-        let mut plan = Plan { steps, _uniforms: Some(uniforms) };
         // The levels of the subtree above the workgroups'.
         let levels = self.plan_levels(gpu, tree, layout, fused_levels, height, Some(stripe));
-        plan.steps.extend(levels.steps);
-        plan
+        rest.steps.extend(levels.steps);
+        rest._extra_uniforms = levels._uniforms;
+        (per_batch, rest)
     }
 
     /// The dispatches that hash the levels of the whole tree above the stripes' roots
@@ -930,7 +966,7 @@ impl GpuMerkle {
             level += levels;
         }
         if params.is_empty() {
-            return Plan { steps: vec![], _uniforms: None };
+            return Plan { steps: vec![], _uniforms: None, _extra_uniforms: None };
         }
         let uniforms = self.uniforms(gpu, &params);
         let steps = params
@@ -945,7 +981,7 @@ impl GpuMerkle {
                 (self.nodes.clone(), bind_group, workgroups(p.n_out as u64))
             })
             .collect();
-        Plan { steps, _uniforms: Some(uniforms) }
+        Plan { steps, _uniforms: Some(uniforms), _extra_uniforms: None }
     }
 
     /// Every level of the tree, read back: the hashes of the stored levels, an empty vector for

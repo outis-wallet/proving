@@ -7,6 +7,8 @@
 //!
 //! The full-size Cairo and circuit trees run with `STWO_GPU_SPIKE_FULL=1` (slow on lavapipe).
 
+use std::sync::Arc;
+
 use itertools::Itertools;
 use rand::rngs::SmallRng;
 use rand::{Rng, SeedableRng};
@@ -23,14 +25,17 @@ use stwo::prover::poly::circle::{CircleCoefficients, PolyOps};
 use stwo::prover::poly::twiddles::TwiddleTree;
 use stwo_gpu_spike::GpuContext;
 use stwo_gpu_spike::commit::{
-    CommitKernels, CommitOptions, StripedCommitment, commit_striped, kept_whole, takes_striped_path,
+    CommitBuffers, CommitKernels, CommitOptions, StripedCommitment, commit_striped, kept_whole,
+    takes_striped_path,
 };
 use stwo_gpu_spike::committer::{Declined, GpuCommitter};
-use stwo_gpu_spike::extension::Merge;
+use stwo_gpu_spike::extension::{Merge, StripeTwiddles};
 use stwo_gpu_spike::shapes::{
     CAIRO_LIFTING_LOG_SIZE, CAIRO_LOG_BLOWUP, CIRCUIT_LIFTING_LOG_SIZE, CIRCUIT_LOG_BLOWUP,
-    base_trace_log_sizes, cairo_pay_components,
+    base_trace_log_sizes, cairo_pay_components, interaction_trace_log_sizes,
 };
+use stwo_gpu_spike::stream::StreamedCommitment;
+use stwo_gpu_spike::transfer::{ReadbackRing, UploadRing};
 
 type TreeProver = CommitmentTreeProver<SimdBackend, Blake2sM31MerkleChannel>;
 
@@ -425,4 +430,143 @@ fn committer_reuses_across_shapes() {
             times.total,
         );
     }
+}
+
+/// The streamed commitment (groups of columns, every stripe of a group at once) of random
+/// polynomials of `log_sizes` against `new_striped`'s, in groups of `group_words` words (several
+/// sizes: groups of many sizes, sizes straddling groups, a group per column).
+fn check_streamed(
+    gpu: &GpuContext,
+    kernels: &CommitKernels,
+    log_sizes: &[u32],
+    log_blowup: u32,
+    lifting_log_size: u32,
+    group_words: &[u64],
+    seed: u64,
+) {
+    let polys = random_polys(log_sizes, seed);
+    let twiddles = twiddles(lifting_log_size);
+    let cpu = cpu_commit(&polys, log_blowup, &twiddles, lifting_log_size);
+    let distinct = log_sizes.iter().copied().collect();
+    let table = Arc::new(StripeTwiddles::new(gpu, &distinct, log_blowup, &twiddles));
+    let mut buffers = CommitBuffers::new();
+    // Small chunks, so that the rings go round many times.
+    let mut upload = UploadRing::new(gpu, 1 << 16, 2);
+    let mut readback = ReadbackRing::new(gpu, 1 << 18, 3);
+    // The largest group the device binds every stripe's slot of.
+    let max_words = stwo_gpu_spike::extension::max_buffer_words(gpu) >> log_blowup;
+    // The largest columns that go in groups (the largest size goes stripe by stripe if it is the
+    // stripes' height).
+    let max = *log_sizes.iter().max().unwrap();
+    let grouped = log_sizes
+        .iter()
+        .copied()
+        .filter(|&l| l != max || max + log_blowup != lifting_log_size)
+        .max()
+        .unwrap_or(4);
+    for &words in group_words {
+        let words = words.max(1 << grouped).min(max_words / 64 * 64);
+        let mut upload_big;
+        let mut readback_big;
+        let (upload, readback) = if words * 4 > readback.chunk_bytes() {
+            upload_big = UploadRing::new(gpu, words * 4, 2);
+            readback_big = ReadbackRing::new(gpu, words * 4, 3);
+            (&mut upload_big, &mut readback_big)
+        } else {
+            (&mut upload, &mut readback)
+        };
+        let commitment = StreamedCommitment::with_buffers(
+            gpu,
+            kernels,
+            &mut buffers,
+            table.clone(),
+            log_sizes,
+            log_blowup,
+            lifting_log_size,
+            words,
+        );
+        let output = commitment.commit(gpu, kernels, upload, readback, &polys);
+        let gpu_tree = commitment.tree_prover(output);
+        let what = format!(
+            "streamed: {} columns, log sizes {:?}, blowup {log_blowup}, lifting \
+             {lifting_log_size}, groups of {words} words",
+            log_sizes.len(),
+            log_sizes.iter().copied().sorted().dedup().collect_vec(),
+        );
+        assert_trees_eq(&gpu_tree, &cpu, &what);
+        eprintln!("ok: {what}: {} groups", commitment.n_groups());
+    }
+}
+
+#[test]
+fn streamed_cairo_shapes_scaled() {
+    let gpu = GpuContext::new();
+    let kernels = CommitKernels::new(&gpu);
+    for scale in [3, 8] {
+        let log_sizes = base_trace_log_sizes(&cairo_pay_components(), scale, 4);
+        let lifting_log_size = CAIRO_LIFTING_LOG_SIZE - scale;
+        check_streamed(
+            &gpu,
+            &kernels,
+            &log_sizes,
+            CAIRO_LOG_BLOWUP,
+            lifting_log_size,
+            &[1 << 10, 1 << 14, 1 << 18, 1 << 30],
+            900 + scale as u64,
+        );
+    }
+}
+
+#[test]
+fn streamed_circuit_and_small_shapes() {
+    let gpu = GpuContext::new();
+    let kernels = CommitKernels::new(&gpu);
+    let mut log_sizes = vec![];
+    for (log_size, n) in [(17, 21), (16, 9), (15, 35), (14, 3), (13, 50), (11, 7), (8, 19), (4, 5)]
+    {
+        log_sizes.extend(std::iter::repeat_n(log_size, n));
+    }
+    let mut rng = SmallRng::seed_from_u64(910);
+    for i in (1..log_sizes.len()).rev() {
+        log_sizes.swap(i, rng.random_range(0..=i));
+    }
+    check_streamed(&gpu, &kernels, &log_sizes, 2, 19, &[1 << 12, 1 << 17, 1 << 20], 911);
+    // Taller than its columns; the smallest stripes, blowup 4; blowup 1.
+    let cairo = base_trace_log_sizes(&cairo_pay_components(), 9, 4);
+    let max = *cairo.iter().max().unwrap();
+    check_streamed(&gpu, &kernels, &cairo, 3, max + 3 + 2, &[1 << 12, 1 << 16], 912);
+    let small = [vec![4; 20], vec![10; 3], vec![7; 5], vec![5; 1], vec![9; 17]].concat();
+    check_streamed(&gpu, &kernels, &small, 4, 14, &[1 << 10, 1 << 13], 913);
+    let two = [vec![13; 2], vec![4; 3], vec![12; 18], vec![8; 1]].concat();
+    check_streamed(&gpu, &kernels, &two, 1, 14, &[1 << 13, 1 << 16], 914);
+}
+
+#[test]
+fn streamed_full_shapes() {
+    if !full() {
+        eprintln!("skipped: STWO_GPU_SPIKE_FULL=1 runs it");
+        return;
+    }
+    let gpu = GpuContext::new();
+    let kernels = CommitKernels::new(&gpu);
+    let log_sizes = base_trace_log_sizes(&cairo_pay_components(), 0, 4);
+    check_streamed(
+        &gpu,
+        &kernels,
+        &log_sizes,
+        CAIRO_LOG_BLOWUP,
+        CAIRO_LIFTING_LOG_SIZE,
+        &[1 << 23, 1 << 21],
+        920,
+    );
+    let interaction = interaction_trace_log_sizes(&cairo_pay_components(), 0, 4);
+    check_streamed(
+        &gpu,
+        &kernels,
+        &interaction,
+        CAIRO_LOG_BLOWUP,
+        CAIRO_LIFTING_LOG_SIZE,
+        &[1 << 23],
+        921,
+    );
 }

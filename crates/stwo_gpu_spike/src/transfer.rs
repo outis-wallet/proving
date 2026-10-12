@@ -216,6 +216,11 @@ impl UploadRing {
         self.chunk * self.slots.len() as u64
     }
 
+    /// The bytes of a chunk.
+    pub fn chunk_bytes(&self) -> u64 {
+        self.chunk
+    }
+
     /// Writes every piece into its buffer: chunk by chunk, each filled by all the CPU's threads
     /// and then copied into place by its own submission. The writes are submitted when this
     /// returns (not necessarily done): later submissions see them.
@@ -280,7 +285,19 @@ impl UploadRing {
 /// docs).
 pub struct ReadbackRing {
     slots: Vec<Slot>,
+    /// Per slot: whether a readback holds it (started, not finished).
+    taken: Vec<bool>,
     chunk: u64,
+}
+
+/// A chunk being read back (see [`ReadbackRing::start`]).
+#[must_use = "a chunk read back stays taken until it is finished"]
+pub struct Ticket {
+    slot: usize,
+    /// The bytes of the chunk read back.
+    bytes: u64,
+    /// The chunk offsets of the ranges read, in order.
+    offsets: Vec<u64>,
 }
 
 impl ReadbackRing {
@@ -289,7 +306,7 @@ impl ReadbackRing {
         assert!(depth > 0 && chunk > 0 && chunk.is_multiple_of(wgpu::COPY_BUFFER_ALIGNMENT));
         let usage = wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST;
         let slots = (0..depth).map(|_| Slot::new(gpu, "readback chunk", chunk, usage)).collect();
-        Self { slots, chunk }
+        Self { slots, taken: vec![false; depth], chunk }
     }
 
     /// With [`DEFAULT_CHUNK_BYTES`] and [`DEFAULT_READBACK_DEPTH`].
@@ -302,10 +319,103 @@ impl ReadbackRing {
         self.chunk * self.slots.len() as u64
     }
 
+    /// The bytes of a chunk.
+    pub fn chunk_bytes(&self) -> u64 {
+        self.chunk
+    }
+
+    /// Whether a chunk is free (see [`Self::start`]).
+    pub fn has_free_chunk(&self) -> bool {
+        self.taken.contains(&false)
+    }
+
+    /// Starts the copy of `ranges` (`(buffer, offset, bytes)`, at most a chunk in all) into a free
+    /// chunk, after all the work submitted before, in a submission of its own. Panics if no
+    /// chunk is free: [`Self::finish`] one first.
+    pub fn start(&mut self, gpu: &GpuContext, ranges: &[(&wgpu::Buffer, u64, u64)]) -> Ticket {
+        let (buffers, indices) = buffer_indices(ranges.iter().map(|range| range.0));
+        let mut fill = 0;
+        let runs = ranges
+            .iter()
+            .zip(indices)
+            .enumerate()
+            .map(|(piece, (&(_, offset, len), buffer))| {
+                let run = Run { chunk_offset: fill, buffer, offset, len, piece, piece_offset: 0 };
+                fill += len;
+                run
+            })
+            .collect::<Vec<_>>();
+        assert!(fill <= self.chunk, "{fill} bytes to read back exceed a chunk");
+        let offsets = runs.iter().map(|run| run.chunk_offset).collect();
+        let slot = self.start_runs(gpu, &buffers, &runs);
+        Ticket { slot, bytes: fill, offsets }
+    }
+
+    /// Waits for `ticket`'s chunk and copies it out, by every thread: `dsts[i]` takes the bytes
+    /// of the ticket's `i`-th range (as long). The chunk is free again.
+    pub fn finish(&mut self, gpu: &GpuContext, ticket: Ticket, dsts: Vec<&mut [u8]>) {
+        assert_eq!(dsts.len(), ticket.offsets.len());
+        let parts = ticket.offsets.iter().map(|&offset| offset as usize).zip(dsts).collect();
+        self.finish_runs(gpu, ticket.slot, ticket.bytes, parts);
+    }
+
+    /// Starts copying `runs` (from `buffers`) into a free chunk; returns the chunk's slot.
+    fn start_runs(&mut self, gpu: &GpuContext, buffers: &[&wgpu::Buffer], runs: &[Run]) -> usize {
+        let k = self.taken.iter().position(|&taken| !taken).expect("no free readback chunk");
+        self.taken[k] = true;
+        let slot = &mut self.slots[k];
+        let bytes = runs.iter().map(|run| run.len).sum::<u64>();
+        let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("readback chunk"),
+        });
+        for (chunk_offset, buffer, offset, len) in copies(runs) {
+            encoder.copy_buffer_to_buffer(buffers[buffer], offset, &slot.buffer, chunk_offset, len);
+        }
+        let index = gpu.queue.submit([encoder.finish()]);
+        slot.remap(index, wgpu::MapMode::Read, bytes.max(wgpu::COPY_BUFFER_ALIGNMENT));
+        k
+    }
+
+    /// Waits for chunk `k` (`bytes` read back) and copies `parts` (`(chunk offset,
+    /// destination)`) out of it; frees it.
+    fn finish_runs(
+        &mut self,
+        gpu: &GpuContext,
+        k: usize,
+        bytes: u64,
+        parts: Vec<(usize, &mut [u8])>,
+    ) {
+        assert!(self.taken[k], "chunk {k} is not being read back");
+        let slot = &mut self.slots[k];
+        slot.wait(gpu);
+        {
+            let view = slot
+                .buffer
+                .slice(..bytes.max(wgpu::COPY_BUFFER_ALIGNMENT))
+                .get_mapped_range()
+                .expect("mapped");
+            let chunk: &[u8] = &view;
+            let parts = parts
+                .into_iter()
+                .flat_map(|(offset, dst)| {
+                    dst.chunks_mut(MAX_PART_BYTES)
+                        .enumerate()
+                        .map(move |(j, part)| (offset + j * MAX_PART_BYTES, part))
+                })
+                .collect::<Vec<_>>();
+            parts.into_par_iter().for_each(|(offset, part)| {
+                part.copy_from_slice(&chunk[offset..offset + part.len()])
+            });
+        }
+        slot.buffer.unmap();
+        self.taken[k] = false;
+    }
+
     /// Reads every piece from its buffer, after all the work submitted before: chunk by chunk,
     /// each copied by the GPU in its own submission, then out of its chunk by all the CPU's
-    /// threads while the GPU copies the next ones.
+    /// threads while the GPU copies the next ones. Every chunk must be free.
     pub fn read(&mut self, gpu: &GpuContext, pieces: Vec<Readback<'_, '_>>) {
+        assert!(!self.taken.contains(&true), "chunks still being read back");
         let (buffers, indices) = buffer_indices(pieces.iter().map(|piece| piece.src));
         let places = pieces
             .iter()
@@ -331,49 +441,16 @@ impl ReadbackRing {
             .collect::<Vec<_>>()
             .into_iter();
         let depth = self.slots.len();
-        let submit = |slot: &mut Slot, runs: &[Run]| {
-            let bytes = runs.iter().map(|run| run.len).sum::<u64>();
-            let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("readback chunk"),
-            });
-            for (chunk_offset, buffer, offset, len) in copies(runs) {
-                encoder.copy_buffer_to_buffer(
-                    buffers[buffer],
-                    offset,
-                    &slot.buffer,
-                    chunk_offset,
-                    len,
-                );
-            }
-            let index = gpu.queue.submit([encoder.finish()]);
-            slot.remap(index, wgpu::MapMode::Read, bytes);
-        };
-        for (k, runs) in chunks.iter().enumerate().take(depth) {
-            submit(&mut self.slots[k], runs);
+        let mut started = std::collections::VecDeque::new();
+        for runs in chunks.iter().take(depth) {
+            started.push_back(self.start_runs(gpu, &buffers, runs));
         }
         for (k, runs) in chunks.iter().enumerate() {
-            let slot = &mut self.slots[k % depth];
-            slot.wait(gpu);
-            let parts = destinations.next().unwrap();
-            {
-                let bytes = runs.iter().map(|run| run.len).sum::<u64>();
-                let view = slot.buffer.slice(..bytes).get_mapped_range().expect("mapped");
-                let chunk: &[u8] = &view;
-                let parts = parts
-                    .into_iter()
-                    .flat_map(|(offset, dst)| {
-                        dst.chunks_mut(MAX_PART_BYTES)
-                            .enumerate()
-                            .map(move |(j, part)| (offset + j * MAX_PART_BYTES, part))
-                    })
-                    .collect::<Vec<_>>();
-                parts.into_par_iter().for_each(|(offset, part)| {
-                    part.copy_from_slice(&chunk[offset..offset + part.len()])
-                });
-            }
-            slot.buffer.unmap();
+            let slot = started.pop_front().unwrap();
+            let bytes = runs.iter().map(|run| run.len).sum::<u64>();
+            self.finish_runs(gpu, slot, bytes, destinations.next().unwrap());
             if let Some(runs) = chunks.get(k + depth) {
-                submit(slot, runs);
+                started.push_back(self.start_runs(gpu, &buffers, runs));
             }
         }
     }

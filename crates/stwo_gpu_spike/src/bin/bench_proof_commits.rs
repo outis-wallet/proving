@@ -2,7 +2,9 @@
 //! `CommitmentTreeProver::new_striped` on the CPU: per commitment and in total, end to end (the
 //! committer's whole `commit_striped`: plans, upload, compute, readback into stwo's columns, the
 //! polynomials' drop), the roots checked equal (and, with `--check-all`, every layer and every
-//! column's kept evaluations).
+//! column's kept evaluations). The GPU's split (`CommitTimes`): setup (plans; buffers and
+//! twiddles when new), commit (upload, compute, readback; `s`: streamed in groups), the tree's
+//! assembly, the polynomials' drop (handed to a thread).
 //!
 //! ```text
 //! bench_proof_commits [--proofs N] [--threads T] [--check-all] [--no-cpu]
@@ -234,7 +236,7 @@ fn main() {
             if proof == 0 { ", cold: buffers grow, twiddles computed" } else { "" }
         );
         println!(
-            "  {:<25} {:>5} {:>10}  {:>8} {:>8}  {:>8} | {:>6} {:>6} {:>7} {:>6} {:>6} | root",
+            "  {:<25} {:>5} {:>10}  {:>8} {:>8}  {:>8} | {:>6} {:>8} {:>6} {:>6} | root",
             "tree",
             "cols",
             "coeffs",
@@ -242,8 +244,7 @@ fn main() {
             "GPU ms",
             "speedup",
             "setup",
-            "upload",
-            "comp+rb",
+            "commit",
             "assem",
             "drop"
         );
@@ -299,7 +300,7 @@ fn main() {
             };
             gpu_total += gpu_time;
             println!(
-                "  {:<25} {:>5} {:>10}  {} {}  {} | {:>6.1} {:>6.1} {:>7.1} {:>6.1} {:>6.1} | {}{}",
+                "  {:<25} {:>5} {:>10}  {} {}  {} | {:>6.1} {:>7.1}{} {:>6.1} {:>6.1} | {}{}",
                 tree.name,
                 tree.log_sizes.len(),
                 mib(bytes),
@@ -307,8 +308,8 @@ fn main() {
                 ms(gpu_time),
                 speedup,
                 times.setup.as_secs_f64() * 1e3,
-                times.upload.as_secs_f64() * 1e3,
-                times.compute_and_readback.as_secs_f64() * 1e3,
+                times.commit.as_secs_f64() * 1e3,
+                if times.streamed { "s" } else { " " },
                 times.assembly.as_secs_f64() * 1e3,
                 times.drop_polynomials.as_secs_f64() * 1e3,
                 &root.to_string()[..16],

@@ -28,6 +28,7 @@ use crate::commit::{
     CommitBuffers, CommitKernels, CommitOptions, StripedCommitment, TwiddleCache,
     takes_striped_path,
 };
+use crate::stream::{StreamedCommitment, group_words};
 use crate::transfer::{ReadbackRing, UploadRing};
 
 /// The tree `new_striped` returns.
@@ -59,15 +60,17 @@ pub struct GpuCommitter {
 /// Where a commitment's time went (wall clock).
 #[derive(Clone, Copy, Debug, Default)]
 pub struct CommitTimes {
+    /// Whether the tree was streamed in groups ([`StreamedCommitment`]), or committed stripe by
+    /// stripe ([`StripedCommitment`]: its largest column exceeds a group).
+    pub streamed: bool,
     /// The plans (uniforms, bind groups), the buffers grown if the tree is the largest yet, the
     /// twiddles computed if new.
     pub setup: Duration,
-    /// The coefficients' upload, until its last chunk is submitted.
-    pub upload: Duration,
-    /// From the commitment's submission to the end of its readback: the GPU's compute (while
-    /// the CPU allocates the result), then the copies back (while the CPU copies out the chunks
-    /// already back).
-    pub compute_and_readback: Duration,
+    /// The upload, the compute and the readback: overlapping when streamed (the coefficients
+    /// going up while the GPU works on earlier groups, stripe 0's evaluations copied out while it
+    /// works on later ones); stripe by stripe, the upload, then the compute (while the CPU
+    /// allocates the result), then the readback.
+    pub commit: Duration,
     /// The tree's assembly.
     pub assembly: Duration,
     /// The drop of the polynomials (kept until then, to give them back on a failure): natively,
@@ -148,25 +151,61 @@ impl GpuCommitter {
             let reused = state.get_or_insert_with(|| Reused::new(&self.gpu));
             let distinct = log_sizes.iter().copied().collect();
             let twiddles = reused.twiddles.get(&self.gpu, &distinct, log_blowup_factor, twiddles);
-            let commitment = StripedCommitment::with_buffers(
+            let group_words = group_words(
                 &self.gpu,
-                &self.kernels,
-                &mut reused.buffers,
-                twiddles,
                 &log_sizes,
                 log_blowup_factor,
                 lifting_log_size,
-                CommitOptions::default(),
+                reused.upload.chunk_bytes(),
+                reused.readback.chunk_bytes(),
             );
-            times.setup = start.elapsed();
-            commitment.upload_through(&self.gpu, &mut reused.upload, &polynomials);
-            times.upload = start.elapsed() - times.setup;
-            let output =
-                commitment.run_and_read_through(&self.gpu, &self.kernels, &mut reused.readback);
-            times.compute_and_readback = start.elapsed() - times.setup - times.upload;
-            let tree = commitment.tree_prover(output);
-            times.assembly =
-                start.elapsed() - times.setup - times.upload - times.compute_and_readback;
+            let tree = match group_words {
+                Some(group_words) => {
+                    times.streamed = true;
+                    let commitment = StreamedCommitment::with_buffers(
+                        &self.gpu,
+                        &self.kernels,
+                        &mut reused.buffers,
+                        twiddles,
+                        &log_sizes,
+                        log_blowup_factor,
+                        lifting_log_size,
+                        group_words,
+                    );
+                    times.setup = start.elapsed();
+                    let output = commitment.commit(
+                        &self.gpu,
+                        &self.kernels,
+                        &mut reused.upload,
+                        &mut reused.readback,
+                        &polynomials,
+                    );
+                    times.commit = start.elapsed() - times.setup;
+                    commitment.tree_prover(output)
+                }
+                None => {
+                    let commitment = StripedCommitment::with_buffers(
+                        &self.gpu,
+                        &self.kernels,
+                        &mut reused.buffers,
+                        twiddles,
+                        &log_sizes,
+                        log_blowup_factor,
+                        lifting_log_size,
+                        CommitOptions::default(),
+                    );
+                    times.setup = start.elapsed();
+                    commitment.upload_through(&self.gpu, &mut reused.upload, &polynomials);
+                    let output = commitment.run_and_read_through(
+                        &self.gpu,
+                        &self.kernels,
+                        &mut reused.readback,
+                    );
+                    times.commit = start.elapsed() - times.setup;
+                    commitment.tree_prover(output)
+                }
+            };
+            times.assembly = start.elapsed() - times.setup - times.commit;
             tree
         }));
         match tree {

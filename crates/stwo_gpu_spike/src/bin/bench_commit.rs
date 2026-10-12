@@ -57,6 +57,7 @@ use stwo_gpu_spike::commit::{
 };
 use stwo_gpu_spike::extension::Merge;
 use stwo_gpu_spike::shapes::{base_trace_log_sizes, cairo_pay_components};
+use stwo_gpu_spike::stream::{StreamedCommitment, group_words};
 use stwo_gpu_spike::transfer::{ReadbackRing, UploadRing};
 
 type TreeProver = CommitmentTreeProver<SimdBackend, Blake2sM31MerkleChannel>;
@@ -463,6 +464,97 @@ fn main() {
         drop(commitment);
     }
 
+    // Streamed in groups, every stripe of a group at once (the committer's way).
+    let mut streamed = None;
+    if let Some(group_words) = group_words(
+        &gpu,
+        &log_sizes,
+        log_blowup,
+        lifting_log_size,
+        upload_ring.chunk_bytes(),
+        readback_ring.chunk_bytes(),
+    ) {
+        println!("-- streamed in groups of {} MiB (see stream.rs)", group_words >> 18);
+        let mut setups = vec![];
+        let mut commitment = None;
+        for _ in 0..3 {
+            drop(commitment.take());
+            let start = Instant::now();
+            let table = twiddle_cache.get(&gpu, &distinct, log_blowup, &twiddles);
+            commitment = Some(StreamedCommitment::with_buffers(
+                &gpu,
+                &kernels,
+                &mut buffers,
+                table,
+                &log_sizes,
+                log_blowup,
+                lifting_log_size,
+                group_words,
+            ));
+            setups.push(start.elapsed());
+        }
+        let commitment = commitment.unwrap();
+        let bytes = commitment.gpu_bytes();
+        println!(
+            "GPU setup: first {}, then {} (plans only); {} groups; {} on the device \
+             (coefficients: a group's and the largest size's {}, evaluations: every stripe's of a \
+             group and one stripe's of the largest size {}, Merkle states {}, layers {}, columns \
+             kept whole {}; twiddles apart)",
+            ms(setups[0]).trim(),
+            ms(*setups[1..].iter().min().unwrap()).trim(),
+            commitment.n_groups(),
+            mib(bytes.device()),
+            mib(bytes.coefficients),
+            mib(bytes.evaluations),
+            mib(bytes.states),
+            mib(bytes.tree),
+            mib(bytes.whole),
+        );
+        let output =
+            commitment.commit(&gpu, &kernels, &mut upload_ring, &mut readback_ring, &polys);
+        drop(output);
+        let (best, median) = time(args.reps, || {
+            timed(|| {
+                let mut encoder = gpu.device.create_command_encoder(&Default::default());
+                commitment.encode_compute(&kernels, &mut encoder);
+                gpu.queue.submit([encoder.finish()]);
+                gpu.device.poll(wgpu::PollType::wait_indefinitely()).expect("poll");
+            })
+        });
+        println!("GPU compute alone (no transfers):     best {}  median {}", ms(best), ms(median));
+        let compute = best;
+        let mut output = None;
+        let (best, median) = time(args.reps, || {
+            drop(output.take());
+            timed(|| {
+                output = Some(commitment.commit(
+                    &gpu,
+                    &kernels,
+                    &mut upload_ring,
+                    &mut readback_ring,
+                    &polys,
+                ))
+            })
+        });
+        println!("GPU, upload, compute and readback:    best {}  median {}", ms(best), ms(median));
+        let gpu_tree = commitment.tree_prover(output.take().unwrap());
+        let root = gpu_tree.commitment.root();
+        println!("GPU root {root}");
+        assert_eq!(*gpu_root.get_or_insert(root), root, "the streamed root differs");
+        if let Some(cpu) = &cpu_tree {
+            assert_eq!(gpu_tree.commitment.layers, cpu.commitment.layers, "layers differ");
+            for (i, (g, c)) in gpu_tree.polynomials.iter().zip(&cpu.polynomials).enumerate() {
+                assert_eq!(g.evals.domain, c.evals.domain, "column {i}: domain");
+                assert!(
+                    g.evals.values.as_slice() == c.evals.values.as_slice(),
+                    "column {i}: kept evaluations differ"
+                );
+            }
+            println!("check: every layer equal, every column's kept evaluations equal");
+        }
+        streamed = Some((compute, best));
+    }
+
     println!("summary (best of {}):", args.reps);
     for (threads, best) in &cpu_best {
         println!("  CPU new_striped, {threads:2} threads:        {}", ms(*best));
@@ -485,6 +577,19 @@ fn main() {
             ms(with_upload),
             ms(with_readback),
             speedup(with_readback),
+        );
+    }
+    if let Some((compute, all)) = streamed {
+        let speedup = cpu_best
+            .iter()
+            .map(|(threads, cpu)| {
+                format!("{:.1}x vs {threads}", cpu.as_secs_f64() / all.as_secs_f64())
+            })
+            .join(", ");
+        println!(
+            "  GPU streamed: compute alone {}  upload+compute+readback {}  ({speedup})",
+            ms(compute),
+            ms(all)
         );
     }
 }

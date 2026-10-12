@@ -27,6 +27,7 @@ pub mod extension;
 pub mod merkle;
 pub mod reference;
 pub mod shapes;
+pub mod stream;
 pub mod transfer;
 
 /// M31 arithmetic in WGSL (`m31_add`, `m31_sub`, `m31_mul`, ...), to prepend to a kernel's source.

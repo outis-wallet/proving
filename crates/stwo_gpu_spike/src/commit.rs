@@ -132,11 +132,11 @@ impl CommitKernels {
 /// from `src` in output buffer `buffer` to `dst` in the stripe's slice of the whole columns'
 /// buffer.
 #[derive(Clone, Copy, Debug)]
-struct WholeCopy {
-    buffer: usize,
-    src: u64,
-    dst: u64,
-    words: u64,
+pub(crate) struct WholeCopy {
+    pub(crate) buffer: usize,
+    pub(crate) src: u64,
+    pub(crate) dst: u64,
+    pub(crate) words: u64,
 }
 
 /// The Merkle layers and the kept evaluations of a commitment, as read back.
@@ -259,6 +259,11 @@ pub struct CommitBuffers {
     tree: Option<wgpu::Buffer>,
     states: Option<StateBuffers>,
     whole: Option<wgpu::Buffer>,
+    /// A streamed commitment's (see [`crate::stream`]): a group's coefficients, every stripe's
+    /// evaluations of a group, every stripe's Merkle states.
+    group: Option<wgpu::Buffer>,
+    stripes: Option<wgpu::Buffer>,
+    stripe_states: Vec<StateBuffers>,
 }
 
 /// A storage buffer of `bytes` bytes (at least 4), uninitialized.
@@ -290,6 +295,17 @@ fn grown(
 impl CommitBuffers {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Buffers for the coefficients and the evaluations of the columns of the largest size of a
+    /// streamed commitment, laid out as `layout` (the same as a striped commitment's columns: a
+    /// tree is one or the other).
+    pub(crate) fn top_columns(
+        &mut self,
+        gpu: &GpuContext,
+        layout: &Arc<ColumnsLayout>,
+    ) -> (GpuColumns, GpuColumns) {
+        self.columns(gpu, layout)
     }
 
     /// Buffers for the coefficients and the evaluations of columns laid out as `layout`.
@@ -327,8 +343,49 @@ impl CommitBuffers {
         self.states.clone().unwrap()
     }
 
-    fn whole(&mut self, gpu: &GpuContext, words: u64) -> wgpu::Buffer {
+    pub(crate) fn whole(&mut self, gpu: &GpuContext, words: u64) -> wgpu::Buffer {
         grown(gpu, &mut self.whole, "whole columns", words * 4)
+    }
+
+    /// A streamed commitment's buffers: of a group's coefficients (`group_words`), of every
+    /// stripe's evaluations of a group (`stripes_words`).
+    pub(crate) fn groups(
+        &mut self,
+        gpu: &GpuContext,
+        group_words: u64,
+        stripes_words: u64,
+    ) -> (wgpu::Buffer, wgpu::Buffer) {
+        (
+            grown(gpu, &mut self.group, "a group's coefficients", group_words * 4),
+            grown(gpu, &mut self.stripes, "a group's evaluations", stripes_words * 4),
+        )
+    }
+
+    /// `n` stripes' Merkle states, of `words` words each buffer at least: each stripe's grown
+    /// on its own (stripe `s`'s as large as the largest any tree of more than `s` stripes asked
+    /// for).
+    pub(crate) fn stripe_states(
+        &mut self,
+        gpu: &GpuContext,
+        n: usize,
+        words: u64,
+    ) -> Vec<StateBuffers> {
+        for stripe in 0..n {
+            match self.stripe_states.get_mut(stripe) {
+                Some(states) if states.words >= words => {}
+                Some(_) => {
+                    // The old ones freed first.
+                    drop(self.stripe_states.remove(stripe));
+                    self.stripe_states.insert(stripe, StateBuffers::new(gpu, words));
+                }
+                None => self.stripe_states.push(StateBuffers::new(gpu, words)),
+            }
+        }
+        self.stripe_states[..n].to_vec()
+    }
+
+    pub(crate) fn tree_of(&mut self, gpu: &GpuContext, words: u64) -> wgpu::Buffer {
+        self.tree(gpu, words)
     }
 
     /// The bytes of every buffer held.
@@ -338,9 +395,12 @@ impl CommitBuffers {
             .chain(&self.out)
             .chain(&self.tree)
             .chain(&self.whole)
+            .chain(&self.group)
+            .chain(&self.stripes)
             .map(wgpu::Buffer::size)
             .sum::<u64>()
             + self.states.as_ref().map_or(0, StateBuffers::bytes)
+            + self.stripe_states.iter().map(StateBuffers::bytes).sum::<u64>()
     }
 }
 
@@ -863,25 +923,34 @@ impl StripedCommitment {
         &self,
         output: CommitOutput,
     ) -> CommitmentTreeProver<SimdBackend, Blake2sM31MerkleChannel> {
-        let polynomials = output
-            .evaluations
-            .into_iter()
-            .zip(&self.log_sizes)
-            .map(|(values, &log_size)| {
-                let domain = CanonicCoset::new(log_size + self.log_blowup).circle_domain();
-                let mut evals = CircleEvaluation::<SimdBackend, BaseField, BitReversedOrder>::new(
-                    part_domain(domain, domain.log_size() - values.len().ilog2(), 0),
-                    values,
-                );
-                evals.domain = domain;
-                Poly::new(None, evals)
-            })
-            .collect();
-        CommitmentTreeProver {
-            polynomials,
-            commitment: MerkleProverLifted { layers: output.layers },
-        }
+        tree_prover(&self.log_sizes, self.log_blowup, output)
     }
+}
+
+/// [`CommitOutput`] of columns of coefficients log sizes `log_sizes` as `new_striped` returns it:
+/// every column's kept evaluations on its stripe 0's domain, with the column's whole domain (or
+/// its whole evaluation), no coefficients; the layers as the commitment's.
+pub fn tree_prover(
+    log_sizes: &[u32],
+    log_blowup: u32,
+    output: CommitOutput,
+) -> CommitmentTreeProver<SimdBackend, Blake2sM31MerkleChannel> {
+    assert_eq!(output.evaluations.len(), log_sizes.len());
+    let polynomials = output
+        .evaluations
+        .into_iter()
+        .zip(log_sizes)
+        .map(|(values, &log_size)| {
+            let domain = CanonicCoset::new(log_size + log_blowup).circle_domain();
+            let mut evals = CircleEvaluation::<SimdBackend, BaseField, BitReversedOrder>::new(
+                part_domain(domain, domain.log_size() - values.len().ilog2(), 0),
+                values,
+            );
+            evals.domain = domain;
+            Poly::new(None, evals)
+        })
+        .collect();
+    CommitmentTreeProver { polynomials, commitment: MerkleProverLifted { layers: output.layers } }
 }
 
 /// The bytes of a commitment's buffers (see [`StripedCommitment::gpu_bytes`]).
