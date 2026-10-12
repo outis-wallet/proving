@@ -26,6 +26,10 @@ use crate::{FrameworkComponent, FrameworkEval, PREPROCESSED_TRACE_IDX};
 
 const CHUNK_SIZE: usize = 1;
 
+/// A component's columns, borrowed from the commitment or evaluated.
+type TraceColumns<'a> =
+    TreeVec<Vec<Cow<'a, CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>>>;
+
 /// Common inputs for constraint quotient evaluation, shared between the SIMD and CPU backends.
 struct ConstraintQuotientInputs<'a, B: Backend> {
     eval_domain: CircleDomain,
@@ -123,11 +127,11 @@ fn get_constraint_quotient_inputs<'a, E: FrameworkEval, B: Backend>(
 /// domain, the first `2^log_n_parts` parts of the committed domain, is the part `part` of the
 /// committed domain split into parts of the column's size.
 fn trace_part<'a>(
-    trace: &'a TreeVec<Vec<Cow<'a, CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>>>,
+    trace: &'a TraceColumns<'a>,
     polys: &TreeVec<Vec<&Poly<SimdBackend>>>,
     trace_domain: CanonicCoset,
     part: usize,
-) -> TreeVec<Vec<Cow<'a, CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>>> {
+) -> TraceColumns<'a> {
     let part_size = trace_domain.size();
     let committed_log_size = polys
         .iter()

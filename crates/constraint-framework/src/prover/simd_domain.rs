@@ -37,8 +37,13 @@ pub struct SimdDomainEvaluator<'a> {
     pub row_base: usize,
     /// If not empty, the columns on every part of the evaluation domain, `trace_eval` being those
     /// on the part of `vec_row` (see [`Self::in_part`]).
-    pub parts: &'a [TreeVec<Vec<&'a CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>>],
+    pub parts: &'a [PartColumns<'a>],
 }
+
+/// The columns of a component on one part of the evaluation domain (see
+/// [`SimdDomainEvaluator::in_part`]).
+pub type PartColumns<'a> =
+    TreeVec<Vec<&'a CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>>;
 impl<'a> SimdDomainEvaluator<'a> {
     pub fn new(
         trace_eval: &'a TreeVec<Vec<&CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>>,
@@ -70,11 +75,7 @@ impl<'a> SimdDomainEvaluator<'a> {
     /// Sets the columns to hold the evaluation domain in parts of the trace domain's size: `parts`
     /// holds the columns on every part, and `trace_eval` those on the part of the rows from
     /// `row_base` on, which `vec_row` then indexes. A row at an offset reads its part's columns.
-    pub const fn in_part(
-        mut self,
-        row_base: usize,
-        parts: &'a [TreeVec<Vec<&'a CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>>],
-    ) -> Self {
+    pub const fn in_part(mut self, row_base: usize, parts: &'a [PartColumns<'a>]) -> Self {
         self.row_base = row_base;
         self.parts = parts;
         self

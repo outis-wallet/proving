@@ -195,8 +195,12 @@ impl<B: Backend> ComponentProvers<'_, B> {
             }
             accumulator.into_sub_accumulations()
         };
+        // Without `parallel` the groups always go one after the other.
         #[cfg(not(feature = "parallel"))]
-        let group_results: Vec<_> = groups.iter().map(run_group).collect();
+        let group_results: Vec<_> = {
+            let _ = one_component_at_a_time;
+            groups.iter().map(run_group).collect()
+        };
         // A component that evaluates its columns holds those evaluations while it runs: with
         // `one_component_at_a_time` the groups go one after the other, so that only one
         // component's evaluations are held at a time. A component's evaluation is parallel itself.
