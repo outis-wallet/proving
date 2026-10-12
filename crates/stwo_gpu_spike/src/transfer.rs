@@ -126,18 +126,19 @@ impl Slot {
 /// `offset` of `buffer` (the GPU's side), and the host's side, piece `piece` from its byte
 /// `piece_offset`.
 #[derive(Clone, Copy, Debug)]
-struct Run {
-    chunk_offset: u64,
-    buffer: usize,
-    offset: u64,
-    len: u64,
-    piece: usize,
-    piece_offset: usize,
+pub struct Run {
+    pub chunk_offset: u64,
+    pub buffer: usize,
+    pub offset: u64,
+    pub len: u64,
+    pub piece: usize,
+    pub piece_offset: usize,
 }
 
 /// Packs pieces of `lens` bytes, at `(buffer, offset)` on the GPU, one after the other into
-/// chunks of `chunk` bytes: the runs of each chunk.
-fn pack(places: &[(usize, u64)], lens: &[usize], chunk: u64) -> Vec<Vec<Run>> {
+/// chunks of `chunk` bytes: the runs of each chunk (also a browser's GPU worker's, whose rings
+/// are its own: see `web/gpu`).
+pub fn pack(places: &[(usize, u64)], lens: &[usize], chunk: u64) -> Vec<Vec<Run>> {
     let mut chunks: Vec<Vec<Run>> = vec![];
     let mut fill = chunk;
     for (piece, (&(buffer, offset), &len)) in places.iter().zip(lens).enumerate() {
@@ -165,7 +166,7 @@ fn pack(places: &[(usize, u64)], lens: &[usize], chunk: u64) -> Vec<Vec<Run>> {
 
 /// The copies of a chunk's runs: runs adjacent on both sides in one copy, `(chunk offset,
 /// buffer, offset, len)`.
-fn copies(runs: &[Run]) -> Vec<(u64, usize, u64, u64)> {
+pub fn copies(runs: &[Run]) -> Vec<(u64, usize, u64, u64)> {
     let mut copies: Vec<(u64, usize, u64, u64)> = vec![];
     for run in runs {
         match copies.last_mut() {

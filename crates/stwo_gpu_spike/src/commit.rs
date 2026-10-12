@@ -266,6 +266,8 @@ pub struct CommitBuffers {
     /// evaluations of a group.
     group: Option<wgpu::Buffer>,
     stripes: Option<wgpu::Buffer>,
+    /// Buffers replaced so far (see [`Self::generation`]).
+    generation: u64,
 }
 
 /// A storage buffer of `bytes` bytes (at least 4), uninitialized.
@@ -280,15 +282,21 @@ fn storage_buffer(gpu: &GpuContext, label: &str, bytes: u64) -> wgpu::Buffer {
     })
 }
 
-/// `buffer` if it has `bytes` bytes, or a new one in its place (the old one freed first).
+/// `buffer` if it has `bytes` bytes, or a new one in its place (the old one freed first:
+/// destroyed, as a browser would otherwise hold its memory until its JS object is collected; no
+/// commitment may still use it).
 fn grown(
     gpu: &GpuContext,
     buffer: &mut Option<wgpu::Buffer>,
+    generation: &mut u64,
     label: &str,
     bytes: u64,
 ) -> wgpu::Buffer {
     if buffer.as_ref().is_none_or(|buffer| buffer.size() < bytes) {
-        drop(buffer.take());
+        if let Some(old) = buffer.take() {
+            old.destroy();
+            *generation += 1;
+        }
         *buffer = Some(storage_buffer(gpu, label, bytes));
     }
     buffer.clone().unwrap()
@@ -316,11 +324,12 @@ impl CommitBuffers {
         gpu: &GpuContext,
         layout: &Arc<ColumnsLayout>,
     ) -> (GpuColumns, GpuColumns) {
-        let take = |buffers: &mut Vec<wgpu::Buffer>, label: &str| {
+        let generation = &mut self.generation;
+        let mut take = |buffers: &mut Vec<wgpu::Buffer>, label: &str| {
             let mut slots = std::mem::take(buffers).into_iter().map(Some).collect_vec();
             slots.resize(slots.len().max(layout.buffer_words.len()), None);
             for (slot, &words) in slots.iter_mut().zip(&layout.buffer_words) {
-                grown(gpu, slot, label, words * 4);
+                grown(gpu, slot, generation, label, words * 4);
             }
             *buffers = slots.into_iter().map(Option::unwrap).collect();
             buffers[..layout.buffer_words.len()].to_vec()
@@ -334,7 +343,7 @@ impl CommitBuffers {
     }
 
     fn tree(&mut self, gpu: &GpuContext, words: u64) -> wgpu::Buffer {
-        grown(gpu, &mut self.tree, "tree layers", words * 4)
+        grown(gpu, &mut self.tree, &mut self.generation, "tree layers", words * 4)
     }
 
     fn states(&mut self, gpu: &GpuContext, words: u64) -> StateBuffers {
@@ -342,7 +351,7 @@ impl CommitBuffers {
     }
 
     pub(crate) fn whole(&mut self, gpu: &GpuContext, words: u64) -> wgpu::Buffer {
-        grown(gpu, &mut self.whole, "whole columns", words * 4)
+        grown(gpu, &mut self.whole, &mut self.generation, "whole columns", words * 4)
     }
 
     /// A streamed commitment's buffers: of a group's coefficients (`group_words`), of every
@@ -354,8 +363,20 @@ impl CommitBuffers {
         stripes_words: u64,
     ) -> (wgpu::Buffer, wgpu::Buffer) {
         (
-            grown(gpu, &mut self.group, "a group's coefficients", group_words * 4),
-            grown(gpu, &mut self.stripes, "a group's evaluations", stripes_words * 4),
+            grown(
+                gpu,
+                &mut self.group,
+                &mut self.generation,
+                "a group's coefficients",
+                group_words * 4,
+            ),
+            grown(
+                gpu,
+                &mut self.stripes,
+                &mut self.generation,
+                "a group's evaluations",
+                stripes_words * 4,
+            ),
         )
     }
 
@@ -372,7 +393,10 @@ impl CommitBuffers {
         let stride = words.max(1).next_multiple_of(align);
         let bytes = n as u64 * stride * 4;
         if self.states.as_ref().is_none_or(|states| states[0].size() < bytes) {
-            drop(self.states.take());
+            for old in self.states.take().into_iter().flatten() {
+                old.destroy();
+                self.generation += 1;
+            }
             self.states = Some([
                 storage_buffer(gpu, "states a", bytes),
                 storage_buffer(gpu, "states b", bytes),
@@ -386,6 +410,32 @@ impl CommitBuffers {
 
     pub(crate) fn tree_of(&mut self, gpu: &GpuContext, words: u64) -> wgpu::Buffer {
         self.tree(gpu, words)
+    }
+
+    /// Frees every buffer held now (the next commitment allocates them again): no commitment
+    /// built on them may be used after this.
+    pub fn destroy(&mut self) {
+        let held =
+            std::mem::replace(self, Self { generation: self.generation + 1, ..Self::default() });
+        for buffer in held
+            .coeffs
+            .iter()
+            .chain(&held.out)
+            .chain(&held.tree)
+            .chain(&held.whole)
+            .chain(&held.group)
+            .chain(&held.stripes)
+            .chain(held.states.iter().flatten())
+        {
+            buffer.destroy();
+        }
+    }
+
+    /// Counts the buffers replaced (or freed) so far: whatever was built on these buffers is
+    /// still bound to live ones while it hasn't changed (e.g. a commitment's plans, kept to run
+    /// the same shape again).
+    pub fn generation(&self) -> u64 {
+        self.generation
     }
 
     /// The bytes of every buffer held.
@@ -430,24 +480,57 @@ impl TwiddleCache {
         log_blowup: u32,
         tree: &TwiddleTree<SimdBackend>,
     ) -> Arc<StripeTwiddles> {
+        match self.lookup(log_sizes, log_blowup, tree.root_coset) {
+            Ok(table) => table,
+            Err(max) => self.insert(gpu, max, log_blowup, tree),
+        }
+    }
+
+    /// [`Self::get`], for the twiddle tree of root coset `root_coset`, which `tree` gives only if
+    /// the twiddles must be computed: for a caller to whom getting the tree costs (a browser's
+    /// GPU worker copies it out of the prover's memory).
+    pub fn try_get_with<E>(
+        &mut self,
+        gpu: &GpuContext,
+        log_sizes: &BTreeSet<u32>,
+        log_blowup: u32,
+        root_coset: Coset,
+        tree: impl FnOnce() -> Result<TwiddleTree<SimdBackend>, E>,
+    ) -> Result<Arc<StripeTwiddles>, E> {
+        match self.lookup(log_sizes, log_blowup, root_coset) {
+            Ok(table) => Ok(table),
+            Err(max) => {
+                let tree = tree()?;
+                assert!(tree.root_coset == root_coset, "a tree of another coset");
+                Ok(self.insert(gpu, max, log_blowup, &tree))
+            }
+        }
+    }
+
+    /// The table kept for this blowup and tree if it covers `log_sizes`; otherwise the largest
+    /// log size a new one must cover.
+    fn lookup(
+        &mut self,
+        log_sizes: &BTreeSet<u32>,
+        log_blowup: u32,
+        root_coset: Coset,
+    ) -> Result<Arc<StripeTwiddles>, u32> {
         let found = self
             .tables
             .iter()
-            .position(|(coset, table)| table.log_blowup == log_blowup && *coset == tree.root_coset);
-        if let Some(i) = found {
-            let entry = self.tables.remove(i);
-            if entry.1.covers(log_sizes) {
-                let table = entry.1.clone();
-                self.tables.push(entry);
-                return table;
-            }
-            // The same tree: the log sizes it was read for are within it too.
-            let max = log_sizes.iter().chain(&entry.1.log_sizes).copied().max().unwrap();
-            drop(entry);
-            return self.insert(gpu, max, log_blowup, tree);
-        }
+            .position(|(coset, table)| table.log_blowup == log_blowup && *coset == root_coset);
         let max = *log_sizes.iter().max().expect("no log sizes");
-        self.insert(gpu, max, log_blowup, tree)
+        let Some(i) = found else { return Err(max) };
+        let entry = self.tables.remove(i);
+        if entry.1.covers(log_sizes) {
+            let table = entry.1.clone();
+            self.tables.push(entry);
+            return Ok(table);
+        }
+        // The same tree: the log sizes it was read for are within it too.
+        let max = entry.1.log_sizes.iter().copied().max().unwrap_or(max).max(max);
+        free_table(entry.1);
+        Err(max)
     }
 
     fn insert(
@@ -458,9 +541,13 @@ impl TwiddleCache {
         tree: &TwiddleTree<SimdBackend>,
     ) -> Arc<StripeTwiddles> {
         // A blowup's previous table goes first.
-        self.tables.retain(|(_, table)| table.log_blowup != log_blowup);
+        let (others, replaced): (Vec<_>, Vec<_>) = std::mem::take(&mut self.tables)
+            .into_iter()
+            .partition(|(_, t)| t.log_blowup != log_blowup);
+        self.tables = others;
+        replaced.into_iter().for_each(|(_, table)| free_table(table));
         if self.tables.len() >= MAX_CACHED_BLOWUPS {
-            self.tables.remove(0);
+            free_table(self.tables.remove(0).1);
         }
         let log_sizes = (MIN_LOG_SIZE..=max_log_size).collect();
         let table = Arc::new(StripeTwiddles::new(gpu, &log_sizes, log_blowup, tree));
@@ -468,9 +555,27 @@ impl TwiddleCache {
         table
     }
 
+    /// Whether `table` is one of the tables kept (not replaced or dropped since it was got).
+    pub fn holds(&self, table: &Arc<StripeTwiddles>) -> bool {
+        self.tables.iter().any(|(_, kept)| Arc::ptr_eq(kept, table))
+    }
+
+    /// Frees every table kept now (each one still held elsewhere stays, until dropped).
+    pub fn destroy(&mut self) {
+        std::mem::take(&mut self.tables).into_iter().for_each(|(_, table)| free_table(table));
+    }
+
     /// The bytes of the twiddles kept, on the GPU.
     pub fn bytes(&self) -> u64 {
         self.tables.iter().map(|(_, table)| table.bytes()).sum()
+    }
+}
+
+/// Frees a table of twiddles dropped from a [`TwiddleCache`] now, unless something else still
+/// holds it (a browser would otherwise hold its memory until its JS object is collected).
+fn free_table(table: Arc<StripeTwiddles>) {
+    if let Ok(table) = Arc::try_unwrap(table) {
+        table.destroy();
     }
 }
 
@@ -712,20 +817,29 @@ impl StripedCommitment {
         self.whole_words
     }
 
-    /// Frees every buffer the commitment uses now, its twiddles' too: for a commitment that owns
-    /// them ([`Self::with_options`]); one built on a [`CommitBuffers`] and shared twiddles frees
-    /// theirs as well. In a browser a buffer's memory is otherwise held until its JS object is
-    /// garbage collected (wgpu's WebGPU backend doesn't destroy buffers on drop). Nothing may be
-    /// recorded or read after this.
-    pub fn destroy(&self) {
-        self.coeffs.destroy();
-        self.out.destroy();
+    /// Frees the buffers of the commitment's own plans now (the extension's and the Merkle
+    /// plans' parameters), not the [`CommitBuffers`] or the twiddles it was built on: for a
+    /// commitment on kept buffers, once done. In a browser a buffer's memory is otherwise held
+    /// until its JS object is garbage collected (wgpu's WebGPU backend doesn't destroy buffers on
+    /// drop). Nothing may be recorded after this.
+    pub fn destroy_plans(&self) {
         self.extension.destroy();
-        self.tree.destroy();
-        self.states.destroy();
         for plan in self.stripe_plans.iter().chain([&self.top]) {
             plan.destroy();
         }
+    }
+
+    /// Frees every buffer the commitment uses now ([`Self::destroy_plans`], its buffers and its
+    /// twiddles): for a commitment that owns them ([`Self::with_options`]); one built on a
+    /// [`CommitBuffers`] and shared twiddles would free theirs as well. Nothing may be recorded
+    /// or read after this.
+    pub fn destroy(&self) {
+        self.destroy_plans();
+        self.extension.twiddles().destroy();
+        self.coeffs.destroy();
+        self.out.destroy();
+        self.tree.destroy();
+        self.states.destroy();
         if let Some(whole) = &self.whole {
             whole.destroy();
         }

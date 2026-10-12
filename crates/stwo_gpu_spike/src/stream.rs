@@ -106,6 +106,9 @@ pub fn group_words(
     fits.then_some(words.max(SLOT_ALIGN_WORDS))
 }
 
+/// A column's place on the GPU: its index (in polynomial order), a buffer, a byte offset there.
+pub type Place<'a> = (usize, &'a wgpu::Buffer, u64);
+
 /// Some of a tree's columns: their indices (in polynomial order), and their layout (its slots
 /// indexed as these).
 struct Part {
@@ -338,6 +341,122 @@ impl StreamedCommitment {
         }
     }
 
+    pub fn log_sizes(&self) -> &[u32] {
+        &self.log_sizes
+    }
+
+    pub fn tree_layout(&self) -> &TreeLayout {
+        &self.tree_layout
+    }
+
+    /// The tree's stored levels, as [`Self::tree_layout`] places them.
+    pub fn tree_buffer(&self) -> &wgpu::Buffer {
+        &self.tree
+    }
+
+    /// The columns kept whole, every stripe's, if any (see [`Self::whole_reads`]).
+    pub fn whole_buffer(&self) -> Option<&wgpu::Buffer> {
+        self.whole.as_ref()
+    }
+
+    /// Where group `group`'s coefficients go: each of its columns' place in the group buffer, in
+    /// the buffer's order.
+    pub fn group_uploads(&self, group: usize) -> Vec<Place<'_>> {
+        self.group_batches(group)
+            .flat_map(|(_, batch)| {
+                batch.columns.iter().enumerate().map(move |(k, &i)| {
+                    let offset = (batch.offset + ((k as u64) << batch.log_size)) * 4;
+                    (self.lower.indices[i], &self.group, offset)
+                })
+            })
+            .collect()
+    }
+
+    /// Where stripe 0's evaluations of group `group`'s columns are (those not kept whole), in
+    /// the buffer's order: there from the group's work ([`Self::encode_group`]) until the next
+    /// group's, so their readback must be submitted in between.
+    pub fn group_reads(&self, group: usize) -> Vec<Place<'_>> {
+        self.group_batches(group)
+            .filter(|(_, batch)| !kept_whole(batch.log_size, self.log_blowup))
+            .flat_map(|(_, batch)| {
+                batch.columns.iter().enumerate().map(move |(k, &i)| {
+                    let offset = (batch.offset + ((k as u64) << batch.log_size)) * 4;
+                    (self.lower.indices[i], &self.stripes, offset)
+                })
+            })
+            .collect()
+    }
+
+    /// Where the coefficients of the columns of the largest size go (none if they are grouped).
+    pub fn top_uploads(&self) -> Vec<Place<'_>> {
+        self.top_places(&|top: &Top| &top.coeffs, false)
+    }
+
+    /// Where stripe 0's evaluations of the columns of the largest size are (those not kept
+    /// whole): there from stripe 0's [`Self::encode_top`] until stripe 1's, so their readback
+    /// must be submitted in between.
+    pub fn top_reads(&self) -> Vec<Place<'_>> {
+        self.top_places(&|top: &Top| &top.out, true)
+    }
+
+    fn top_places<'a>(
+        &'a self,
+        columns: &dyn Fn(&'a Top) -> &'a GpuColumns,
+        skip_whole: bool,
+    ) -> Vec<Place<'a>> {
+        let Some(top) = &self.top else { return vec![] };
+        let buffers = &columns(top).buffers;
+        top.part
+            .layout
+            .batches
+            .iter()
+            .filter(|batch| !(skip_whole && kept_whole(batch.log_size, self.log_blowup)))
+            .flat_map(|batch| {
+                batch.columns.iter().enumerate().map(move |(k, &i)| {
+                    let offset = (batch.offset + ((k as u64) << batch.log_size)) * 4;
+                    (top.part.indices[i], &buffers[batch.buffer], offset)
+                })
+            })
+            .collect()
+    }
+
+    /// Where the columns kept whole are in [`Self::whole_buffer`], once every stripe's work and
+    /// copies ran: `(column, stripe, byte offset)`, by column and stripe. Stripe `s` of a column of
+    /// log size `l` is its kept evaluation's bytes `[s * 4 << l, (s + 1) * 4 << l)`.
+    pub fn whole_reads(&self) -> Vec<(usize, usize, u64)> {
+        let mut reads = vec![];
+        for (i, slot) in self.whole_slots.iter().enumerate() {
+            if let Some(offset) = slot {
+                for stripe in 0..self.n_stripes() {
+                    reads.push((i, stripe, (stripe as u64 * self.whole_words + offset) * 4));
+                }
+            }
+        }
+        reads
+    }
+
+    /// The dispatches of the whole commitment: (the extension's, the hashing's), over every
+    /// group and stripe.
+    pub fn n_dispatches(&self) -> (usize, usize) {
+        let top =
+            self.top.as_ref().map_or(0, |top| top.extension.n_dispatches() * self.n_stripes());
+        let hashing = self.absorbs.iter().flatten().chain(&self.finals).chain([&self.above]);
+        (self.extension.n_dispatches() + top, hashing.map(Plan::n_dispatches).sum())
+    }
+
+    /// Frees the buffers of the commitment's own plans now (the extensions' and the Merkle plans'
+    /// parameters), not the [`CommitBuffers`] or the twiddles it was built on (see
+    /// [`crate::commit::StripedCommitment::destroy_plans`]).
+    pub fn destroy_plans(&self) {
+        self.extension.destroy();
+        if let Some(top) = &self.top {
+            top.extension.destroy();
+        }
+        for plan in self.absorbs.iter().flatten().chain(&self.finals).chain([&self.above]) {
+            plan.destroy();
+        }
+    }
+
     /// The lower layout's batches of group `group`, with their indices.
     fn group_batches(
         &self,
@@ -348,7 +467,7 @@ impl StreamedCommitment {
 
     /// Records group `group`'s work: every stripe's extension and hashing of its columns (its
     /// coefficients in the group buffer), and the copies of its columns kept whole.
-    fn encode_group(
+    pub fn encode_group(
         &self,
         kernels: &CommitKernels,
         encoder: &mut wgpu::CommandEncoder,
@@ -385,7 +504,7 @@ impl StreamedCommitment {
 
     /// Records stripe `stripe`'s work on the columns of the largest size (their coefficients in
     /// place): their extension, their absorption, the copies of those kept whole.
-    fn encode_top(
+    pub fn encode_top(
         &self,
         kernels: &CommitKernels,
         encoder: &mut wgpu::CommandEncoder,
@@ -417,7 +536,7 @@ impl StreamedCommitment {
     }
 
     /// Records every stripe's last dispatches and levels, and the levels above the stripes.
-    fn encode_levels(&self, encoder: &mut wgpu::CommandEncoder) {
+    pub fn encode_levels(&self, encoder: &mut wgpu::CommandEncoder) {
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("levels"),
             timestamp_writes: None,
@@ -457,13 +576,13 @@ impl StreamedCommitment {
     /// [`Self::commit`], and the time of its phases: the groups, the columns of the largest
     /// size, the copies out of the chunks still being read back (while the GPU hashes the
     /// levels), the readback of the columns kept whole and the layers.
-    pub fn commit_timed(
-        &self,
+    pub fn commit_timed<'a>(
+        &'a self,
         gpu: &GpuContext,
         kernels: &CommitKernels,
         upload: &mut UploadRing,
         readback: &mut ReadbackRing,
-        polys: &[CircleCoefficients<SimdBackend>],
+        polys: &'a [CircleCoefficients<SimdBackend>],
     ) -> (CommitOutput, [Duration; 4]) {
         let mut phases = [Duration::ZERO; 4];
         let mut start = Instant::now();
@@ -480,19 +599,15 @@ impl StreamedCommitment {
             |i: usize| bytemuck::cast_slice::<BaseField, u8>(polys[i].coeffs.as_slice());
         let mut reads = Reads::new(self.log_sizes.len());
 
+        let uploads = |places: Vec<Place<'a>>| {
+            places
+                .into_iter()
+                .map(|(i, dst, dst_offset)| Upload { dst, dst_offset, src: coefficients(i) })
+                .collect_vec()
+        };
         for group in 0..self.n_groups() {
             // The group's coefficients.
-            let pieces = self
-                .group_batches(group)
-                .flat_map(|(_, batch)| {
-                    batch.columns.iter().enumerate().map(move |(k, &i)| Upload {
-                        dst: &self.group,
-                        dst_offset: (batch.offset + ((k as u64) << batch.log_size)) * 4,
-                        src: coefficients(self.lower.indices[i]),
-                    })
-                })
-                .collect_vec();
-            upload.upload(gpu, &pieces);
+            upload.upload(gpu, &uploads(self.group_uploads(group)));
 
             // Every stripe's extension and hashing of the group, the columns kept whole.
             let mut encoder = gpu
@@ -502,36 +617,13 @@ impl StreamedCommitment {
             gpu.queue.submit([encoder.finish()]);
 
             // Stripe 0's columns of the group (not kept whole), read back.
-            let columns = self
-                .group_batches(group)
-                .filter(|(_, batch)| !kept_whole(batch.log_size, self.log_blowup))
-                .flat_map(|(_, batch)| {
-                    batch.columns.iter().enumerate().map(move |(k, &i)| {
-                        let offset = (batch.offset + ((k as u64) << batch.log_size)) * 4;
-                        (self.lower.indices[i], &self.stripes, offset)
-                    })
-                })
-                .collect_vec();
-            reads.read(gpu, readback, &self.log_sizes, &columns);
+            reads.read(gpu, readback, &self.log_sizes, &self.group_reads(group));
         }
         lap(0);
 
-        if let Some(top) = &self.top {
+        if self.top.is_some() {
             // The largest size's coefficients, while the GPU works on the last groups.
-            let pieces = top
-                .part
-                .layout
-                .batches
-                .iter()
-                .flat_map(|batch| {
-                    batch.columns.iter().enumerate().map(move |(k, &i)| Upload {
-                        dst: &top.coeffs.buffers[batch.buffer],
-                        dst_offset: (batch.offset + ((k as u64) << batch.log_size)) * 4,
-                        src: coefficients(top.part.indices[i]),
-                    })
-                })
-                .collect_vec();
-            upload.upload(gpu, &pieces);
+            upload.upload(gpu, &uploads(self.top_uploads()));
             // Stripe by stripe, stripe 0 first: its columns read back while the GPU works on the
             // other stripes.
             for stripe in 0..n_stripes {
@@ -541,22 +633,9 @@ impl StreamedCommitment {
                 self.encode_top(kernels, &mut encoder, stripe);
                 gpu.queue.submit([encoder.finish()]);
                 if stripe == 0 {
-                    let columns = top
-                        .part
-                        .layout
-                        .batches
-                        .iter()
-                        .filter(|batch| !kept_whole(batch.log_size, self.log_blowup))
-                        .flat_map(|batch| {
-                            batch.columns.iter().enumerate().map(move |(k, &i)| {
-                                let offset = (batch.offset + ((k as u64) << batch.log_size)) * 4;
-                                (top.part.indices[i], &top.out.buffers[batch.buffer], offset)
-                            })
-                        })
-                        .collect_vec();
                     // Started before stripe 1 overwrites them (the ring's chunks are copied out
                     // to make room if needed).
-                    reads.read(gpu, readback, &self.log_sizes, &columns);
+                    reads.read(gpu, readback, &self.log_sizes, &self.top_reads());
                 }
             }
         }
@@ -591,13 +670,14 @@ impl StreamedCommitment {
             })
             .collect_vec();
         let mut pieces = vec![];
+        let mut whole_reads = self.whole_reads().into_iter();
         for (i, column) in &mut whole_columns {
-            let offset = self.whole_slots[*i].unwrap();
             let whole = self.whole.as_ref().unwrap();
             let words = bytemuck::cast_slice_mut::<BaseField, u8>(column.as_mut_slice());
             let len = words.len() / n_stripes;
             for (stripe, words) in words.chunks_exact_mut(len).enumerate() {
-                let src_offset = (stripe as u64 * self.whole_words + offset) * 4;
+                let (column, s, src_offset) = whole_reads.next().unwrap();
+                assert_eq!((column, s), (*i, stripe));
                 pieces.push((0, src_offset, whole, words));
             }
         }

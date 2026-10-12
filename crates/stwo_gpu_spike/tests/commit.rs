@@ -25,8 +25,8 @@ use stwo::prover::poly::circle::{CircleCoefficients, PolyOps};
 use stwo::prover::poly::twiddles::TwiddleTree;
 use stwo_gpu_spike::GpuContext;
 use stwo_gpu_spike::commit::{
-    CommitBuffers, CommitKernels, CommitOptions, StripedCommitment, commit_striped, kept_whole,
-    takes_striped_path,
+    CommitBuffers, CommitKernels, CommitOptions, StripedCommitment, TwiddleCache, commit_striped,
+    kept_whole, takes_striped_path,
 };
 use stwo_gpu_spike::committer::{Declined, GpuCommitter};
 use stwo_gpu_spike::extension::{Merge, StripeTwiddles};
@@ -289,8 +289,7 @@ fn webgpu_default_limits_and_several_buffers() {
     assert!(layout.buffer_words.len() >= 8);
     assert!(layout.batches.len() > distinct + 4, "some size split across buffers");
     for merge in [Merge::Off, Merge::Small, Merge::All] {
-        let options =
-            CommitOptions { max_buffer_words: Some(max_words), merge, ..Default::default() };
+        let options = CommitOptions { max_buffer_words: Some(max_words), merge };
         check(&gpu, &kernels, &log_sizes, CAIRO_LOG_BLOWUP, lifting_log_size, options, 500);
     }
 }
@@ -431,6 +430,77 @@ fn committer_reuses_across_shapes() {
             times.total,
         );
     }
+}
+
+/// What a browser's GPU worker keeps between commitments: the twiddles got lazily (the tree only
+/// on a miss) and dropped when replaced, the buffers' generation (plans built on them stay valid
+/// while it holds), commitments' plans freed while the buffers are kept and reused.
+#[test]
+fn kept_state_for_a_browser_worker() {
+    let gpu = GpuContext::new();
+    let kernels = CommitKernels::new(&gpu);
+    let (log_blowup, lifting_log_size) = (CAIRO_LOG_BLOWUP, 16);
+    let tree = twiddles(lifting_log_size);
+    let mut cache = TwiddleCache::new();
+    let mut calls = 0;
+    let mut get = |cache: &mut TwiddleCache, sizes: &[u32]| {
+        let sizes = sizes.iter().copied().collect();
+        cache
+            .try_get_with(&gpu, &sizes, log_blowup, tree.root_coset, || {
+                calls += 1;
+                Ok::<_, ()>(TwiddleTree {
+                    root_coset: tree.root_coset,
+                    twiddles: tree.twiddles.clone(),
+                    itwiddles: vec![],
+                })
+            })
+            .unwrap()
+    };
+    let small = get(&mut cache, &[10, 12]);
+    assert!(cache.holds(&small));
+    let again = get(&mut cache, &[11]);
+    assert!(Arc::ptr_eq(&small, &again), "covered: the same table");
+    let larger = get(&mut cache, &[10, 13]);
+    assert!(!Arc::ptr_eq(&small, &larger) && cache.holds(&larger) && !cache.holds(&small));
+    assert_eq!(calls, 2, "the tree is got on a miss only");
+    drop((small, again));
+
+    let mut buffers = CommitBuffers::new();
+    let generation = buffers.generation();
+    let mut generations = vec![];
+    let shapes: [&[u32]; 3] =
+        [&[13, 13, 12, 10, 8, 6, 4], &[13, 13, 13, 13, 12, 12, 11, 9, 5], &[13, 12, 10, 8, 6, 4]];
+    for (k, log_sizes) in shapes.into_iter().enumerate() {
+        let polys = random_polys(log_sizes, 900 + k as u64);
+        let cpu = cpu_commit(&polys, log_blowup, &tree, lifting_log_size);
+        let table = cache.get(&gpu, &log_sizes.iter().copied().collect(), log_blowup, &tree);
+        let commitment = StreamedCommitment::with_buffers(
+            &gpu,
+            &kernels,
+            &mut buffers,
+            table,
+            log_sizes,
+            log_blowup,
+            lifting_log_size,
+            1 << 14,
+        );
+        let mut upload = UploadRing::new(&gpu, 1 << 16, 2);
+        let mut readback = ReadbackRing::new(&gpu, 1 << 16, 2);
+        let output = commitment.commit(&gpu, &kernels, &mut upload, &mut readback, &polys);
+        commitment.destroy_plans();
+        assert_trees_eq(&commitment.tree_prover(output), &cpu, &format!("tree {k}"));
+        generations.push(buffers.generation());
+    }
+    // The first tree's buffers are new (none replaced), the second tree's are larger (some
+    // replaced), the third fits in them.
+    assert_eq!(generations[0], generation);
+    assert!(generations[1] > generations[0]);
+    assert_eq!(generations[2], generations[1]);
+    let before = buffers.generation();
+    buffers.destroy();
+    assert!(buffers.generation() > before && buffers.bytes() == 0);
+    cache.destroy();
+    assert!(cache.bytes() == 0 && !cache.holds(&larger));
 }
 
 /// The streamed commitment (groups of columns, every stripe of a group at once) of random

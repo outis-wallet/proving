@@ -543,13 +543,14 @@ fn main() {
         let commitment = commitment.unwrap();
         let bytes = commitment.gpu_bytes();
         println!(
-            "GPU setup: first {}, then {} (plans only); {} groups; {} on the device \
-             (coefficients: a group's and the largest size's {}, evaluations: every stripe's of a \
-             group and one stripe's of the largest size {}, Merkle states {}, layers {}, columns \
-             kept whole {}; twiddles apart)",
+            "GPU setup: first {}, then {} (plans only); {} groups, {:?} dispatches (extension, \
+             hashing); {} on the device (coefficients: a group's and the largest size's {}, \
+             evaluations: every stripe's of a group and one stripe's of the largest size {}, \
+             Merkle states {}, layers {}, columns kept whole {}; twiddles apart)",
             ms(setups[0]).trim(),
             ms(*setups[1..].iter().min().unwrap()).trim(),
             commitment.n_groups(),
+            commitment.n_dispatches(),
             mib(bytes.device()),
             mib(bytes.coefficients),
             mib(bytes.evaluations),

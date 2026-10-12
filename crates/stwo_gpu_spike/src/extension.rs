@@ -978,10 +978,14 @@ impl StripeExtension {
         self.twiddles.bytes()
     }
 
-    /// Frees the twiddles' and the parameters' buffers now (see `StripedCommitment::destroy`):
-    /// the twiddles' are shared with whatever else holds them.
+    /// The twiddles it reads (shared with whatever else holds them).
+    pub fn twiddles(&self) -> &Arc<StripeTwiddles> {
+        &self.twiddles
+    }
+
+    /// Frees the parameters' buffers now, not the twiddles' (see
+    /// `StripedCommitment::destroy_plans`).
     pub fn destroy(&self) {
-        self.twiddles.destroy();
         for buffer in &self._params {
             buffer.destroy();
         }
@@ -1162,6 +1166,11 @@ impl GroupedExtension {
 
     pub fn n_groups(&self) -> usize {
         self.groups.len()
+    }
+
+    /// Frees the parameters' buffer now (see `StreamedCommitment::destroy_plans`).
+    pub fn destroy(&self) {
+        self._params.destroy();
     }
 
     /// The dispatches of every group.
