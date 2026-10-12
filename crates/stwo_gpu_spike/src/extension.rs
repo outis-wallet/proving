@@ -531,7 +531,7 @@ const MERGED_PARAMS: &str = "struct Merged {
     pad: u32,
     batches: array<Params, MAX_MERGED>,
 }
-@group(0) @binding(3) var<uniform> merged: Merged;
+@group(0) @binding(3) var<storage, read> merged: Merged;
 // The workgroup's batch's parameters, for the functions `main` calls.
 var<private> params: Params;";
 const MERGED_PROLOGUE: &str = "    let gw = wid.x + wid.y * merged.n_wg_x;
@@ -648,11 +648,17 @@ impl ExtensionKernels {
             },
             count: None,
         };
-        let params = |size: usize| wgpu::BindGroupLayoutEntry {
+        let params = |size: usize, merged: bool| wgpu::BindGroupLayoutEntry {
             binding: 3,
             visibility: wgpu::ShaderStages::COMPUTE,
             ty: wgpu::BindingType::Buffer {
-                ty: wgpu::BufferBindingType::Uniform,
+                // The merged table in a storage buffer: Adreno 830 (Vulkan) evaluated the merged
+                // kernels wrong with it in a uniform buffer.
+                ty: if merged {
+                    wgpu::BufferBindingType::Storage { read_only: true }
+                } else {
+                    wgpu::BufferBindingType::Uniform
+                },
                 has_dynamic_offset: true,
                 min_binding_size: wgpu::BufferSize::new(size as u64),
             },
@@ -692,12 +698,21 @@ impl ExtensionKernels {
                 if kind.merged { ", merged" } else { "" }
             );
             if kind.in_place {
-                make(&label, kind, &[storage(1, false), storage(2, true), params(size)])
+                make(
+                    &label,
+                    kind,
+                    &[storage(1, false), storage(2, true), params(size, kind.merged)],
+                )
             } else {
                 make(
                     &label,
                     kind,
-                    &[storage(0, true), storage(1, false), storage(2, true), params(size)],
+                    &[
+                        storage(0, true),
+                        storage(1, false),
+                        storage(2, true),
+                        params(size, kind.merged),
+                    ],
                 )
             }
         });
@@ -705,7 +720,8 @@ impl ExtensionKernels {
         Self {
             pipelines,
             params_stride: (size_of::<Params>() as u64).next_multiple_of(align),
-            merged_stride: (size_of::<MergedParams>() as u64).next_multiple_of(align),
+            merged_stride: (size_of::<MergedParams>() as u64)
+                .next_multiple_of(align.max(u64::from(limits.min_storage_buffer_offset_alignment))),
             max_workgroups_per_dimension: limits.max_compute_workgroups_per_dimension,
         }
     }
@@ -905,6 +921,7 @@ impl StripeExtension {
             params: &[T],
             stride: u64,
             label: &str,
+            usage: wgpu::BufferUsages,
         ) -> wgpu::Buffer {
             let stride = stride as usize;
             let mut bytes = vec![0u8; (params.len() * stride).max(stride.max(size_of::<T>()))];
@@ -915,12 +932,24 @@ impl StripeExtension {
             gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some(label),
                 contents: &bytes,
-                usage: wgpu::BufferUsages::UNIFORM,
+                usage,
             })
         }
         let params_buffers = [
-            uniforms(gpu, &params, kernels.params_stride, "extension params"),
-            uniforms(gpu, &merged_params, kernels.merged_stride, "extension merged params"),
+            uniforms(
+                gpu,
+                &params,
+                kernels.params_stride,
+                "extension params",
+                wgpu::BufferUsages::UNIFORM,
+            ),
+            uniforms(
+                gpu,
+                &merged_params,
+                kernels.merged_stride,
+                "extension merged params",
+                wgpu::BufferUsages::STORAGE,
+            ),
         ];
 
         let entry = |binding, resource| wgpu::BindGroupEntry { binding, resource };
@@ -1138,7 +1167,7 @@ impl GroupedExtension {
         let params = gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("grouped extension params"),
             contents: &bytes,
-            usage: wgpu::BufferUsages::UNIFORM,
+            usage: wgpu::BufferUsages::STORAGE,
         });
         let params_binding = wgpu::BindingResource::Buffer(wgpu::BufferBinding {
             buffer: &params,
