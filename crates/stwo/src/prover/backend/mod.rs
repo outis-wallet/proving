@@ -30,7 +30,7 @@ pub trait Backend:
 }
 
 pub trait BackendForChannel<MC: MerkleChannel>:
-    Backend + MerkleOpsLifted<MC::H> + GrindOps<MC::C>
+    Backend + MerkleOpsLifted<MC::H> + GrindOps<MC::C> + 'static
 {
 }
 

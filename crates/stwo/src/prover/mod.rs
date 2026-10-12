@@ -14,7 +14,10 @@ pub use air::component_prover::{ComponentProver, ComponentProvers, Poly, Trace};
 pub use air::{AccumulationOps, ColumnAccumulator, DomainEvaluationAccumulator, EvaluationMode};
 pub mod pcs;
 pub use pcs::quotient_ops::QuotientOps;
-pub use pcs::{CommitmentSchemeProver, CommitmentTreeProver, TreeBuilder};
+pub use pcs::{
+    CommitmentSchemeProver, CommitmentTreeProver, StripedCommitHook, TreeBuilder,
+    set_striped_commit_hook,
+};
 pub mod backend;
 pub mod channel;
 pub mod fri;

@@ -40,7 +40,7 @@ pub trait Channel: Default + Clone + Debug {
     fn draw_u32s(&mut self) -> Vec<u32>;
 }
 
-pub trait MerkleChannel: Default {
+pub trait MerkleChannel: Default + 'static {
     type C: Channel;
     type H: MerkleHasherLifted;
     fn mix_root(channel: &mut Self::C, root: <Self::H as MerkleHasherLifted>::Hash);

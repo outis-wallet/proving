@@ -33,6 +33,57 @@ use crate::prover::vcs_lifted::prover::MerkleProverLifted;
 
 pub mod quotient_ops;
 
+/// A replacement for [`CommitmentTreeProver::new_striped`]'s own work on one backend and
+/// channel, e.g. on a GPU. Given `new_striped`'s arguments (the polynomials, the log blowup
+/// factor, the twiddles and the lifting log size), it returns the tree `new_striped` would, or
+/// gives the polynomials back for `new_striped` to commit them itself.
+///
+/// A hook must return exactly `new_striped`'s tree: every Merkle layer, and every column's kept
+/// evaluations on its domain, without coefficients. The commitment, and so every later step of
+/// the proof, depends on it bit for bit; stwo does not check it.
+pub type StripedCommitHook<B, MC> = dyn Fn(
+        ColumnVec<CircleCoefficients<B>>,
+        u32,
+        &TwiddleTree<B>,
+        u32,
+    ) -> Result<CommitmentTreeProver<B, MC>, ColumnVec<CircleCoefficients<B>>>
+    + Send
+    + Sync;
+
+/// The registered hooks, by backend and channel: `Arc<StripedCommitHook<B, MC>>`s behind `Any`.
+static STRIPED_COMMIT_HOOKS: std::sync::RwLock<
+    Option<HashMap<std::any::TypeId, std::sync::Arc<dyn std::any::Any + Send + Sync>>>,
+> = std::sync::RwLock::new(None);
+
+/// Sets the hook [`CommitmentTreeProver::new_striped`] tries first, for backend `B` and channel
+/// `MC`, or removes it (`None`). It applies to the trees committed from then on, in every thread.
+pub fn set_striped_commit_hook<B: BackendForChannel<MC>, MC: MerkleChannel>(
+    hook: Option<std::sync::Arc<StripedCommitHook<B, MC>>>,
+) {
+    let key = std::any::TypeId::of::<(B, MC)>();
+    let mut hooks = STRIPED_COMMIT_HOOKS.write().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let hooks = hooks.get_or_insert_with(HashMap::new);
+    match hook {
+        Some(hook) => {
+            hooks.insert(key, std::sync::Arc::new(hook));
+        }
+        None => {
+            hooks.remove(&key);
+        }
+    }
+}
+
+/// The hook registered for backend `B` and channel `MC`, if any.
+fn striped_commit_hook<B: BackendForChannel<MC>, MC: MerkleChannel>()
+-> Option<std::sync::Arc<StripedCommitHook<B, MC>>> {
+    let hooks = STRIPED_COMMIT_HOOKS.read().unwrap_or_else(|poisoned| poisoned.into_inner());
+    hooks
+        .as_ref()?
+        .get(&std::any::TypeId::of::<(B, MC)>())?
+        .downcast_ref::<std::sync::Arc<StripedCommitHook<B, MC>>>()
+        .cloned()
+}
+
 /// The prover side of a FRI polynomial commitment scheme. See [super].
 pub struct CommitmentSchemeProver<'a, B: BackendForChannel<MC>, MC: MerkleChannel> {
     pub trees: TreeVec<MaybeOwned<'a, CommitmentTreeProver<B, MC>>>,
@@ -523,7 +574,7 @@ impl<B: BackendForChannel<MC>, MC: MerkleChannel> CommitmentTreeProver<B, MC> {
     /// by side, and the layers above are hashed from their roots. Every layer is the one
     /// [`Self::new`] builds. Small columns are kept whole.
     pub fn new_striped(
-        polynomials: ColumnVec<CircleCoefficients<B>>,
+        mut polynomials: ColumnVec<CircleCoefficients<B>>,
         log_blowup_factor: u32,
         twiddles: &TwiddleTree<B>,
         lifting_log_size: u32,
@@ -551,6 +602,15 @@ impl<B: BackendForChannel<MC>, MC: MerkleChannel> CommitmentTreeProver<B, MC> {
                 lifting_log_size,
                 base_column_pool,
             );
+        }
+        // A registered hook (see [`StripedCommitHook`]) commits the tree instead, or gives the
+        // polynomials back.
+        if let Some(hook) = striped_commit_hook::<B, MC>() {
+            let _span = span!(Level::INFO, "Striped commitment (hook)").entered();
+            match hook(polynomials, log_blowup_factor, twiddles, lifting_log_size) {
+                Ok(tree) => return tree,
+                Err(given_back) => polynomials = given_back,
+            }
         }
         let _span = span!(Level::INFO, "Striped commitment").entered();
 
@@ -785,5 +845,91 @@ fn print_column_size_histogram<B: BackendForChannel<MC>, MC: MerkleChannel>(
     }
     for (log_size, count) in log_size_histogram {
         info!("Log size {log_size}: {count}");
+    }
+}
+
+#[cfg(test)]
+mod striped_commit_hook_tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::*;
+    use crate::core::vcs_lifted::blake2_merkle::Blake2sM31MerkleChannel;
+    use crate::prover::backend::simd::SimdBackend;
+    use crate::prover::backend::simd::column::BaseColumn;
+    use crate::prover::poly::circle::PolyOps;
+
+    type Tree = CommitmentTreeProver<SimdBackend, Blake2sM31MerkleChannel>;
+
+    /// This test's trees only: a lifting log size and a column count no other test commits, so
+    /// that the hook, which is process-wide, declines everyone else's.
+    const LIFTING_LOG_SIZE: u32 = 17;
+    const LOG_SIZES: [u32; 3] = [13, 14, 14];
+    const LOG_BLOWUP: u32 = 3;
+
+    fn polys() -> Vec<CircleCoefficients<SimdBackend>> {
+        LOG_SIZES
+            .iter()
+            .enumerate()
+            .map(|(c, &log_size)| {
+                CircleCoefficients::new(
+                    (0..1u32 << log_size)
+                        .map(|i| BaseField::from(i.wrapping_mul(2_654_435_761).wrapping_add(c as u32) >> 1))
+                        .collect::<BaseColumn>(),
+                )
+            })
+            .collect()
+    }
+
+    fn ours(polynomials: &[CircleCoefficients<SimdBackend>], lifting_log_size: u32) -> bool {
+        lifting_log_size == LIFTING_LOG_SIZE && polynomials.len() == LOG_SIZES.len()
+    }
+
+    #[test]
+    fn hook_declines_commits_or_is_removed() {
+        let twiddles = SimdBackend::precompute_twiddles(
+            CanonicCoset::new(LIFTING_LOG_SIZE).circle_domain().half_coset,
+        );
+        let pool = BaseColumnPool::<SimdBackend>::new();
+        let cpu = Tree::new_striped(polys(), LOG_BLOWUP, &twiddles, LIFTING_LOG_SIZE, &pool);
+        // The striped path: the large columns keep their first stripe only.
+        assert!(cpu.polynomials.iter().any(|p| p.evals.values.len() < p.evals.domain.size()));
+
+        // A hook that gives the polynomials back: the CPU commits them, the same tree.
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counted = calls.clone();
+        set_striped_commit_hook::<SimdBackend, Blake2sM31MerkleChannel>(Some(Arc::new(
+            move |polynomials, _, _, lifting_log_size| {
+                if ours(&polynomials, lifting_log_size) {
+                    counted.fetch_add(1, Ordering::SeqCst);
+                }
+                Err(polynomials)
+            },
+        )));
+        let declined = Tree::new_striped(polys(), LOG_BLOWUP, &twiddles, LIFTING_LOG_SIZE, &pool);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(declined.commitment.root(), cpu.commitment.root());
+        assert_eq!(declined.commitment.layers, cpu.commitment.layers);
+
+        // A hook that commits: its tree is new_striped's result. Here it is `new`'s (every column
+        // whole), which has the same layers and tells the two apart.
+        let pool_for_hook = Arc::new(BaseColumnPool::<SimdBackend>::new());
+        set_striped_commit_hook::<SimdBackend, Blake2sM31MerkleChannel>(Some(Arc::new(
+            move |polynomials, log_blowup, twiddles, lifting_log_size| {
+                if !ours(&polynomials, lifting_log_size) {
+                    return Err(polynomials);
+                }
+                Ok(Tree::new(polynomials, log_blowup, twiddles, false, lifting_log_size, &pool_for_hook))
+            },
+        )));
+        let hooked = Tree::new_striped(polys(), LOG_BLOWUP, &twiddles, LIFTING_LOG_SIZE, &pool);
+        assert_eq!(hooked.commitment.layers, cpu.commitment.layers);
+        assert!(hooked.polynomials.iter().all(|p| p.evals.values.len() == p.evals.domain.size()));
+
+        // Removed: the CPU's striped path again.
+        set_striped_commit_hook::<SimdBackend, Blake2sM31MerkleChannel>(None);
+        let removed = Tree::new_striped(polys(), LOG_BLOWUP, &twiddles, LIFTING_LOG_SIZE, &pool);
+        assert_eq!(removed.commitment.layers, cpu.commitment.layers);
+        assert!(removed.polynomials.iter().any(|p| p.evals.values.len() < p.evals.domain.size()));
     }
 }
