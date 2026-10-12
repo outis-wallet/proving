@@ -238,6 +238,11 @@ pub struct CommitOptions {
     /// How the extension's dispatches take the batches (default: one dispatch per batch and
     /// pass).
     pub merge: Merge,
+    /// No staging buffers for [`StripedCommitment::read`]: the caller reads the result back from
+    /// the device buffers itself (a browser's GPU worker, through a ring of small mappable
+    /// buffers, see `web/gpu`). [`StripedCommitment::encode_readback`] and
+    /// [`StripedCommitment::read`] then panic.
+    pub without_staging: bool,
 }
 
 /// The striped commitment of a tree of given shapes on the GPU (see the module docs): its
@@ -263,7 +268,8 @@ pub struct StripedCommitment {
     whole_slots: Vec<Option<u64>>,
     /// The columns kept whole, every stripe: stripe `s` at `s * whole_words`.
     whole: Option<wgpu::Buffer>,
-    readback: Readback,
+    /// `None` when built [`CommitOptions::without_staging`].
+    readback: Option<Readback>,
 }
 
 impl StripedCommitment {
@@ -385,7 +391,7 @@ impl StripedCommitment {
                 mapped_at_creation: false,
             })
         };
-        let readback = Readback {
+        let readback = (!options.without_staging).then(|| Readback {
             out: layout
                 .buffer_words
                 .iter()
@@ -393,7 +399,7 @@ impl StripedCommitment {
                 .collect(),
             whole: whole.as_ref().map(|whole| staging("whole columns readback", whole.size() / 4)),
             tree: staging("layers readback", tree_layout.total_words),
-        };
+        });
 
         Self {
             log_sizes: log_sizes.to_vec(),
@@ -445,6 +451,60 @@ impl StripedCommitment {
         )
     }
 
+    /// The buffers the coefficients go to, as [`Self::layout`] places them.
+    pub fn coefficient_buffers(&self) -> &[wgpu::Buffer] {
+        &self.coeffs.buffers
+    }
+
+    /// The buffers of a stripe's evaluations, as [`Self::layout`] places them: stripe 0's once
+    /// the commitment ran.
+    pub fn evaluation_buffers(&self) -> &[wgpu::Buffer] {
+        &self.out.buffers
+    }
+
+    /// The tree's stored levels, as [`Self::tree_layout`] places them.
+    pub fn tree_buffer(&self) -> &wgpu::Buffer {
+        &self.tree
+    }
+
+    /// The columns kept whole ([`kept_whole`]), every stripe's: stripe `s` of column `i` at word
+    /// `s * whole_stride + whole_slot(i)`, `2^log_size` words.
+    pub fn whole_buffer(&self) -> Option<&wgpu::Buffer> {
+        self.whole.as_ref()
+    }
+
+    /// See [`Self::whole_buffer`]: `None` for a column not kept whole.
+    pub fn whole_slot(&self, column: usize) -> Option<u64> {
+        self.whole_slots[column]
+    }
+
+    /// See [`Self::whole_buffer`]: the words of a stripe of the columns kept whole.
+    pub fn whole_stride(&self) -> u64 {
+        self.whole_words
+    }
+
+    /// Frees the commitment's device and staging buffers now. In a browser a buffer's memory is
+    /// otherwise held until its JS object is garbage collected (wgpu's WebGPU backend doesn't
+    /// destroy buffers on drop). Nothing may be recorded or read after this.
+    pub fn destroy(&self) {
+        self.coeffs.destroy();
+        self.out.destroy();
+        self.extension.destroy();
+        self.tree.destroy();
+        self.states.destroy();
+        for plan in self.stripe_plans.iter().chain([&self.top]) {
+            plan.destroy();
+        }
+        if let Some(whole) = &self.whole {
+            whole.destroy();
+        }
+        if let Some(readback) = &self.readback {
+            for buffer in readback.out.iter().chain(&readback.whole).chain([&readback.tree]) {
+                buffer.destroy();
+            }
+        }
+    }
+
     /// The bytes of the device buffers (coefficients, one stripe's evaluations, twiddles, Merkle
     /// states, the tree's levels, the whole columns), and of the staging buffers of the readback.
     pub fn gpu_bytes(&self) -> GpuBytes {
@@ -456,9 +516,11 @@ impl StripedCommitment {
             states: self.states.bytes(),
             tree: self.tree.size(),
             whole: self.whole.as_ref().map_or(0, wgpu::Buffer::size),
-            staging: sum(&self.readback.out)
-                + self.readback.whole.as_ref().map_or(0, wgpu::Buffer::size)
-                + self.readback.tree.size(),
+            staging: self.readback.as_ref().map_or(0, |readback| {
+                sum(&readback.out)
+                    + readback.whole.as_ref().map_or(0, wgpu::Buffer::size)
+                    + readback.tree.size()
+            }),
         }
     }
 
@@ -558,18 +620,19 @@ impl StripedCommitment {
     /// Records the copies of the result into the staging buffers (after [`Self::encode`]): the
     /// output buffers (stripe 0), the columns kept whole, the tree's levels.
     pub fn encode_readback(&self, encoder: &mut wgpu::CommandEncoder) {
+        let readback = self.readback.as_ref().expect("built without staging");
         for ((buffer, staging), &words) in
-            self.out.buffers.iter().zip(&self.readback.out).zip(&self.layout.buffer_words)
+            self.out.buffers.iter().zip(&readback.out).zip(&self.layout.buffer_words)
         {
             encoder.copy_buffer_to_buffer(buffer, 0, staging, 0, words * 4);
         }
-        if let (Some(whole), Some(staging)) = (&self.whole, &self.readback.whole) {
+        if let (Some(whole), Some(staging)) = (&self.whole, &readback.whole) {
             encoder.copy_buffer_to_buffer(whole, 0, staging, 0, whole.size());
         }
         encoder.copy_buffer_to_buffer(
             &self.tree,
             0,
-            &self.readback.tree,
+            &readback.tree,
             0,
             self.tree_layout.total_words * 4,
         );
@@ -597,7 +660,7 @@ impl StripedCommitment {
     /// The result, after the submission of [`Self::encode_readback`]: maps the staging buffers
     /// and copies them into stwo's columns.
     pub fn read(&self, gpu: &GpuContext) -> CommitOutput {
-        let readback = &self.readback;
+        let readback = self.readback.as_ref().expect("built without staging");
         let staging =
             readback.out.iter().chain(&readback.whole).chain([&readback.tree]).collect_vec();
         for buffer in &staging {
@@ -619,12 +682,15 @@ impl StripedCommitment {
             let mut layers = self.tree_layout.levels(tree_words);
             layers.reverse();
             let n_stripes = self.n_stripes();
+            // Only plain data in the closure: wgpu's buffers aren't `Sync` on the web backend.
+            let (layout, whole_slots, whole_stride) =
+                (&self.layout, &self.whole_slots, self.whole_words);
             let evaluations = (0..self.log_sizes.len())
                 .into_par_iter()
                 .map(|i| {
-                    let slot = self.layout.slots[i];
+                    let slot = layout.slots[i];
                     let len = 1usize << slot.log_size;
-                    match self.whole_slots[i] {
+                    match whole_slots[i] {
                         None => {
                             let start = slot.offset as usize;
                             column_from_words(&out_words[slot.buffer][start..start + len])
@@ -636,7 +702,7 @@ impl StripedCommitment {
                             let values =
                                 bytemuck::cast_slice_mut::<BaseField, u32>(column.as_mut_slice());
                             for (stripe, chunk) in values.chunks_exact_mut(len).enumerate() {
-                                let start = (stripe as u64 * self.whole_words + offset) as usize;
+                                let start = (stripe as u64 * whole_stride + offset) as usize;
                                 chunk.copy_from_slice(&whole[start..start + len]);
                             }
                             column

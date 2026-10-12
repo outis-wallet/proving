@@ -203,6 +203,13 @@ impl GpuColumns {
         }
     }
 
+    /// Frees the buffers now (see `StripedCommitment::destroy`).
+    pub fn destroy(&self) {
+        for buffer in &self.buffers {
+            buffer.destroy();
+        }
+    }
+
     /// Buffers to read the columns back through (see [`Self::read_into`]).
     pub fn staging(&self, gpu: &GpuContext) -> Vec<wgpu::Buffer> {
         self.layout
@@ -866,6 +873,13 @@ impl StripeExtension {
     /// The bytes of twiddles on the GPU, all stripes.
     pub fn twiddle_bytes(&self) -> u64 {
         self.twiddles.iter().map(|buffer| buffer.size()).sum()
+    }
+
+    /// Frees the twiddles' and the parameters' buffers now (see `StripedCommitment::destroy`).
+    pub fn destroy(&self) {
+        for buffer in self.twiddles.iter().chain(&self._params) {
+            buffer.destroy();
+        }
     }
 
     /// Records the evaluation of stripe `stripe` of every column into `out`, in one compute pass.

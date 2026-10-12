@@ -285,7 +285,8 @@ fn webgpu_default_limits_and_several_buffers() {
     assert!(layout.buffer_words.len() >= 8);
     assert!(layout.batches.len() > distinct + 4, "some size split across buffers");
     for merge in [Merge::Off, Merge::Small, Merge::All] {
-        let options = CommitOptions { max_buffer_words: Some(max_words), merge };
+        let options =
+            CommitOptions { max_buffer_words: Some(max_words), merge, ..Default::default() };
         check(&gpu, &kernels, &log_sizes, CAIRO_LOG_BLOWUP, lifting_log_size, options, 500);
     }
 }

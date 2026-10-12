@@ -617,6 +617,13 @@ impl StateBuffers {
     pub fn bytes(&self) -> u64 {
         self.buffers.iter().map(wgpu::Buffer::size).sum()
     }
+
+    /// Frees both buffers now (see `StripedCommitment::destroy`).
+    pub fn destroy(&self) {
+        for buffer in &self.buffers {
+            buffer.destroy();
+        }
+    }
 }
 
 /// A recorded sequence of dispatches, with their parameters and bindings, ready to be recorded
@@ -637,6 +644,13 @@ impl Plan {
 
     pub fn n_dispatches(&self) -> usize {
         self.steps.len()
+    }
+
+    /// Frees its parameters' buffer now (see `StripedCommitment::destroy`).
+    pub fn destroy(&self) {
+        if let Some(uniforms) = &self._uniforms {
+            uniforms.destroy();
+        }
     }
 }
 
