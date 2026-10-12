@@ -322,6 +322,9 @@ pub struct GpuComposer {
     config: ComposerConfig,
     registry: Arc<Mutex<HashMap<KernelKey, KernelState>>>,
     queue: Arc<CompileQueue>,
+    /// The pipeline cache and its file (the library's), persisted as kernels compile and at
+    /// shutdown.
+    cache: Option<PersistedCache>,
     run: Mutex<RunBuffers>,
     stats: Arc<Mutex<ComposerStats>>,
     shadow: AtomicBool,
@@ -374,7 +377,8 @@ impl GpuComposer {
         if let Some(library) = &config.library {
             let _ = fs::create_dir_all(library);
         }
-        let cache = Self::pipeline_cache(committer.gpu(), config.library.as_deref());
+        let cache = Self::pipeline_cache(committer.gpu(), config.library.as_deref())
+            .map(|(cache, path)| PersistedCache::new(cache, path));
         for _ in 0..config.compile_threads.max(1) {
             let queue = queue.clone();
             let registry = registry.clone();
@@ -396,6 +400,7 @@ impl GpuComposer {
             config,
             registry,
             queue,
+            cache,
             run: Mutex::new(RunBuffers::default()),
             stats,
         });
@@ -468,9 +473,13 @@ impl GpuComposer {
         self.shadow.store(shadow, Ordering::Relaxed);
     }
 
-    /// Stops the compilation threads once their queue is done.
+    /// Stops the compilation threads once their queue is done, and persists the pipeline cache
+    /// (the kernels compiled so far: a later process takes them from it).
     pub fn shutdown(&self) {
         self.queue.close();
+        if let Some(cache) = &self.cache {
+            cache.persist();
+        }
     }
 
     /// The counts since the last call.
@@ -1038,12 +1047,45 @@ impl GpuComposer {
     }
 }
 
+/// The pipeline cache of the library and its file, persisted at most every
+/// [`PersistedCache::INTERVAL`] while kernels compile, when none is left to compile, and at
+/// shutdown: a process that exits with kernels still compiling keeps the ones compiled.
+#[derive(Clone)]
+struct PersistedCache {
+    cache: wgpu::PipelineCache,
+    path: PathBuf,
+    last: Arc<Mutex<Option<Instant>>>,
+}
+
+impl PersistedCache {
+    const INTERVAL: Duration = Duration::from_secs(2);
+
+    fn new(cache: wgpu::PipelineCache, path: PathBuf) -> Self {
+        Self { cache, path, last: Arc::new(Mutex::new(None)) }
+    }
+
+    fn persist(&self) {
+        *lock(&self.last) = Some(Instant::now());
+        if let Some(data) = self.cache.get_data() {
+            let _ = write_atomic(&self.path, &data);
+        }
+    }
+
+    /// Persists if `idle`, or if the last time is older than the interval.
+    fn persist_if(&self, idle: bool) {
+        let due = lock(&self.last).is_none_or(|last| last.elapsed() >= Self::INTERVAL);
+        if idle || due {
+            self.persist();
+        }
+    }
+}
+
 fn compile_loop(
     committer: &GpuCommitter,
     queue: &CompileQueue,
     registry: &Mutex<HashMap<KernelKey, KernelState>>,
     stats: &Mutex<ComposerStats>,
-    cache: Option<(wgpu::PipelineCache, PathBuf)>,
+    cache: Option<PersistedCache>,
     options: KernelOptions,
 ) {
     loop {
@@ -1051,7 +1093,7 @@ fn compile_loop(
         let start = Instant::now();
         let gpu = committer.gpu();
         let compiled = catch_unwind(AssertUnwindSafe(|| {
-            ConstraintKernels::new(gpu, &program, options, cache.as_ref().map(|c| &c.0))
+            ConstraintKernels::new(gpu, &program, options, cache.as_ref().map(|c| &c.cache))
         }));
         let elapsed = start.elapsed();
         let state = match compiled {
@@ -1069,12 +1111,11 @@ fn compile_loop(
             }
         };
         lock(registry).insert(key, state);
-        // Persist the pipeline cache when the queue is done (another thread may still add).
+        // Persist the pipeline cache when the queue is done (another thread may still add), and
+        // every few seconds before (a process may exit with kernels still compiling).
         let idle = !lock(registry).values().any(|s| matches!(s, KernelState::Compiling));
-        if let (true, Some((cache, path))) = (idle, &cache)
-            && let Some(data) = cache.get_data()
-        {
-            let _ = write_atomic(path, &data);
+        if let Some(cache) = &cache {
+            cache.persist_if(idle);
         }
     }
 }
