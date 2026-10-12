@@ -155,13 +155,12 @@ fn check(
     let (ext, hash, top) = commitment.n_dispatches();
     eprintln!(
         "ok: {what}; {} buffer(s), {} batches; {} levels stored from {}; dispatches per stripe: \
-         {ext} extension, {hash} hashing; {top} above; GPU {:.1} MiB + staging {:.1} MiB; root {}",
+         {ext} extension, {hash} hashing; {top} above; GPU {:.1} MiB; root {}",
         commitment.layout().buffer_words.len(),
         commitment.layout().batches.len(),
         cpu.commitment.layers.iter().filter(|layer| !layer.is_empty()).count(),
         commitment.tree_layout().min_stored_level,
         bytes.device() as f64 / (1 << 20) as f64,
-        bytes.staging as f64 / (1 << 20) as f64,
         cpu.commitment.root(),
     );
 }
@@ -376,5 +375,54 @@ fn committer_matches_new_striped_and_declines() {
         }
         Err((_, declined)) => panic!("declined for another reason: {declined:?}"),
         Ok(_) => panic!("committed a shape new_striped doesn't stripe"),
+    }
+}
+
+/// One committer for trees of every kind in a row, as a proof's: larger and smaller ones (its
+/// buffers grow, then serve smaller trees, stale values and all), other blowups (its twiddles
+/// grow, and are kept per blowup), and after its buffers are released. Every tree is
+/// `new_striped`'s.
+#[test]
+fn committer_reuses_across_shapes() {
+    let committer = GpuCommitter::new().expect("a GPU adapter");
+    let cairo = |scale: u32| {
+        (
+            base_trace_log_sizes(&cairo_pay_components(), scale, 4),
+            CAIRO_LOG_BLOWUP,
+            CAIRO_LIFTING_LOG_SIZE - scale,
+        )
+    };
+    let circuit = |scale: u32| {
+        let mut log_sizes = vec![];
+        for (log_size, n) in [(21, 5), (20, 9), (17, 30), (12, 19), (8, 5), (5, 2)] {
+            log_sizes.extend(std::iter::repeat_n((log_size - scale as i32).max(4) as u32, n));
+        }
+        (log_sizes, CIRCUIT_LOG_BLOWUP, CIRCUIT_LIFTING_LOG_SIZE - scale)
+    };
+    let smallest =
+        ([vec![4; 20], vec![10; 3], vec![7; 5], vec![5; 1], vec![9; 17]].concat(), 4, 14);
+    let sequence = [cairo(6), cairo(3), circuit(4), cairo(5), smallest, circuit(5), cairo(3)];
+    for (k, (log_sizes, log_blowup, lifting_log_size)) in sequence.into_iter().enumerate() {
+        if k == 5 {
+            committer.release_buffers();
+            assert_eq!(committer.held_bytes().buffers, 0);
+        }
+        let polys = random_polys(&log_sizes, 800 + k as u64);
+        let twiddles = twiddles(lifting_log_size);
+        let cpu = cpu_commit(&polys, log_blowup, &twiddles, lifting_log_size);
+        let gpu = committer
+            .commit_striped(polys, log_blowup, &twiddles, lifting_log_size)
+            .unwrap_or_else(|(_, declined)| panic!("declined: {declined:?}"));
+        assert_trees_eq(&gpu, &cpu, &format!("tree {k} of the sequence"));
+        let held = committer.held_bytes();
+        let times = committer.last_times().unwrap();
+        eprintln!(
+            "ok: tree {k}: {} columns, blowup {log_blowup}; held: buffers {:.1} MiB, twiddles \
+             {:.1} MiB; {:?}",
+            log_sizes.len(),
+            held.buffers as f64 / (1 << 20) as f64,
+            held.twiddles as f64 / (1 << 20) as f64,
+            times.total,
+        );
     }
 }

@@ -49,6 +49,23 @@ pub fn base_trace_log_sizes(components: &[Component], scale: u32, min_log_size: 
         .collect()
 }
 
+/// The interaction trace's columns' log sizes, in polynomial order: one per interaction column
+/// (M31 columns, 4 per secure column), of its component's log number of rows less `scale` (but
+/// at least `min_log_size`).
+pub fn interaction_trace_log_sizes(
+    components: &[Component],
+    scale: u32,
+    min_log_size: u32,
+) -> Vec<u32> {
+    components
+        .iter()
+        .flat_map(|c| {
+            let log_size = c.log_rows.saturating_sub(scale).max(min_log_size);
+            std::iter::repeat_n(log_size, c.interaction_columns as usize)
+        })
+        .collect()
+}
+
 /// The order in which a tree's leaves hash columns of these log sizes (given in polynomial
 /// order): by increasing size, columns of one size in polynomial order (a stable sort, as
 /// `new_striped`'s `order` and `MerkleProverLifted::commit`'s).

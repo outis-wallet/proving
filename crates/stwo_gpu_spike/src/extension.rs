@@ -184,6 +184,15 @@ impl GpuColumns {
         Self { buffers, layout }
     }
 
+    /// The columns of `layout` in `buffers`, reused: each at least as large as the layout's.
+    pub fn with_buffers(buffers: Vec<wgpu::Buffer>, layout: Arc<ColumnsLayout>) -> Self {
+        assert_eq!(buffers.len(), layout.buffer_words.len());
+        for (buffer, &words) in buffers.iter().zip(&layout.buffer_words) {
+            assert!(buffer.size() >= words * 4, "a buffer smaller than the layout's");
+        }
+        Self { buffers, layout }
+    }
+
     /// Queues the writes of the columns' words (`columns[i]` for input column `i`).
     pub fn write(&self, gpu: &GpuContext, columns: &[&[u32]]) {
         assert_eq!(columns.len(), self.layout.slots.len());
@@ -312,6 +321,99 @@ pub fn stripe_twiddle_words(
         }
     }
     words
+}
+
+/// The twiddles of every stripe (of `2^log_blowup`) of the domains of columns of the log sizes
+/// `log_sizes`, on the GPU, in one buffer: stripe `s`'s [`stripe_twiddle_words`] at word
+/// `s * stripe_words`, each log size at its [`twiddle_offsets`] within. They depend on the domains
+/// only (and the twiddle tree's coset, which they are read from), not on a tree's columns, so the
+/// twiddles of every log size up to a bound serve every tree of that blowup.
+pub struct StripeTwiddles {
+    pub log_blowup: u32,
+    pub log_sizes: BTreeSet<u32>,
+    /// The word offset of each log size's twiddles in a stripe's.
+    pub offsets: BTreeMap<u32, usize>,
+    /// The words of a stripe's twiddles (a multiple of 64: 256 bytes).
+    pub stripe_words: u64,
+    pub buffer: wgpu::Buffer,
+}
+
+impl StripeTwiddles {
+    /// Computed from `tree` (stwo's twiddle tree, covering the largest domain), every stripe in
+    /// parallel, and uploaded.
+    pub fn new(
+        gpu: &GpuContext,
+        log_sizes: &BTreeSet<u32>,
+        log_blowup: u32,
+        tree: &TwiddleTree<SimdBackend>,
+    ) -> Self {
+        use rayon::prelude::*;
+        let words = (0..1usize << log_blowup)
+            .into_par_iter()
+            .map(|stripe| stripe_twiddle_words(log_sizes, log_blowup, stripe, tree))
+            .collect::<Vec<_>>();
+        Self::from_words(gpu, log_sizes, log_blowup, &words)
+    }
+
+    /// From `words[stripe]`, the [`stripe_twiddle_words`] of `log_sizes`.
+    pub fn from_words(
+        gpu: &GpuContext,
+        log_sizes: &BTreeSet<u32>,
+        log_blowup: u32,
+        words: &[Vec<u32>],
+    ) -> Self {
+        assert_eq!(words.len(), 1 << log_blowup);
+        let (offsets, len) = twiddle_offsets(log_sizes);
+        let stripe_words = (len.max(1) as u64).next_multiple_of(TWIDDLE_ALIGN_WORDS as u64);
+        let buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("stripe twiddles"),
+            size: stripe_words * 4 * words.len() as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let twiddles =
+            Self { log_blowup, log_sizes: log_sizes.clone(), offsets, stripe_words, buffer };
+        twiddles.write(gpu, words);
+        twiddles
+    }
+
+    /// Queues the writes of `words[stripe]` (as [`Self::from_words`]'s) again.
+    pub fn write(&self, gpu: &GpuContext, words: &[Vec<u32>]) {
+        assert_eq!(words.len(), self.n_stripes());
+        let (_, len) = twiddle_offsets(&self.log_sizes);
+        for (stripe, words) in words.iter().enumerate() {
+            assert_eq!(words.len(), len);
+            if !words.is_empty() {
+                gpu.queue.write_buffer(
+                    &self.buffer,
+                    stripe as u64 * self.stripe_words * 4,
+                    bytemuck::cast_slice(words),
+                );
+            }
+        }
+    }
+
+    pub fn n_stripes(&self) -> usize {
+        1 << self.log_blowup
+    }
+
+    /// Whether these are the twiddles of every log size of `log_sizes` (at this blowup).
+    pub fn covers(&self, log_sizes: &BTreeSet<u32>) -> bool {
+        log_sizes.is_subset(&self.log_sizes)
+    }
+
+    pub fn bytes(&self) -> u64 {
+        self.buffer.size()
+    }
+
+    /// Stripe `stripe`'s twiddles, as a binding.
+    fn binding(&self, stripe: usize) -> wgpu::BindingResource<'_> {
+        wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+            buffer: &self.buffer,
+            offset: stripe as u64 * self.stripe_words * 4,
+            size: wgpu::BufferSize::new(self.stripe_words * 4),
+        })
+    }
 }
 
 /// The passes of the FFT of a column of log size `log_size`, in order: each applies the layers
@@ -624,8 +726,7 @@ struct Dispatch {
 /// into `out` (the same layout), with every stripe's twiddles on the GPU.
 pub struct StripeExtension {
     log_blowup: u32,
-    /// Per stripe.
-    twiddles: Vec<wgpu::Buffer>,
+    twiddles: Arc<StripeTwiddles>,
     _params: [wgpu::Buffer; 2],
     /// Per kind, per stripe, per buffer of the layout.
     groups: [Vec<Vec<wgpu::BindGroup>>; 4],
@@ -672,26 +773,26 @@ impl StripeExtension {
         twiddles: &[Vec<u32>],
         merge: Merge,
     ) -> Self {
+        let twiddles =
+            StripeTwiddles::from_words(gpu, &coeffs.layout.log_sizes(), log_blowup, twiddles);
+        Self::with_twiddles(gpu, kernels, coeffs, out, Arc::new(twiddles), merge)
+    }
+
+    /// With `twiddles` (covering the layout's log sizes), the batches dispatched as `merge`
+    /// says.
+    pub fn with_twiddles(
+        gpu: &GpuContext,
+        kernels: &ExtensionKernels,
+        coeffs: &GpuColumns,
+        out: &GpuColumns,
+        twiddles: Arc<StripeTwiddles>,
+        merge: Merge,
+    ) -> Self {
         assert_eq!(coeffs.layout, out.layout, "the evaluations take the coefficients' layout");
-        assert_eq!(twiddles.len(), 1 << log_blowup);
         let layout = &coeffs.layout;
-        let (offsets, twiddles_len) = twiddle_offsets(&layout.log_sizes());
-        let twiddles = twiddles
-            .iter()
-            .enumerate()
-            .map(|(stripe, words)| {
-                assert_eq!(words.len(), twiddles_len);
-                gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some(&format!("twiddles of stripe {stripe}")),
-                    contents: bytemuck::cast_slice(if words.is_empty() {
-                        &[0u32][..]
-                    } else {
-                        words
-                    }),
-                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-                })
-            })
-            .collect::<Vec<_>>();
+        assert!(twiddles.covers(&layout.log_sizes()), "twiddles missing for some log sizes");
+        let log_blowup = twiddles.log_blowup;
+        let offsets = &twiddles.offsets;
 
         // Every pass of every batch: (batch, its k-th pass, its parameters).
         let mut items = vec![];
@@ -820,9 +921,8 @@ impl StripeExtension {
                 offset: 0,
                 size: wgpu::BufferSize::new(size as u64),
             });
-            twiddles
-                .iter()
-                .map(|tw| {
+            (0..twiddles.n_stripes())
+                .map(|stripe| {
                     (0..layout.buffer_words.len())
                         .map(|b| {
                             let mut entries = vec![];
@@ -830,7 +930,7 @@ impl StripeExtension {
                                 entries.push(entry(0, coeffs.buffers[b].as_entire_binding()));
                             }
                             entries.push(entry(1, out.buffers[b].as_entire_binding()));
-                            entries.push(entry(2, tw.as_entire_binding()));
+                            entries.push(entry(2, twiddles.binding(stripe)));
                             entries.push(entry(3, params_binding.clone()));
                             gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
                                 label: None,
@@ -857,15 +957,12 @@ impl StripeExtension {
     /// Queues the writes of the twiddles of every stripe again (`twiddles` as in
     /// [`Self::with_twiddle_words`]).
     pub fn write_twiddles(&self, gpu: &GpuContext, twiddles: &[Vec<u32>]) {
-        assert_eq!(twiddles.len(), self.twiddles.len());
-        for (buffer, words) in self.twiddles.iter().zip(twiddles) {
-            gpu.queue.write_buffer(buffer, 0, bytemuck::cast_slice(words));
-        }
+        self.twiddles.write(gpu, twiddles);
     }
 
     /// The bytes of twiddles on the GPU, all stripes.
     pub fn twiddle_bytes(&self) -> u64 {
-        self.twiddles.iter().map(|buffer| buffer.size()).sum()
+        self.twiddles.bytes()
     }
 
     /// Records the evaluation of stripe `stripe` of every column into `out`, in one compute pass.

@@ -52,11 +52,12 @@ use stwo::prover::mempool::BaseColumnPool;
 use stwo::prover::poly::circle::{CircleCoefficients, PolyOps};
 use stwo_gpu_spike::GpuContext;
 use stwo_gpu_spike::commit::{
-    CommitKernels, CommitOptions, PassTimestamps, StripedCommitment, kept_whole, stripe_order,
-    takes_striped_path,
+    CommitBuffers, CommitKernels, CommitOptions, PassTimestamps, StripedCommitment, TwiddleCache,
+    kept_whole, stripe_order, takes_striped_path,
 };
 use stwo_gpu_spike::extension::Merge;
 use stwo_gpu_spike::shapes::{base_trace_log_sizes, cairo_pay_components};
+use stwo_gpu_spike::transfer::{ReadbackRing, UploadRing};
 
 type TreeProver = CommitmentTreeProver<SimdBackend, Blake2sM31MerkleChannel>;
 
@@ -249,11 +250,22 @@ fn main() {
     };
     let mut gpu_root = None;
     let mut summary = vec![];
+    let mut upload_ring = UploadRing::with_defaults(&gpu);
+    let mut readback_ring = ReadbackRing::with_defaults(&gpu);
+    println!(
+        "staging rings: upload {} (MAP_WRITE: the BAR, or host memory), readback {} (MAP_READ, \
+         host memory)",
+        mib(upload_ring.bytes()),
+        mib(readback_ring.bytes())
+    );
+    let mut buffers = CommitBuffers::new();
+    let mut twiddle_cache = TwiddleCache::new();
+    let distinct = log_sizes.iter().copied().collect();
     for &merge in &args.merges {
         println!("-- the extension's dispatches: {merge:?} (see Merge)");
-        let start = Instant::now();
         let options = CommitOptions { merge, ..Default::default() };
-        let commitment = StripedCommitment::with_options(
+        let start = Instant::now();
+        let fresh = StripedCommitment::with_options(
             &gpu,
             &kernels,
             &log_sizes,
@@ -263,12 +275,37 @@ fn main() {
             options,
         );
         gpu.device.poll(wgpu::PollType::wait_indefinitely()).expect("poll");
-        let setup = start.elapsed();
+        let fresh_setup = start.elapsed();
+        drop(fresh);
+        // On kept buffers and twiddles (as a GpuCommitter's): the first time allocates them.
+        let mut setup_on_kept = vec![];
+        let mut commitment = None;
+        for _ in 0..3 {
+            drop(commitment.take());
+            let start = Instant::now();
+            let table = twiddle_cache.get(&gpu, &distinct, log_blowup, &twiddles);
+            commitment = Some(StripedCommitment::with_buffers(
+                &gpu,
+                &kernels,
+                &mut buffers,
+                table,
+                &log_sizes,
+                log_blowup,
+                lifting_log_size,
+                options,
+            ));
+            gpu.device.poll(wgpu::PollType::wait_indefinitely()).expect("poll");
+            setup_on_kept.push(start.elapsed());
+        }
+        let commitment = commitment.unwrap();
         let bytes = commitment.gpu_bytes();
         let (ext_dispatches, hash_dispatches, top_dispatches) = commitment.n_dispatches();
         println!(
-            "GPU setup (buffers, every stripe's twiddles, plans; once per tree shape): {}",
-            ms(setup).trim()
+            "GPU setup (buffers, every stripe's twiddles, plans): fresh {}; on kept buffers and \
+             twiddles: first {}, then {} (plans only)",
+            ms(fresh_setup).trim(),
+            ms(setup_on_kept[0]).trim(),
+            ms(*setup_on_kept[1..].iter().min().unwrap()).trim(),
         );
         println!(
             "GPU layout: {} buffer(s), {} batches; per stripe {ext_dispatches} extension and \
@@ -279,8 +316,7 @@ fn main() {
         );
         println!(
             "GPU memory: {} on the device (coefficients {}, one stripe's evaluations {}, twiddles \
-             {}, Merkle states {}, layers {}, columns kept whole {}) + {} of staging for the \
-             readback",
+             {}, Merkle states {}, layers {}, columns kept whole {})",
             mib(bytes.device()),
             mib(bytes.coefficients),
             mib(bytes.evaluations),
@@ -288,14 +324,13 @@ fn main() {
             mib(bytes.states),
             mib(bytes.tree),
             mib(bytes.whole),
-            mib(bytes.staging),
         );
 
         // Warm-up: pipelines, first touch of every buffer.
-        commitment.upload(&gpu, &polys);
-        let _ = commitment.run_and_read(&gpu, &kernels);
+        commitment.upload_through(&gpu, &mut upload_ring, &polys);
+        let _ = commitment.run_and_read_through(&gpu, &kernels, &mut readback_ring);
 
-        commitment.upload(&gpu, &polys);
+        commitment.upload_through(&gpu, &mut upload_ring, &polys);
         gpu.device.poll(wgpu::PollType::wait_indefinitely()).expect("poll");
         let (best, median) = time(args.reps, || timed(|| commitment.run(&gpu, &kernels)));
         println!("GPU, coefficients resident:           best {}  median {}", ms(best), ms(median));
@@ -303,7 +338,16 @@ fn main() {
 
         let (best, median) = time(args.reps, || {
             timed(|| {
-                commitment.upload(&gpu, &polys);
+                commitment.upload_through(&gpu, &mut upload_ring, &polys);
+                gpu.device.poll(wgpu::PollType::wait_indefinitely()).expect("poll");
+            })
+        });
+        println!("GPU upload alone (through the ring):  best {}  median {}", ms(best), ms(median));
+        let upload = best;
+
+        let (best, median) = time(args.reps, || {
+            timed(|| {
+                commitment.upload_through(&gpu, &mut upload_ring, &polys);
                 commitment.run(&gpu, &kernels);
             })
         });
@@ -313,9 +357,17 @@ fn main() {
         let mut output = None;
         let (best, median) = time(args.reps, || {
             drop(output.take());
+            commitment.run(&gpu, &kernels);
+            timed(|| output = Some(commitment.read_through(&gpu, &mut readback_ring)))
+        });
+        println!("GPU readback alone (through the ring): best {}  median {}", ms(best), ms(median));
+        let readback = best;
+
+        let (best, median) = time(args.reps, || {
+            drop(output.take());
             timed(|| {
-                commitment.upload(&gpu, &polys);
-                output = Some(commitment.run_and_read(&gpu, &kernels));
+                commitment.upload_through(&gpu, &mut upload_ring, &polys);
+                output = Some(commitment.run_and_read_through(&gpu, &kernels, &mut readback_ring));
             })
         });
         println!("GPU, with upload and readback:        best {}  median {}", ms(best), ms(median));
@@ -407,7 +459,7 @@ fn main() {
                 cpu_roots.len()
             );
         }
-        summary.push((merge, resident, with_upload, with_readback));
+        summary.push((merge, resident, upload, with_upload, readback, with_readback));
         drop(commitment);
     }
 
@@ -415,7 +467,7 @@ fn main() {
     for (threads, best) in &cpu_best {
         println!("  CPU new_striped, {threads:2} threads:        {}", ms(*best));
     }
-    for (merge, resident, with_upload, with_readback) in summary {
+    for (merge, resident, upload, with_upload, readback, with_readback) in summary {
         let speedup = |gpu: Duration| {
             cpu_best
                 .iter()
@@ -425,8 +477,11 @@ fn main() {
                 .join(", ")
         };
         println!(
-            "  GPU {merge:?}: resident {}  +upload {}  +upload+readback {}  ({})",
+            "  GPU {merge:?}: resident {}  upload {}  readback {}  +upload {}  +upload+readback \
+             {}  ({})",
             ms(resident),
+            ms(upload),
+            ms(readback),
             ms(with_upload),
             ms(with_readback),
             speedup(with_readback),

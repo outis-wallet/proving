@@ -27,6 +27,7 @@ pub mod extension;
 pub mod merkle;
 pub mod reference;
 pub mod shapes;
+pub mod transfer;
 
 /// M31 arithmetic in WGSL (`m31_add`, `m31_sub`, `m31_mul`, ...), to prepend to a kernel's source.
 pub const M31_WGSL: &str = include_str!("shaders/m31.wgsl");

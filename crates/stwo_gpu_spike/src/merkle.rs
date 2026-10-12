@@ -607,12 +607,24 @@ fn u32_offset(words: u64) -> u32 {
 }
 
 /// The two state buffers of a stripe's leaves (ping-pong), sized for its batches' shapes.
+#[derive(Clone)]
 pub struct StateBuffers {
     buffers: [wgpu::Buffer; 2],
     pub words: u64,
 }
 
 impl StateBuffers {
+    /// Two buffers of `words` words each (see [`GpuMerkle::state_words`]).
+    pub fn new(gpu: &GpuContext, words: u64) -> Self {
+        StateBuffers {
+            buffers: [
+                gpu.storage("states a", words as usize),
+                gpu.storage("states b", words as usize),
+            ],
+            words,
+        }
+    }
+
     /// The bytes of both buffers.
     pub fn bytes(&self) -> u64 {
         self.buffers.iter().map(wgpu::Buffer::size).sum()
@@ -700,9 +712,14 @@ impl GpuMerkle {
 
     /// The buffer of a tree's layers.
     pub fn tree_buffer(&self, gpu: &GpuContext, layout: &TreeLayout) -> wgpu::Buffer {
-        let bytes = layout.total_words * 4;
-        assert!(bytes <= self.max_binding, "the tree's layers ({bytes} bytes) exceed a binding");
+        self.check_tree_buffer(layout.total_words);
         gpu.storage("tree layers", layout.total_words as usize)
+    }
+
+    /// Checks that a tree buffer of `words` words can be bound.
+    pub fn check_tree_buffer(&self, words: u64) {
+        let bytes = words * 4;
+        assert!(bytes <= self.max_binding, "the tree's layers ({bytes} bytes) exceed a binding");
     }
 
     /// The state buffers for the leaves of stripes of these `(log_size, n_columns)` batches in a
@@ -713,6 +730,12 @@ impl GpuMerkle {
         shapes: &[(u32, u32)],
         height: u32,
     ) -> StateBuffers {
+        StateBuffers::new(gpu, self.state_words(shapes, height))
+    }
+
+    /// The words of each state buffer for the leaves of stripes of these `(log_size, n_columns)`
+    /// batches in a tree of height `height` (larger ones serve too).
+    pub fn state_words(&self, shapes: &[(u32, u32)], height: u32) -> u64 {
         let words = absorb_schedule(&self.dispatch_shapes(shapes), height)
             .iter()
             .filter(|step| !step.is_final)
@@ -721,13 +744,7 @@ impl GpuMerkle {
             .unwrap_or(0)
             .max(64);
         assert!(words * 4 <= self.max_binding, "the states ({} bytes) exceed a binding", words * 4);
-        StateBuffers {
-            buffers: [
-                gpu.storage("states a", words as usize),
-                gpu.storage("states b", words as usize),
-            ],
-            words,
-        }
+        words
     }
 
     /// The most columns of `2^log_size` values one dispatch binds: a batch's binding starts at
