@@ -1,0 +1,9 @@
+peak RSS by process type (MiB):
+  gpu-process 2607
+  zygote 167
+  browser 243
+  utility:network.mojom.NetworkService 122
+  broker 20
+  utility:storage.mojom.StorageService 53
+  utility:passage_embeddings.mojom.PassageEmbeddingsService 191
+  renderer 2521

@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GPU bridge demo</title>
+<style>
+  :root { color-scheme: light dark; --bg: #fff; --fg: #1d1d1f; --muted: #6e6e73; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #161618; --fg: #f2f2f4; --muted: #9a9aa0; } }
+  body { background: var(--bg); color: var(--fg); font: 14px/1.45 system-ui, sans-serif; margin: 0 auto; max-width: 960px; padding: 16px; }
+  h1 { font-size: 18px; margin: 0 0 4px; }
+  p { color: var(--muted); margin: 0 0 12px; }
+  pre { white-space: pre-wrap; word-break: break-word; font: 12px/1.4 ui-monospace, monospace; }
+</style>
+</head>
+<body>
+<h1>GPU bridge demo</h1>
+<p>Prover threads (threaded wasm, rayon on Web Workers) call a synchronous GPU M31 product served by
+a GPU worker (wgpu on WebGPU) through the shared memory. Query (defaults): <code>?threads=8&amp;phases=correctness,errors,latency,throughput&amp;jobs=256&amp;iters=200&amp;sizes=64,128,256,512&amp;reps=3</code>;
+transfer sizes in MiB: <code>upload_chunk_mib=8&amp;upload_window_mib=64&amp;readback_chunk_mib=8</code> (0: unbounded);
+<code>kick_ms</code>: empty submits while a job waits (default 2 on Firefox, else 0).</p>
+<pre id="log"></pre>
+<script type="module" src="./main.mjs"></script>
+</body>
+</html>
