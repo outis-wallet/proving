@@ -127,8 +127,10 @@ pub struct PartStats {
     /// Device: the readback ring's waits (for the GPU's copies) and the CPU's copies out.
     pub readback_wait: Duration,
     pub readback_copy: Duration,
-    /// Recompute: the requests' split (see [`crate::recompute::RecomputeTimes`]).
+    /// Recompute: the requests' split (see [`crate::recompute::RecomputeTimes`]), and the GPU
+    /// memory it keeps at most (working buffers, twiddles).
     pub recompute: crate::recompute::RecomputeTimes,
+    pub recompute_bytes: u64,
     /// Clears with something kept.
     pub clears: u64,
 }
@@ -291,10 +293,17 @@ impl PartStore {
     }
 
     /// Notes `n` columns recomputed (`bytes` of them), in `times`.
-    pub fn recomputed(&mut self, n: usize, bytes: u64, times: &crate::recompute::RecomputeTimes) {
+    pub fn recomputed(
+        &mut self,
+        n: usize,
+        bytes: u64,
+        times: &crate::recompute::RecomputeTimes,
+        kept_bytes: u64,
+    ) {
         self.stats.hits += n as u64;
         self.stats.hit_bytes += bytes;
         self.stats.recompute.add(times);
+        self.stats.recompute_bytes = self.stats.recompute_bytes.max(kept_bytes);
     }
 
     pub fn add_readback_times(&mut self, wait: Duration, copy: Duration) {

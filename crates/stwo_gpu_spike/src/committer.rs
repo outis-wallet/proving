@@ -506,7 +506,8 @@ impl GpuCommitter {
             parts.add_lookup_time(start.elapsed(), Duration::ZERO);
             return None;
         };
-        parts.recomputed(values.len(), times.bytes, &times);
+        let kept = recomputer.as_ref().map_or(0, Recomputer::bytes);
+        parts.recomputed(values.len(), times.bytes, &times, kept);
         parts.add_lookup_time(start.elapsed(), times.upload + times.readback);
         Some(stripes)
     }

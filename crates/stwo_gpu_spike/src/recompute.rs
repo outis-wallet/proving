@@ -181,6 +181,17 @@ impl RecomputeTimes {
 }
 
 impl Recomputer {
+    /// The GPU memory it keeps: its working buffers and its twiddles.
+    pub fn bytes(&self) -> u64 {
+        let buffers = self.work.iter().chain(&self.coeffs).map(wgpu::Buffer::size).sum::<u64>();
+        let tables = self
+            .tables
+            .values()
+            .map(|t| t.itw.size() + t.extension.as_ref().map_or(0, |e| e.bytes()))
+            .sum::<u64>();
+        buffers + tables
+    }
+
     pub fn new(gpu: &GpuContext) -> Self {
         Self {
             kernels: IfftKernels::new(gpu),
