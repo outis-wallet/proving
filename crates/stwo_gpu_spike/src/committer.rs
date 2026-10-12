@@ -174,6 +174,15 @@ impl GpuCommitter {
         }
     }
 
+    /// Stops keeping the GPU warm, for good, and waits for the keep-warm thread to end: call it
+    /// before the process exits (a submission in flight while the driver is torn down crashes
+    /// it). Commitments still work after it, without keep-warm.
+    pub fn shutdown(&self) {
+        if let Some(warm) = &self.warm {
+            warm.stop();
+        }
+    }
+
     /// The keep-warm dispatches so far.
     pub fn keep_warm_dispatches(&self) -> u64 {
         self.warm.as_ref().map_or(0, KeepWarm::dispatches)

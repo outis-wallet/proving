@@ -94,7 +94,7 @@ fn main(@builtin(local_invocation_index) i: u32) {
     /// docs).
     pub struct KeepWarm {
         shared: Arc<Shared>,
-        thread: Option<JoinHandle<()>>,
+        thread: Mutex<Option<JoinHandle<()>>>,
     }
 
     impl KeepWarm {
@@ -172,7 +172,7 @@ fn main(@builtin(local_invocation_index) i: u32) {
                     }
                 })
                 .map_err(|error| format!("keep-warm thread: {error}"))?;
-            Ok(Self { shared, thread: Some(thread) })
+            Ok(Self { shared, thread: Mutex::new(Some(thread)) })
         }
 
         /// How long it keeps the GPU warm after a commitment (`None`: never).
@@ -219,13 +219,23 @@ fn main(@builtin(local_invocation_index) i: u32) {
         }
     }
 
-    impl Drop for KeepWarm {
-        fn drop(&mut self) {
+    impl KeepWarm {
+        /// Ends the thread, after its dispatch in flight if any, and waits for it: no more
+        /// keep-warm work on the device. For a process about to exit, whose driver must not be torn
+        /// down under a submission (that crashed os_native_probe at exit).
+        pub fn stop(&self) {
             self.shared.lock().stop = true;
             self.shared.wake.notify_all();
-            if let Some(thread) = self.thread.take() {
+            let thread = self.thread.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take();
+            if let Some(thread) = thread {
                 let _ = thread.join();
             }
+        }
+    }
+
+    impl Drop for KeepWarm {
+        fn drop(&mut self) {
+            self.stop();
         }
     }
 }
@@ -246,6 +256,8 @@ mod wasm {
         pub fn new(_gpu: &GpuContext, window: Option<Duration>) -> Result<Self, String> {
             Ok(Self { window: Mutex::new(window) })
         }
+
+        pub fn stop(&self) {}
 
         pub fn window(&self) -> Option<Duration> {
             *self.window.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
