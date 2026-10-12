@@ -139,11 +139,21 @@ fn trace_part<'a>(
         .unwrap_or_else(|_| panic!("a component's columns have the size of its trace domain"));
     let committed_domain = CanonicCoset::new(committed_log_size).circle_domain();
     let domain = part_domain(committed_domain, committed_log_size - trace_domain.log_size(), part);
-    let twiddles = SimdBackend::precompute_twiddles(domain.half_coset);
+    // The columns a registered hook provides (see `TracePartHook`) are not evaluated here; if it
+    // provides every column this part would evaluate, no twiddles are needed.
+    let (provided, all_provided) = provided_columns(
+        trace,
+        part,
+        part_size,
+        committed_log_size - trace_domain.log_size(),
+        domain,
+    );
+    let twiddles = (!all_provided).then(|| SimdBackend::precompute_twiddles(domain.half_coset));
     // The interpolation twiddles of the first part, from which a column that holds only its first
     // stripe (see `CommitmentTreeProver::new_striped`) is interpolated again.
     let first_part = part_domain(committed_domain, committed_log_size - trace_domain.log_size(), 0);
-    let stripe_twiddles = (part > 0).then(|| SimdBackend::precompute_twiddles(first_part.half_coset));
+    let stripe_twiddles = (part > 0 && !all_provided)
+        .then(|| SimdBackend::precompute_twiddles(first_part.half_coset));
     let evaluate = |(column, poly): (
         &'a Cow<'a, CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>,
         &&Poly<SimdBackend>,
@@ -157,22 +167,15 @@ fn trace_part<'a>(
             let values = column.values.to_cpu()[part * part_size..(part + 1) * part_size].to_vec();
             return Cow::Owned(CircleEvaluation::new(domain, values.into_iter().collect()));
         }
+        let twiddles = twiddles.as_ref().unwrap();
         let evaluation = match &poly.coeffs {
-            Some(coeffs) => coeffs.evaluate_with_twiddles(domain, &twiddles),
+            Some(coeffs) => coeffs.evaluate_with_twiddles(domain, twiddles),
             None => poly
                 .stripe_coefficients(stripe_twiddles.as_ref().unwrap())
-                .evaluate_with_twiddles(domain, &twiddles),
+                .evaluate_with_twiddles(domain, twiddles),
         };
         Cow::Owned(evaluation)
     };
-    // The columns a registered hook provides (see `TracePartHook`) are not evaluated here.
-    let provided = provided_columns(
-        trace,
-        part,
-        part_size,
-        committed_log_size - trace_domain.log_size(),
-        domain,
-    );
     let evaluate_unless_provided =
         |(pair, provided): (_, Option<Col<SimdBackend, BaseField>>)| match provided {
             Some(values) => Cow::Owned(CircleEvaluation::new(domain, values)),
@@ -210,18 +213,19 @@ fn trace_part<'a>(
 /// The evaluations on part `part` (of the trace domain's size, `part_size`) of the committed
 /// domain split into `2^log_parts` parts, `domain`, that a registered [`TracePartHook`] provides
 /// for the columns of `trace` that hold less than the part, by tree and column: `None` for the
-/// others, and for every column without a hook or on part 0.
+/// others, and for every column without a hook or on part 0. And whether the hook provided every
+/// such column (there was one at least): `false` without a hook or on part 0.
 fn provided_columns(
     trace: &TreeVec<Vec<Cow<'_, CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>>>,
     part: usize,
     part_size: usize,
     log_parts: u32,
     domain: CircleDomain,
-) -> Vec<Vec<Option<Col<SimdBackend, BaseField>>>> {
+) -> (Vec<Vec<Option<Col<SimdBackend, BaseField>>>>, bool) {
     let mut provided =
         trace.iter().map(|columns| (0..columns.len()).map(|_| None).collect_vec()).collect_vec();
     let Some(hook) = (part > 0).then(trace_part_hook).flatten() else {
-        return provided;
+        return (provided, false);
     };
     // The columns `trace_part` would evaluate.
     let requested = trace
@@ -236,7 +240,7 @@ fn provided_columns(
         })
         .collect_vec();
     if requested.is_empty() {
-        return provided;
+        return (provided, false);
     }
     let _span = span!(Level::INFO, "Constraint part extension (hook)").entered();
     let request = TracePartRequest {
@@ -250,12 +254,14 @@ fn provided_columns(
     };
     let answers = hook(&request);
     if answers.len() != requested.len() {
-        return provided;
+        return (provided, false);
     }
+    let mut all_provided = true;
     for ((tree, index, _), answer) in requested.into_iter().zip(answers) {
         provided[tree][index] = answer.filter(|values| values.len() == part_size);
+        all_provided &= provided[tree][index].is_some();
     }
-    provided
+    (provided, all_provided)
 }
 
 impl<E: FrameworkEval + Sync> ComponentProver<SimdBackend> for FrameworkComponent<E> {
