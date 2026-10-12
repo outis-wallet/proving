@@ -41,7 +41,7 @@ use crate::memory::VramPolicy;
 use crate::parts::{Found, PartStats, PartStore, PartsMode};
 use crate::recompute::Recomputer;
 use crate::stream::{DeviceStripes, KeepStripe1, StreamedCommitment, group_words};
-use crate::transfer::{Readback, ReadbackRing, RingTimes, UploadRing};
+use crate::transfer::{Readback, ReadbackRing, RingTimes, Upload, UploadRing};
 use crate::warm::{KeepWarm, window_from_env};
 
 /// The tree `new_striped` returns.
@@ -514,6 +514,23 @@ impl GpuCommitter {
                 crate::memory::DeviceMemory::query(&self.gpu).as_ref(),
             )
             .is_ok()
+    }
+
+    /// Writes `pieces` into their buffers through the committer's upload ring (its fixed chunks:
+    /// no staging memory beyond them); the copies are submitted when this returns, before any
+    /// later submission. `Err` if the GPU failed (the ring is rebuilt by the next user).
+    pub fn upload(&self, pieces: &[Upload<'_>]) -> Result<RingTimes, String> {
+        let mut state = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let written = catch_unwind(AssertUnwindSafe(|| {
+            let reused = state.get_or_insert_with(|| Reused::new(&self.gpu));
+            reused.upload.take_times();
+            reused.upload.upload(&self.gpu, pieces);
+            reused.upload.take_times()
+        }));
+        written.map_err(|panic| {
+            *state = None;
+            panic_message(&panic)
+        })
     }
 
     /// Reads `src` (from byte 0) back into `dst` through the committer's readback ring; `Err`

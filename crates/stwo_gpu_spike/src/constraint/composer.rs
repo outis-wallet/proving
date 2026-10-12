@@ -42,6 +42,7 @@ use super::kernel::{ConstraintKernels, KernelOptions, meta_words, read_timestamp
 use crate::GpuContext;
 use crate::committer::GpuCommitter;
 use crate::parts::Placement;
+use crate::transfer::Upload;
 
 /// What identifies a component's kernels.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -545,16 +546,18 @@ impl GpuComposer {
             }
             at += k;
         }
-        if scratch_bytes > 0 {
-            // Within the video memory policy; the commitment buffers are idle until the next
-            // commitment (the composition's): released if that makes room.
-            if !self.committer.vram_allows(scratch_bytes) {
-                self.committer.release_buffers();
-                lock(&self.stats).releases += 1;
-                if !self.committer.vram_allows(scratch_bytes) {
-                    return self.decline("video memory");
-                }
-            }
+        // The commitment buffers are idle until the next commitment (the composition's, which
+        // allocates its own): released while the components are evaluated, so that the trees
+        // kept, a component's assembled columns and its output fit beside them.
+        if self.committer.held_bytes().buffers > 0 {
+            self.committer.release_buffers();
+            lock(&self.stats).releases += 1;
+        }
+        // Within the video memory policy.
+        if scratch_bytes > 0
+            && !self.committer.vram_allows(scratch_bytes + (16u64 << job.eval_log_size))
+        {
+            return self.decline("video memory");
         }
 
         let params =
@@ -591,7 +594,54 @@ impl GpuComposer {
             let mut trees: Vec<wgpu::Buffer> = vec![];
             let mut offsets: Vec<u32> = vec![];
             let mut uploaded = 0u64;
+            // Host data for assembled columns: through the committer's upload ring (bounded
+            // staging), before the encoder's copies and kernels.
+            let mut scratches: Vec<Option<wgpu::Buffer>> = vec![];
+            let mut uploads: Vec<(usize, u64, &[u32])> = vec![];
             for source in &sources {
+                let Source::Assembled { first, k } = source else {
+                    scratches.push(None);
+                    continue;
+                };
+                let scratch = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("constraint eval assembled columns"),
+                    size: *k as u64 * column_bytes,
+                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+                for j in 0..*k {
+                    let dst = j as u64 * column_bytes;
+                    let host = columns[first + j].0.as_slice();
+                    let host: &[u32] = bytemuck::cast_slice(host);
+                    match &placements[first + j] {
+                        Some(Placement::Both { .. }) => {}
+                        Some(Placement::Stripe1 { .. }) => uploads.push((
+                            scratches.len(),
+                            dst,
+                            &host[..(column_bytes / 8) as usize],
+                        )),
+                        None => uploads.push((
+                            scratches.len(),
+                            dst,
+                            &host[..(column_bytes / 4) as usize],
+                        )),
+                    }
+                }
+                scratches.push(Some(scratch));
+            }
+            if !uploads.is_empty() {
+                let pieces: Vec<Upload<'_>> = uploads
+                    .iter()
+                    .map(|&(s, dst_offset, src)| Upload {
+                        dst: scratches[s].as_ref().unwrap(),
+                        dst_offset,
+                        src: bytemuck::cast_slice(src),
+                    })
+                    .collect();
+                uploaded = pieces.iter().map(|p| p.src.len() as u64).sum();
+                self.committer.upload(&pieces)?;
+            }
+            for (source, scratch) in sources.iter().zip(&scratches) {
                 match source {
                     Source::Resident { buffer, byte_offsets } => {
                         trees.push(buffer.clone());
@@ -600,16 +650,10 @@ impl GpuComposer {
                         }
                     }
                     Source::Assembled { first, k } => {
-                        let scratch = gpu.device.create_buffer(&wgpu::BufferDescriptor {
-                            label: Some("constraint eval assembled columns"),
-                            size: *k as u64 * column_bytes,
-                            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-                            mapped_at_creation: false,
-                        });
+                        let scratch = scratch.clone().expect("a scratch buffer");
                         let half = column_bytes / 2;
                         for j in 0..*k {
                             let dst = j as u64 * column_bytes;
-                            let host = columns[first + j].0.as_slice();
                             match &placements[first + j] {
                                 Some(Placement::Both { buffer, byte_offset }) => {
                                     encoder.copy_buffer_to_buffer(
@@ -620,14 +664,8 @@ impl GpuComposer {
                                         column_bytes,
                                     );
                                 }
+                                // Stripe 0 uploaded above; stripe 1 here.
                                 Some(Placement::Stripe1 { buffer, byte_offset }) => {
-                                    let stripe0 = &host[..(half / 4) as usize];
-                                    gpu.queue.write_buffer(
-                                        &scratch,
-                                        dst,
-                                        bytemuck::cast_slice(stripe0),
-                                    );
-                                    uploaded += half;
                                     encoder.copy_buffer_to_buffer(
                                         buffer,
                                         *byte_offset,
@@ -636,16 +674,8 @@ impl GpuComposer {
                                         half,
                                     );
                                 }
-                                None => {
-                                    // A column the tree keeps whole: stripes 0 and 1 from the host.
-                                    let both = &host[..(column_bytes / 4) as usize];
-                                    gpu.queue.write_buffer(
-                                        &scratch,
-                                        dst,
-                                        bytemuck::cast_slice(both),
-                                    );
-                                    uploaded += column_bytes;
-                                }
+                                // A column the tree keeps whole: both stripes uploaded above.
+                                None => {}
                             }
                             offsets.push((j as u64 * column_bytes / 4) as u32);
                         }

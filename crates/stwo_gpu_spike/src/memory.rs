@@ -82,11 +82,21 @@ pub struct VramPolicy {
     pub headroom: u64,
     /// An explicit bound on what is kept besides (e.g. the resident columns), in bytes.
     pub cap: Option<u64>,
+    /// What the driver holds for the process besides its allocator's blocks (its context,
+    /// shader code, internal allocations), counted with them against the process's share: the
+    /// RTX 3080's driver showed 270 to 390 MiB more per process than the allocator's report.
+    pub context_allowance: u64,
 }
 
 impl Default for VramPolicy {
     fn default() -> Self {
-        Self { process_percent: 40, fallback_bytes: 3 << 30, headroom: 1536 << 20, cap: None }
+        Self {
+            process_percent: 40,
+            fallback_bytes: 3 << 30,
+            headroom: 1536 << 20,
+            cap: None,
+            context_allowance: 256 << 20,
+        }
     }
 }
 
@@ -138,7 +148,7 @@ impl VramPolicy {
             return Err(VramRefusal::Cap);
         }
         // Without an allocator report, count what is kept as the process's.
-        let reserved = reserved.unwrap_or(kept);
+        let reserved = reserved.unwrap_or(kept) + self.context_allowance;
         if reserved + bytes > self.process_bound(memory) {
             return Err(VramRefusal::ProcessShare);
         }
@@ -161,6 +171,11 @@ mod tests {
         let policy = VramPolicy::default();
         assert_eq!(policy.process_bound(Some(&memory)), (10u64 << 30) / 100 * 40);
         assert_eq!(policy.allows(2 << 30, 0, Some(1 << 30), Some(&memory)), Ok(()));
+        // The context allowance counts: 4095 MiB of share, 1 GiB + 256 MiB held.
+        assert_eq!(
+            policy.allows((4095 - 1024 - 256 + 1) << 20, 0, Some(1 << 30), Some(&memory)),
+            Err(VramRefusal::ProcessShare)
+        );
         assert_eq!(
             policy.allows(3 << 30, 0, Some(1 << 30), Some(&memory)),
             Err(VramRefusal::ProcessShare)
