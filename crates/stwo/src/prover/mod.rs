@@ -15,8 +15,8 @@ pub use air::{AccumulationOps, ColumnAccumulator, DomainEvaluationAccumulator, E
 pub mod pcs;
 pub use pcs::quotient_ops::QuotientOps;
 pub use pcs::{
-    CommitmentSchemeProver, CommitmentTreeProver, StripedCommitHook, TreeBuilder,
-    set_striped_commit_hook, set_striped_decommit_hook, StripedDecommitHook,
+    CommitmentSchemeProver, CommitmentTreeProver, StripedCommitHook, StripedDecommitHook,
+    TreeBuilder, set_striped_commit_hook, set_striped_decommit_hook,
 };
 pub mod backend;
 pub mod channel;

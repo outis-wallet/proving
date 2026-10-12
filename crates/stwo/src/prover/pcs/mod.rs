@@ -114,8 +114,7 @@ pub fn set_striped_decommit_hook<B: ColumnOps<BaseField> + 'static>(
     hook: Option<std::sync::Arc<StripedDecommitHook<B>>>,
 ) {
     let key = std::any::TypeId::of::<B>();
-    let mut hooks =
-        STRIPED_DECOMMIT_HOOKS.write().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut hooks = STRIPED_DECOMMIT_HOOKS.write().unwrap_or_else(|poisoned| poisoned.into_inner());
     let hooks = hooks.get_or_insert_with(HashMap::new);
     match hook {
         Some(hook) => {
@@ -1025,5 +1024,123 @@ mod striped_commit_hook_tests {
         let removed = Tree::new_striped(polys(), LOG_BLOWUP, &twiddles, LIFTING_LOG_SIZE, &pool);
         assert_eq!(removed.commitment.layers, cpu.commitment.layers);
         assert!(removed.polynomials.iter().any(|p| p.evals.values.len() < p.evals.domain.size()));
+    }
+}
+
+#[cfg(test)]
+mod striped_decommit_hook_tests {
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::core::vcs_lifted::blake2_merkle::Blake2sM31MerkleChannel;
+    use crate::prover::backend::simd::SimdBackend;
+    use crate::prover::backend::simd::column::BaseColumn;
+    use crate::prover::poly::circle::PolyOps;
+
+    type Tree = CommitmentTreeProver<SimdBackend, Blake2sM31MerkleChannel>;
+
+    /// This test's trees only (a shape no other test commits), so that the hook, which is
+    /// process-wide, leaves everyone else's decommitments alone.
+    const LIFTING_LOG_SIZE: u32 = 18;
+    const LOG_SIZES: [u32; 3] = [13, 15, 15];
+    const LOG_BLOWUP: u32 = 3;
+
+    fn ours(columns: &[&CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>]) -> bool {
+        columns.len() == LOG_SIZES.len()
+            && columns
+                .iter()
+                .zip(LOG_SIZES)
+                .all(|(column, log_size)| column.domain.log_size() == log_size + LOG_BLOWUP)
+    }
+
+    /// The values the CPU evaluates (as `decommit_from_stripes` does).
+    fn cpu_values(
+        columns: &[&CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>],
+        wanted: &[Vec<usize>],
+    ) -> Vec<Vec<BaseField>> {
+        columns
+            .iter()
+            .zip(wanted)
+            .map(|(column, wanted)| {
+                if wanted.is_empty() {
+                    return vec![];
+                }
+                let poly = Poly::new(None, (*column).clone());
+                let twiddles = SimdBackend::precompute_twiddles(poly.stripe_domain().half_coset);
+                let coefficients = poly.stripe_coefficients(&twiddles);
+                SimdBackend::eval_at_domain_indices(&coefficients, column.domain, wanted)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn hook_values_or_declines() {
+        let polys = LOG_SIZES
+            .iter()
+            .enumerate()
+            .map(|(c, &log_size)| {
+                CircleCoefficients::new(
+                    (0..1u32 << log_size)
+                        .map(|i| {
+                            BaseField::from(
+                                i.wrapping_mul(2_246_822_519).wrapping_add(c as u32) >> 1,
+                            )
+                        })
+                        .collect::<BaseColumn>(),
+                )
+            })
+            .collect();
+        let twiddles = SimdBackend::precompute_twiddles(
+            CanonicCoset::new(LIFTING_LOG_SIZE).circle_domain().half_coset,
+        );
+        let pool = BaseColumnPool::<SimdBackend>::new();
+        let tree = Tree::new_striped(polys, LOG_BLOWUP, &twiddles, LIFTING_LOG_SIZE, &pool);
+        assert!(tree.polynomials.iter().any(|p| p.evals.values.len() < p.evals.domain.size()));
+        let queries = [5, 1000, 77_777, 200_000, (1 << LIFTING_LOG_SIZE) - 1];
+        let (values, decommitment) = tree.decommit(&queries);
+
+        // A hook that evaluates as the CPU: the same decommitment.
+        set_striped_decommit_hook::<SimdBackend>(Some(Arc::new(|columns, wanted| {
+            ours(columns).then(|| cpu_values(columns, wanted))
+        })));
+        let (hooked, hooked_decommitment) = tree.decommit(&queries);
+        assert_eq!(hooked, values);
+        assert_eq!(
+            hooked_decommitment.decommitment.hash_witness,
+            decommitment.decommitment.hash_witness
+        );
+
+        // A hook that answers wrong values: the opened values and the witness change (the
+        // verifier would reject).
+        set_striped_decommit_hook::<SimdBackend>(Some(Arc::new(|columns, wanted| {
+            let mut values = ours(columns).then(|| cpu_values(columns, wanted))?;
+            for value in values.iter_mut().flatten() {
+                *value += BaseField::from(1u32);
+            }
+            Some(values)
+        })));
+        let (tampered, tampered_decommitment) = tree.decommit(&queries);
+        assert_ne!(tampered, values);
+        assert_ne!(
+            tampered_decommitment.decommitment.hash_witness,
+            decommitment.decommitment.hash_witness
+        );
+
+        // A hook that declines, or answers with the wrong shape: the CPU's values.
+        set_striped_decommit_hook::<SimdBackend>(Some(Arc::new(|columns, wanted| {
+            ours(columns).then(|| cpu_values(columns, &wanted[..wanted.len() - 1]))
+        })));
+        assert_eq!(tree.decommit(&queries).0, values);
+        set_striped_decommit_hook::<SimdBackend>(Some(Arc::new(|_, _| None)));
+        assert_eq!(tree.decommit(&queries).0, values);
+
+        // Removed.
+        set_striped_decommit_hook::<SimdBackend>(None);
+        let (removed, removed_decommitment) = tree.decommit(&queries);
+        assert_eq!(removed, values);
+        assert_eq!(
+            removed_decommitment.decommitment.hash_witness,
+            decommitment.decommitment.hash_witness
+        );
     }
 }
