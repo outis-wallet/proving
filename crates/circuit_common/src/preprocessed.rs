@@ -6,7 +6,7 @@ use circuits::circuit::{
 use circuits::context::FinalizedContext;
 use circuits::ivalue::IValue;
 use circuits_stark_verifier::order_hash_map::OrderedHashMap;
-use itertools::zip_eq;
+use itertools::{chain, zip_eq};
 #[cfg(feature = "prover")]
 use stwo::core::fields::m31::BaseField;
 #[cfg(feature = "prover")]
@@ -59,14 +59,6 @@ macro_rules! define_preprocessed_columns {
 
         impl $struct_name {
             const IDS: &[&str] = &[$(stringify!($field)),+];
-        }
-
-        impl From<[Vec<usize>; $struct_name::IDS.len()]> for $struct_name {
-            /// For components whose columns are filled by index rather than by name.
-            fn from(columns: [Vec<usize>; Self::IDS.len()]) -> Self {
-                let [$($field),+] = columns;
-                Self { $($field),+ }
-            }
         }
 
         impl $struct_name {
@@ -127,49 +119,49 @@ define_preprocessed_columns!(
     ]
 );
 
-// The two components that fill their columns by index rather than by name.
-const N_QM31_OPS_PP_COLUMNS: usize = Qm31OpsColumns::IDS.len();
-const N_M31_TO_U32_PP_COLUMNS: usize = M31ToU32Columns::IDS.len();
-
 /// Bit widths of the bitwise-XOR lookup tables (three columns each; a table of `n` bits has
 /// `2^(2n)` rows).
 const XOR_TABLE_N_BITS: [u32; 5] = [4, 7, 8, 9, 10];
 /// Log size of the sequence column (`0..2^n`, used by `range_check_16`).
 const SEQ_LOG_SIZE: u32 = 16;
 
-/// A function that computes the values of a fixed column.
-/// (log_size, row) -> value at that row.
-type ColumnFn = fn(u32, usize) -> usize;
+/// Columns per bitwise-XOR table: `rhs`, `lhs`, and their XOR.
+const N_XOR_TABLE_COLUMNS: usize = 3;
 
-fn seq(_log_size: u32, row: usize) -> usize {
-    row
-}
-// Row `i` of a `bitwise_xor_{n}` table (`2^(2n)` rows, so `n` is half the log size) pairs
-// `rhs = i >> n` with `lhs = i & (2^n - 1)`.
-fn xor_rhs(log_size: u32, row: usize) -> usize {
-    row >> (log_size / 2)
-}
-fn xor_lhs(log_size: u32, row: usize) -> usize {
-    row & ((1 << (log_size / 2)) - 1)
-}
-fn xor_result(log_size: u32, row: usize) -> usize {
-    xor_lhs(log_size, row) ^ xor_rhs(log_size, row)
-}
-
-/// The fixed lookup-table columns, in commitment order: the sequence column, then the three
-/// columns of the bitwise-XOR table of each bit width.
-///
-/// Each entry pairs an id and log size with the per-row value function of the column it labels.
-fn fixed_columns() -> impl Iterator<Item = (String, u32, ColumnFn)> {
-    let xor_columns: [ColumnFn; 3] = [xor_rhs, xor_lhs, xor_result];
-    std::iter::once((format!("seq_{SEQ_LOG_SIZE}"), SEQ_LOG_SIZE, seq as ColumnFn)).chain(
-        XOR_TABLE_N_BITS.into_iter().flat_map(move |n_bits| {
-            xor_columns
-                .into_iter()
-                .enumerate()
-                .map(move |(i, value)| (format!("bitwise_xor_{n_bits}_{i}"), 2 * n_bits, value))
+/// The ids and log sizes of the fixed lookup-table columns, in commitment order: the sequence
+/// column, then the three columns of the bitwise-XOR table of each bit width.
+fn fixed_column_layout() -> impl Iterator<Item = (String, u32)> {
+    chain!(
+        [(format!("seq_{SEQ_LOG_SIZE}"), SEQ_LOG_SIZE)],
+        XOR_TABLE_N_BITS.into_iter().flat_map(|n_bits| {
+            (0..N_XOR_TABLE_COLUMNS).map(move |i| (format!("bitwise_xor_{n_bits}_{i}"), 2 * n_bits))
         }),
     )
+}
+
+/// The values of the fixed lookup-table columns, in the same order as [`fixed_column_layout`].
+fn fixed_column_values() -> impl Iterator<Item = Vec<usize>> {
+    chain!(
+        [(0..1_usize << SEQ_LOG_SIZE).collect()],
+        XOR_TABLE_N_BITS.into_iter().flat_map(xor_table_columns),
+    )
+}
+
+/// The three columns of the `bitwise_xor_{n_bits}` table, over its `2^(2 * n_bits)` rows: row `i`
+/// holds `rhs = i >> n_bits`, `lhs = i & (2^n_bits - 1)`, and their XOR — every ordered pair of
+/// `n_bits`-bit values.
+fn xor_table_columns(n_bits: u32) -> [Vec<usize>; N_XOR_TABLE_COLUMNS] {
+    let size = 1_usize << (2 * n_bits);
+    let mask = (1_usize << n_bits) - 1;
+    let mut columns: [Vec<usize>; N_XOR_TABLE_COLUMNS] =
+        std::array::from_fn(|_| Vec::with_capacity(size));
+    for row in 0..size {
+        let (rhs, lhs) = (row >> n_bits, row & mask);
+        columns[0].push(rhs);
+        columns[1].push(lhs);
+        columns[2].push(rhs ^ lhs);
+    }
+    columns
 }
 
 /// The preprocessed-trace layout of a circuit whose components are padded to `sizes` (powers of
@@ -191,13 +183,13 @@ pub fn layout_from_component_sizes(
     push(TripleXorColumns::IDS, sizes.triple_xor);
     push(M31ToU32Columns::IDS, sizes.m31_to_u32);
     push(BlakeGGateColumns::IDS, sizes.blake_g_gate);
-    entries.extend(fixed_columns().map(|(id, log_size, _)| (id, log_size)));
+    entries.extend(fixed_column_layout());
     // The same order as `PreProcessedTrace::sort_by_size` (stable, so ties keep insertion order).
     entries.sort_by_key(|(_, log_size)| *log_size);
     entries.into_iter().map(|(id, log_size)| (PreProcessedColumnId { id }, log_size)).collect()
 }
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, PartialEq)]
 enum OpCode {
     Add,
     Sub,
@@ -205,25 +197,45 @@ enum OpCode {
     PointwiseMul,
 }
 
+impl OpCode {
+    const ALL: [OpCode; N_OP_CODES] = [OpCode::Add, OpCode::Sub, OpCode::Mul, OpCode::PointwiseMul];
+}
+
+impl Qm31OpsColumns {
+    /// The one-hot flag column of `op_code`.
+    fn flag_column(&mut self, op_code: OpCode) -> &mut Vec<usize> {
+        match op_code {
+            OpCode::Add => &mut self.qm_31_ops_add_flag,
+            OpCode::Sub => &mut self.qm_31_ops_sub_flag,
+            OpCode::Mul => &mut self.qm_31_ops_mul_flag,
+            OpCode::PointwiseMul => &mut self.qm_31_ops_pointwise_mul_flag,
+        }
+    }
+
+    /// Appends `n_rows` rows of the one-hot op-code flags, set for `op_code` and clear elsewhere.
+    fn push_op_code_flags(&mut self, op_code: OpCode, n_rows: usize) {
+        for op in OpCode::ALL {
+            self.flag_column(op).extend(std::iter::repeat_n((op == op_code) as usize, n_rows));
+        }
+    }
+}
+
 /// Adds the binary operation gates to the qm31 ops preprocessed trace.
 fn fill_binary_op_columns<G: Gate>(
     gates: &[G],
     op_code: OpCode,
     multiplicities: &[usize],
-    columns: &mut [Vec<usize>; N_QM31_OPS_PP_COLUMNS],
+    columns: &mut Qm31OpsColumns,
 ) {
-    let op_code_idx = op_code as usize;
     for gate in gates.iter() {
         let [in0, in1] = gate.uses()[..] else { panic!("Expected 2 uses for gate") };
         let [out] = gate.yields()[..] else { panic!("Expected 1 yield for gate") };
-        (0..N_OP_CODES).for_each(|i| {
-            columns[i].push(if i == op_code_idx { 1 } else { 0 });
-        });
-        columns[4].push(in0);
-        columns[5].push(in1);
-        columns[6].push(out);
+        columns.push_op_code_flags(op_code, 1);
+        columns.qm_31_ops_in_0_address.push(in0);
+        columns.qm_31_ops_in_1_address.push(in1);
+        columns.qm_31_ops_out_address.push(out);
         // TODO(Gali): Consider negating the multiplicities.
-        columns[7].push(multiplicities[out]);
+        columns.qm_31_ops_mults.push(multiplicities[out]);
     }
 }
 
@@ -240,36 +252,29 @@ fn fill_binary_op_columns<G: Gate>(
 fn fill_permutation_columns(
     gates: &[Permutation],
     multiplicities: &[usize],
-    columns: &mut [Vec<usize>; N_QM31_OPS_PP_COLUMNS],
+    columns: &mut Qm31OpsColumns,
     first_unused_address: usize,
 ) {
-    let add_op_code_idx = OpCode::Add as usize;
     let mut permutation_address = first_unused_address;
     for gate in gates.iter() {
         let inputs = gate.uses();
         let outputs = gate.yields();
 
-        // Set flag to Add opcode.
-        (0..N_OP_CODES).for_each(|i| {
-            columns[i].extend(std::iter::repeat_n(
-                (i == add_op_code_idx) as usize,
-                inputs.len() + outputs.len(),
-            ));
-        });
+        columns.push_op_code_flags(OpCode::Add, inputs.len() + outputs.len());
 
         // TODO(alonf): Parallelize, and insert the above loop inside.
         for (input, output) in zip_eq(inputs, outputs) {
             // Input row.
-            columns[4].push(0);
-            columns[5].push(input);
-            columns[6].push(permutation_address);
-            columns[7].push(1);
+            columns.qm_31_ops_in_0_address.push(0);
+            columns.qm_31_ops_in_1_address.push(input);
+            columns.qm_31_ops_out_address.push(permutation_address);
+            columns.qm_31_ops_mults.push(1);
 
             // Output row.
-            columns[4].push(0);
-            columns[5].push(permutation_address);
-            columns[6].push(output);
-            columns[7].push(multiplicities[output]);
+            columns.qm_31_ops_in_0_address.push(0);
+            columns.qm_31_ops_in_1_address.push(permutation_address);
+            columns.qm_31_ops_out_address.push(output);
+            columns.qm_31_ops_mults.push(multiplicities[output]);
         }
 
         permutation_address += 1;
@@ -298,22 +303,18 @@ fn add_qm31_ops_to_preprocessed_trace(
     pp_trace: &mut PreProcessedTrace,
 ) -> Qm31OpsTraceGenerator {
     let Qm31OpsGates { add, sub, mul, pointwise_mul, permutation } = gates;
-    let mut qm31_ops_columns: [_; N_QM31_OPS_PP_COLUMNS] = std::array::from_fn(|_| vec![]);
-    fill_binary_op_columns(add, OpCode::Add, multiplicities, &mut qm31_ops_columns);
-    fill_binary_op_columns(sub, OpCode::Sub, multiplicities, &mut qm31_ops_columns);
-    fill_binary_op_columns(mul, OpCode::Mul, multiplicities, &mut qm31_ops_columns);
-    fill_binary_op_columns(
-        pointwise_mul,
-        OpCode::PointwiseMul,
-        multiplicities,
-        &mut qm31_ops_columns,
-    );
+    let mut columns = Qm31OpsColumns::default();
+    fill_binary_op_columns(add, OpCode::Add, multiplicities, &mut columns);
+    fill_binary_op_columns(sub, OpCode::Sub, multiplicities, &mut columns);
+    fill_binary_op_columns(mul, OpCode::Mul, multiplicities, &mut columns);
+    fill_binary_op_columns(pointwise_mul, OpCode::PointwiseMul, multiplicities, &mut columns);
+    // Every column is as long as the binary-op rows written so far; the flags are one such column.
     let qm31_ops_trace_generator =
-        Qm31OpsTraceGenerator { first_permutation_row: qm31_ops_columns[0].len() };
+        Qm31OpsTraceGenerator { first_permutation_row: columns.qm_31_ops_add_flag.len() };
 
-    fill_permutation_columns(permutation, multiplicities, &mut qm31_ops_columns, n_vars);
+    fill_permutation_columns(permutation, multiplicities, &mut columns, n_vars);
 
-    Qm31OpsColumns::from(qm31_ops_columns).push_to(pp_trace);
+    columns.push_to(pp_trace);
     qm31_ops_trace_generator
 }
 
@@ -349,29 +350,21 @@ fn add_triple_xor_to_preprocessed_trace(
     columns.push_to(pp_trace);
 }
 
-/// Adds M31ToU32 gates to preprocessed trace columns.
+/// Adds M31ToU32 gates to the preprocessed trace. Preprocessed columns are in the format:
 /// | input_address | output_address | multiplicity |
-fn fill_m31_to_u32_columns(
-    gates: &[M31ToU32],
-    multiplicities: &[usize],
-    columns: &mut [Vec<usize>; N_M31_TO_U32_PP_COLUMNS],
-) {
-    for M31ToU32 { input, out } in gates.iter() {
-        columns[0].push(*input);
-        columns[1].push(*out);
-        columns[2].push(multiplicities[*out]);
-    }
-}
-
 fn add_m31_to_u32_to_preprocessed_trace(
     m31_to_u32: &[M31ToU32],
     multiplicities: &[usize],
     pp_trace: &mut PreProcessedTrace,
 ) {
-    let mut columns: [_; N_M31_TO_U32_PP_COLUMNS] = std::array::from_fn(|_| vec![]);
-    fill_m31_to_u32_columns(m31_to_u32, multiplicities, &mut columns);
+    let mut columns = M31ToU32Columns::default();
+    for M31ToU32 { input, out } in m31_to_u32.iter() {
+        columns.m31_to_u32_input_addr.push(*input);
+        columns.m31_to_u32_output_addr.push(*out);
+        columns.m31_to_u32_multiplicity.push(multiplicities[*out]);
+    }
 
-    M31ToU32Columns::from(columns).push_to(pp_trace);
+    columns.push_to(pp_trace);
 }
 
 /// Adds BlakeGGate gates to the preprocessed trace. Preprocessed columns are in the format:
@@ -453,8 +446,7 @@ impl PreProcessedTrace {
     ///   every ordered pair of n-bit values (`rhs`, `lhs`) and `_2` holds their XOR, used by the
     ///   `VerifyBitwiseXor` components.
     fn add_fixed_preprocessed_columns(pp_trace: &mut PreProcessedTrace) {
-        for (id, log_size, value) in fixed_columns() {
-            let column = (0..1_usize << log_size).map(|row| value(log_size, row)).collect();
+        for ((id, _log_size), column) in zip_eq(fixed_column_layout(), fixed_column_values()) {
             pp_trace.push_column(PreProcessedColumnId { id }, column);
         }
     }
