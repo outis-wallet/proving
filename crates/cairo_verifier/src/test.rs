@@ -5,7 +5,6 @@ use std::sync::Arc;
 use cairo_air::CairoProof;
 use cairo_air::flat_claims::FlatClaim;
 use cairo_air::utils::{binary_deserialize_from_file, binary_serialize_to_file};
-use cairo_air::verifier::INTERACTION_POW_BITS;
 use cairo_vm::types::layout_name::LayoutName;
 use circuit_common::N_RESERVED;
 use circuits::blake::HashValue;
@@ -32,7 +31,7 @@ use crate::all_components::all_components;
 use crate::statement::{AUX_DATA_FIXED_LEN, CairoStatement, MEMORY_VALUES_LIMBS};
 use crate::test_utils::verify_cairo_with_component_set;
 use crate::utils::get_proof_file_path;
-use crate::verify::{enabled_components, get_preprocessed_root};
+use crate::verify::{INTERACTION_POW_BITS, enabled_components, get_preprocessed_root};
 
 /// Circuit Verifies a [CairoProof].
 pub fn verify_cairo(

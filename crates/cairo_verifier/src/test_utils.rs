@@ -3,7 +3,6 @@ use std::collections::HashSet;
 use cairo_air::CairoProof;
 use cairo_air::air::PubMemoryValue;
 use cairo_air::flat_claims::FlatClaim;
-use cairo_air::verifier::INTERACTION_POW_BITS;
 use circuits::context::FinalizedContext;
 use circuits::ivalue::NoValue;
 use circuits_stark_verifier::constraint_eval::CircuitEval;
@@ -23,8 +22,8 @@ use crate::privacy::PRIVACY_TRANSACTION_COMPONENTS;
 use crate::statement::{N_OUTPUTS, N_WORDS_PER_OUTPUT_CELL};
 use crate::utils::{get_test_data_dir, load_program};
 use crate::verify::{
-    CairoVerifierConfig, get_preprocessed_root, prepare_cairo_proof_for_circuit_verifier,
-    verify_fixed_cairo_circuit,
+    CairoVerifierConfig, INTERACTION_POW_BITS, get_preprocessed_root,
+    prepare_cairo_proof_for_circuit_verifier, verify_fixed_cairo_circuit,
 };
 
 #[cfg(test)]
@@ -180,7 +179,7 @@ pub fn verify_cairo_with_component_set(
         &components,
         cairo_proof.preprocessed_trace_variant.n_columns(),
         &cairo_proof.extended_stark_proof.proof.config,
-        crate::verify::INTERACTION_POW_BITS,
+        INTERACTION_POW_BITS,
     );
     let verifier_config = CairoVerifierConfig {
         preprocessed_root: ppt_root.into(),
