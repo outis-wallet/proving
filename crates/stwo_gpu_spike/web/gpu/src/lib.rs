@@ -187,8 +187,8 @@ pub struct Gpu {
 impl Gpu {
     /// The adapter's device, with the adapter's own limits (a 512 MiB binding needs more than
     /// WebGPU's defaults: 128 MiB per binding, 256 MiB per buffer).
-    pub async fn create() -> Result<Gpu, JsValue> {
-        let gpu = context().await.map_err(|e| JsValue::from_str(&e))?;
+    pub async fn create(force_fallback_adapter: bool) -> Result<Gpu, JsValue> {
+        let gpu = context(force_fallback_adapter).await.map_err(|e| JsValue::from_str(&e))?;
         gpu.device.on_uncaptured_error(Arc::new(|error: wgpu::Error| {
             console_error(&format!("uncaptured WebGPU error: {error}"));
         }));
@@ -329,28 +329,51 @@ impl Gpu {
 
 /// `GpuContext::new_async`, with failures returned rather than panicking (a panic in a future
 /// would leave its promise pending): the browser's WebGPU adapter, with its own limits.
-async fn context() -> Result<GpuContext, String> {
+async fn context(force_fallback_adapter: bool) -> Result<GpuContext, String> {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
         backends: wgpu::Backends::BROWSER_WEBGPU,
         ..wgpu::InstanceDescriptor::new_without_display_handle()
     });
-    let adapter = instance
-        .request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            ..Default::default()
-        })
-        .await
-        .map_err(|e| format!("no WebGPU adapter: {e}"))?;
-    let adapter_info = adapter.get_info();
-    let (device, queue) = adapter
-        .request_device(&wgpu::DeviceDescriptor {
-            label: Some("stwo-gpu-web"),
-            required_limits: adapter.limits(),
-            ..Default::default()
-        })
-        .await
-        .map_err(|e| format!("no WebGPU device: {e}"))?;
-    Ok(GpuContext { adapter_info, device, queue })
+    // The adapter's own limits; or, if the browser refuses them (Firefox 157 on an RTX 3080:
+    // "Not enough memory left"), WebGPU's defaults with buffers and bindings of up to 1 GiB; or
+    // the defaults. A fresh adapter for each try: a refused request may consume one.
+    let mut last_error = String::new();
+    for attempt in 0..3 {
+        let adapter = instance
+            .request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::HighPerformance,
+                force_fallback_adapter,
+                ..Default::default()
+            })
+            .await
+            .map_err(|e| format!("no WebGPU adapter: {e}"))?;
+        let own = adapter.limits();
+        let limits = match attempt {
+            0 => own.clone(),
+            1 => wgpu::Limits {
+                max_buffer_size: own.max_buffer_size.min(1 << 30),
+                max_storage_buffer_binding_size: own.max_storage_buffer_binding_size.min(1 << 30),
+                ..Default::default()
+            },
+            _ => Default::default(),
+        };
+        let adapter_info = adapter.get_info();
+        match adapter
+            .request_device(&wgpu::DeviceDescriptor {
+                label: Some("stwo-gpu-web"),
+                required_limits: limits,
+                ..Default::default()
+            })
+            .await
+        {
+            Ok((device, queue)) => return Ok(GpuContext { adapter_info, device, queue }),
+            Err(e) => {
+                console_error(&format!("WebGPU device with limits #{attempt} refused: {e}"));
+                last_error = e.to_string();
+            }
+        }
+    }
+    Err(format!("no WebGPU device: {last_error}"))
 }
 
 /// A view of `len` bytes at `ptr` in `memory`, checked against its current length.

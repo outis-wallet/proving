@@ -27,13 +27,15 @@ async function start() {
   if (!navigator.gpu) throw new Error("no navigator.gpu in this worker");
   if (typeof Atomics.waitAsync !== "function") throw new Error("no Atomics.waitAsync");
   // Asked here first: the module's own request can't fail without a panic-free path to JS.
-  const adapter = await navigator.gpu.requestAdapter({ powerPreference: "high-performance" });
+  // ?fallback=1 on this script's URL asks for the browser's fallback (software) adapter.
+  const forceFallbackAdapter = new URL(self.location.href).searchParams.get("fallback") === "1";
+  const adapter = await navigator.gpu.requestAdapter({ powerPreference: "high-performance", forceFallbackAdapter });
   if (!adapter) throw new Error("no WebGPU adapter");
   const { vendor, architecture, device, description } = adapter.info || {};
   const started = performance.now();
   await init({ module_or_path: new URL("./pkg/gpu/stwo_gpu_web_worker_bg.wasm", import.meta.url) });
   L = layout();
-  gpu = await Gpu.create();
+  gpu = await Gpu.create(forceFallbackAdapter);
   applyIo();
   const adapterInfo = { vendor, architecture, device, description, fallback: adapter.info?.isFallbackAdapter };
   return { adapter: adapterInfo, info: { ...JSON.parse(gpu.info()), kick_ms: kickMs }, start_ms: performance.now() - started };
