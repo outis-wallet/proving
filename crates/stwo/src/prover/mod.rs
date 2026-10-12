@@ -16,7 +16,7 @@ pub mod pcs;
 pub use pcs::quotient_ops::QuotientOps;
 pub use pcs::{
     CommitmentSchemeProver, CommitmentTreeProver, StripedCommitHook, TreeBuilder,
-    set_striped_commit_hook,
+    set_striped_commit_hook, set_striped_decommit_hook, StripedDecommitHook,
 };
 pub mod backend;
 pub mod channel;

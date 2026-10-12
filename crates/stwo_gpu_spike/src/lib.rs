@@ -25,6 +25,7 @@ use wgpu::util::DeviceExt;
 pub mod blake2s;
 pub mod commit;
 pub mod committer;
+pub mod decommit;
 pub mod constraint;
 pub mod extension;
 pub mod memory;

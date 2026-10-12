@@ -3,7 +3,7 @@ use std::array;
 use hashbrown::HashMap;
 use itertools::Itertools;
 #[cfg(feature = "parallel")]
-use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
+use rayon::iter::{IntoParallelIterator, IntoParallelRefIterator, ParallelIterator};
 use tracing::{Level, info, span};
 
 use crate::core::ColumnVec;
@@ -21,7 +21,7 @@ use crate::core::utils::MaybeOwned;
 use crate::core::vcs_lifted::merkle_hasher::MerkleHasherLifted;
 use crate::core::vcs_lifted::verifier::ExtendedMerkleDecommitmentLifted;
 use crate::prover::air::component_prover::{Poly, Trace, WeightsHashMap};
-use crate::prover::backend::{BackendForChannel, Col, Column};
+use crate::prover::backend::{BackendForChannel, Col, Column, ColumnOps};
 use crate::prover::fri::{FriDecommitResult, FriProver};
 use crate::prover::mempool::BaseColumnPool;
 use crate::prover::pcs::quotient_ops::compute_fri_quotients;
@@ -81,6 +81,60 @@ fn striped_commit_hook<B: BackendForChannel<MC>, MC: MerkleChannel>()
         .as_ref()?
         .get(&std::any::TypeId::of::<(B, MC)>())?
         .downcast_ref::<std::sync::Arc<StripedCommitHook<B, MC>>>()
+        .cloned()
+}
+
+/// A replacement for [`CommitmentTreeProver`]'s evaluation of the rows its decommitment reads in
+/// columns that hold only their first stripe (see [`CommitmentTreeProver::new_striped`]), on one
+/// backend, e.g. on a GPU that still holds the columns. Given the tree's columns as it holds them
+/// and, for each, the sorted positions (bit-reversed, in its committed domain) it doesn't hold
+/// that the decommitment reads, it returns their values in the same order, or `None`: the
+/// columns are then evaluated as without a hook.
+///
+/// A hook must return exactly the columns' values: those `PolyOps::eval_at_domain_indices`
+/// returns for the coefficients interpolated from the first stripe. The opened values and the
+/// Merkle decommitment, and so the proof, depend on them; stwo does not check them (the verifier
+/// rejects a proof built on a wrong value).
+pub type StripedDecommitHook<B> = dyn Fn(
+        &[&CircleEvaluation<B, BaseField, BitReversedOrder>],
+        &[Vec<usize>],
+    ) -> Option<Vec<Vec<BaseField>>>
+    + Send
+    + Sync;
+
+/// The registered decommitment hooks, by backend: `Arc<StripedDecommitHook<B>>`s behind `Any`.
+static STRIPED_DECOMMIT_HOOKS: std::sync::RwLock<
+    Option<HashMap<std::any::TypeId, std::sync::Arc<dyn std::any::Any + Send + Sync>>>,
+> = std::sync::RwLock::new(None);
+
+/// Sets the hook [`CommitmentTreeProver`]'s decommitment of a striped tree tries first, for
+/// backend `B`, or removes it (`None`). It applies to the decommitments from then on, in every
+/// thread.
+pub fn set_striped_decommit_hook<B: ColumnOps<BaseField> + 'static>(
+    hook: Option<std::sync::Arc<StripedDecommitHook<B>>>,
+) {
+    let key = std::any::TypeId::of::<B>();
+    let mut hooks =
+        STRIPED_DECOMMIT_HOOKS.write().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let hooks = hooks.get_or_insert_with(HashMap::new);
+    match hook {
+        Some(hook) => {
+            hooks.insert(key, std::sync::Arc::new(hook));
+        }
+        None => {
+            hooks.remove(&key);
+        }
+    }
+}
+
+/// The decommitment hook registered for backend `B`, if any.
+fn striped_decommit_hook<B: ColumnOps<BaseField> + 'static>()
+-> Option<std::sync::Arc<StripedDecommitHook<B>>> {
+    let hooks = STRIPED_DECOMMIT_HOOKS.read().unwrap_or_else(|poisoned| poisoned.into_inner());
+    hooks
+        .as_ref()?
+        .get(&std::any::TypeId::of::<B>())?
+        .downcast_ref::<std::sync::Arc<StripedDecommitHook<B>>>()
         .cloned()
 }
 
@@ -808,27 +862,67 @@ impl<B: BackendForChannel<MC>, MC: MerkleChannel> CommitmentTreeProver<B, MC> {
                 (key, B::precompute_twiddles(poly.stripe_domain().half_coset))
             })
             .collect();
-        let opened_values = |poly: &Poly<B>| -> HashMap<usize, BaseField> {
+        // Per column, the rows the decommitment reads: those it holds are read, the others are
+        // evaluated (by a registered hook, if any, for all the columns at once).
+        let indices_by_size: HashMap<u32, Vec<usize>> = log_sizes
+            .iter()
+            .copied()
+            .sorted()
+            .dedup()
+            .map(|log_size| (log_size, self.commitment.decommit_indices(queries, log_size)))
+            .collect();
+        let indices = log_sizes.iter().map(|log_size| &indices_by_size[log_size]).collect_vec();
+        let n_held = self
+            .polynomials
+            .iter()
+            .zip(&indices)
+            .map(|(poly, indices)| {
+                indices.partition_point(|&index| index < poly.evals.values.len())
+            })
+            .collect_vec();
+        let hooked: Option<Vec<Vec<BaseField>>> = striped_decommit_hook::<B>().and_then(|hook| {
+            let columns = self.polynomials.iter().map(|poly| &poly.evals).collect_vec();
+            let wanted = indices
+                .iter()
+                .zip(&n_held)
+                .map(|(indices, &n_held)| indices[n_held..].to_vec())
+                .collect_vec();
+            let values = hook(&columns, &wanted)?;
+            // A hook's answer of the wrong shape is ignored.
+            (values.len() == wanted.len()
+                && values.iter().zip(&wanted).all(|(values, wanted)| values.len() == wanted.len()))
+            .then_some(values)
+        });
+        let opened_values = |column: usize| -> HashMap<usize, BaseField> {
+            let poly = &self.polynomials[column];
             let domain = poly.evals.domain;
-            let indices = self.commitment.decommit_indices(queries, domain.log_size());
-            // The rows the column holds are read; the others are evaluated.
+            let indices = indices[column];
+            let n_held = n_held[column];
             let held = poly.evals.values.len();
-            let n_held = indices.partition_point(|&index| index < held);
             let mut values =
                 indices[..n_held].iter().map(|&index| poly.evals.values.at(index)).collect_vec();
             if n_held < indices.len() {
-                let twiddles = &stripe_twiddles[&(domain.log_size(), held.ilog2())];
-                let coeffs = poly.stripe_coefficients(twiddles);
-                values.extend(B::eval_at_domain_indices(&coeffs, domain, &indices[n_held..]));
+                match &hooked {
+                    Some(hooked) => values.extend_from_slice(&hooked[column]),
+                    None => {
+                        let twiddles = &stripe_twiddles[&(domain.log_size(), held.ilog2())];
+                        let coeffs = poly.stripe_coefficients(twiddles);
+                        values.extend(B::eval_at_domain_indices(
+                            &coeffs,
+                            domain,
+                            &indices[n_held..],
+                        ));
+                    }
+                }
             }
-            indices.into_iter().zip(values).collect()
+            indices.iter().copied().zip(values).collect()
         };
         #[cfg(feature = "parallel")]
         let opened: Vec<HashMap<usize, BaseField>> =
-            self.polynomials.par_iter().map(opened_values).collect();
+            (0..self.polynomials.len()).into_par_iter().map(opened_values).collect();
         #[cfg(not(feature = "parallel"))]
         let opened: Vec<HashMap<usize, BaseField>> =
-            self.polynomials.iter().map(opened_values).collect();
+            (0..self.polynomials.len()).map(opened_values).collect();
         self.commitment
             .decommit_from_values(queries, &log_sizes, |column, index| opened[column][&index])
     }

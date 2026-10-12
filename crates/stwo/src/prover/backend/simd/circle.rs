@@ -58,6 +58,14 @@ impl SimdBackend {
         product
     }
 
+    /// The mappings whose products over the set bits of a coefficient's index (in this backend's
+    /// storage order) are its basis polynomial's value at `point`, for a polynomial of
+    /// `2^log_size` coefficients: what `eval_at_point` and `eval_at_domain_indices` evaluate
+    /// with, for evaluating the backend's coefficients elsewhere (e.g. on a GPU).
+    pub fn evaluation_mappings<F: Field>(point: CirclePoint<F>, log_size: u32) -> Vec<F> {
+        Self::generate_evaluation_mappings(point, log_size)
+    }
+
     // TODO(Ohad): consider moving this to to a more general place.
     // Note: CACHED_FFT_LOG_SIZE is specific to the backend.
     fn generate_evaluation_mappings<F: Field>(point: CirclePoint<F>, log_size: u32) -> Vec<F> {

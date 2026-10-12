@@ -27,7 +27,7 @@ use std::time::Duration;
 use stwo::core::fields::m31::BaseField;
 use stwo::prover::backend::simd::column::BaseColumn;
 
-use crate::stream::DeviceStripes;
+use crate::stream::{DeviceStripes, StripeContent};
 
 /// Where stripe 1 of the commitments' columns comes from, for constraint evaluation (see the
 /// module docs).
@@ -39,6 +39,10 @@ pub enum PartsMode {
     Host,
     /// A3: kept on the GPU by the commitment, read back on request.
     Device,
+    /// Each column's coefficients, kept until its tree's decommitment: constraint evaluation on
+    /// the GPU evaluates the stripes it reads from them, the decommitment the rows it opens (see
+    /// [`crate::decommit`]); the CPU evaluates the parts of the components it evaluates.
+    Coefficients,
     /// A3 with stripe 0 too, each column's stripes 0 and 1 side by side in storage buffers: the
     /// columns resident for constraint evaluation on the GPU (see [`crate::constraint::composer`]),
     /// stripe 1 read back on request for the components evaluated on the CPU.
@@ -56,6 +60,7 @@ impl PartsMode {
             "device" | "a3" => Self::Device,
             "recompute" | "a2" => Self::Recompute,
             "resident" => Self::Resident,
+            "coefficients" => Self::Coefficients,
             _ => Self::Off,
         }
     }
@@ -91,6 +96,8 @@ enum Kept {
         offset: u64,
         resident: Option<u64>,
     },
+    /// The column's coefficients, at byte `offset` of `device[set]`'s buffer `buffer`.
+    Coefficients { set: usize, buffer: usize, offset: u64 },
 }
 
 struct Entry {
@@ -148,10 +155,9 @@ pub struct PartStats {
     pub refused_cap: u64,
     pub refused_share: u64,
     pub refused_driver_budget: u64,
-    /// Per tree the commitments offered to keep (in order), each way tried: its bytes, whether
-    /// with stripe 0 (both stripes) or stripe 1 only, whether kept, and the process's reserved
-    /// bytes at the time.
-    pub trees: Vec<(u64, bool, bool, u64)>,
+    /// Per tree the commitments offered to keep (in order), each way tried: its bytes, what it
+    /// would hold, whether kept, and the process's reserved bytes at the time.
+    pub trees: Vec<(u64, StripeContent, bool, u64)>,
     /// Resident columns found for constraint evaluation on the GPU, and not found.
     pub resident_hits: u64,
     pub resident_misses: u64,
@@ -164,6 +170,8 @@ pub enum Placement {
     Both { buffer: wgpu::Buffer, byte_offset: u64 },
     /// Its stripe 1 only, from byte `byte_offset` of `buffer`.
     Stripe1 { buffer: wgpu::Buffer, byte_offset: u64 },
+    /// Its coefficients, from byte `byte_offset` of `buffer`.
+    Coefficients { buffer: wgpu::Buffer, byte_offset: u64 },
 }
 
 /// A column resident on the GPU: its stripes 0 and 1, `2^(log_size + 1)` words from word
@@ -191,13 +199,40 @@ impl PartStore {
 
     /// Called at the start of every commitment: the first after a lookup clears the store (and
     /// returns true: in a proof, the composition's commitment, whose columns constraint
-    /// evaluation never reads).
-    pub fn commitment_starts(&mut self) -> bool {
+    /// evaluation never reads); coefficients (`keep_coefficients`) stay until their tree's
+    /// decommitment (see [`Self::decommitted`]).
+    pub fn commitment_starts(&mut self, keep_coefficients: bool) -> bool {
         let after_lookup = self.looked_up;
-        if after_lookup {
+        if after_lookup && !keep_coefficients {
             self.clear();
         }
+        self.looked_up = false;
         after_lookup
+    }
+
+    /// Drops the coefficients of the columns the tree holds as `stripe0` (its decommitment is
+    /// done), and frees each set none of whose columns is left.
+    pub fn decommitted(&mut self, stripe0: &[&BaseColumn]) {
+        let mut sets = vec![];
+        for values in stripe0 {
+            if let Some(Entry { kept: Kept::Coefficients { set, .. }, .. }) =
+                self.entries.get(&key(values))
+            {
+                sets.push(*set);
+                self.entries.remove(&key(values));
+            }
+        }
+        sets.sort();
+        sets.dedup();
+        for set in sets {
+            let in_use = self.entries.values().any(|entry| {
+                matches!(entry.kept, Kept::Coefficients { set: s, .. } | Kept::Device { set: s, .. } if s == set)
+            });
+            if !in_use && let Some(stripes) = self.device[set].take() {
+                self.stats.held_bytes -= stripes.bytes();
+                stripes.destroy();
+            }
+        }
     }
 
     /// Drops everything kept (and frees the GPU buffers).
@@ -250,8 +285,8 @@ impl PartStore {
     }
 
     /// Notes a tree offered to keep.
-    pub fn offered(&mut self, bytes: u64, with_stripe0: bool, kept: bool, reserved: u64) {
-        self.stats.trees.push((bytes, with_stripe0, kept, reserved));
+    pub fn offered(&mut self, bytes: u64, content: StripeContent, kept: bool, reserved: u64) {
+        self.stats.trees.push((bytes, content, kept, reserved));
     }
 
     /// Counts a tree not kept, for `reason`.
@@ -275,15 +310,24 @@ impl PartStore {
     ) {
         let set = self.device.len();
         for (i, (values, &log_size)) in stripe0.iter().zip(log_sizes).enumerate() {
-            let Some((buffer, offset)) = stripes.stripe1_place(i) else { continue };
-            let resident = stripes.with_stripe0.then(|| stripes.places[i].unwrap().1);
+            let kept = match stripes.content {
+                StripeContent::Coefficients => {
+                    let Some((buffer, offset)) = stripes.places[i] else { continue };
+                    Kept::Coefficients { set, buffer, offset }
+                }
+                _ => {
+                    let Some((buffer, offset)) = stripes.stripe1_place(i) else { continue };
+                    let resident = stripes.with_stripe0().then(|| stripes.places[i].unwrap().1);
+                    Kept::Device { set, buffer, offset, resident }
+                }
+            };
             self.entries.insert(
                 key(values),
                 Entry {
                     fingerprint: fingerprint(values.as_slice()),
                     domain_log_size: log_size + log_blowup,
                     log_blowup,
-                    kept: Kept::Device { set, buffer, offset, resident },
+                    kept,
                 },
             );
         }
@@ -324,6 +368,11 @@ impl PartStore {
         let place = match entry.kept {
             Kept::Host(_) => None,
             Kept::Device { set, buffer, offset, .. } => Some((set, buffer, offset)),
+            // Coefficients only: the CPU evaluates the part.
+            Kept::Coefficients { .. } => {
+                self.stats.misses += 1;
+                return None;
+            }
         };
         self.stats.hits += 1;
         self.stats.hit_bytes += 4 * stripe0.length as u64;
@@ -334,7 +383,7 @@ impl PartStore {
         match place {
             None if shared => match &self.entries[&key].kept {
                 Kept::Host(values) => Some(Found::Host(values.clone())),
-                Kept::Device { .. } => unreachable!(),
+                _ => unreachable!(),
             },
             None => match self.entries.remove(&key).map(|entry| entry.kept) {
                 Some(Kept::Host(values)) => {
@@ -391,17 +440,26 @@ impl PartStore {
     ) -> Option<Placement> {
         self.looked_up = true;
         let entry = self.entries.get(&key(stripe0))?;
-        let Kept::Device { set, buffer, offset, resident } = entry.kept else { return None };
         if entry.domain_log_size != domain_log_size
             || entry.log_blowup != log_blowup
             || entry.fingerprint != fingerprint(stripe0.as_slice())
         {
             return None;
         }
-        let buffer = self.device[set].as_ref().expect("a kept set").buffers[buffer].clone();
-        Some(match resident {
-            Some(resident) => Placement::Both { buffer, byte_offset: resident },
-            None => Placement::Stripe1 { buffer, byte_offset: offset },
+        let device = |set: usize, buffer: usize| {
+            self.device[set].as_ref().expect("a kept set").buffers[buffer].clone()
+        };
+        Some(match entry.kept {
+            Kept::Host(_) => return None,
+            Kept::Device { set, buffer, resident: Some(resident), .. } => {
+                Placement::Both { buffer: device(set, buffer), byte_offset: resident }
+            }
+            Kept::Device { set, buffer, offset, resident: None } => {
+                Placement::Stripe1 { buffer: device(set, buffer), byte_offset: offset }
+            }
+            Kept::Coefficients { set, buffer, offset } => {
+                Placement::Coefficients { buffer: device(set, buffer), byte_offset: offset }
+            }
         })
     }
 

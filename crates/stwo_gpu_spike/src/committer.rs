@@ -40,7 +40,7 @@ use crate::commit::{
 use crate::memory::VramPolicy;
 use crate::parts::{Found, PartStats, PartStore, PartsMode};
 use crate::recompute::Recomputer;
-use crate::stream::{DeviceStripes, KeepStripe1, StreamedCommitment, group_words};
+use crate::stream::{DeviceStripes, KeepStripe1, StreamedCommitment, StripeContent, group_words};
 use crate::transfer::{Readback, ReadbackRing, RingTimes, Upload, UploadRing};
 use crate::warm::{KeepWarm, window_from_env};
 
@@ -81,6 +81,27 @@ pub struct GpuCommitter {
     root_cosets: Mutex<HashMap<u32, Coset>>,
     /// The bound on the video memory kept for constraint evaluation.
     vram_policy: Mutex<VramPolicy>,
+    /// Whether the decommitments read the coefficients kept (see [`Self::decommit_values`]):
+    /// then they stay until their tree's decommitment, the composition's tree's too.
+    decommit: std::sync::atomic::AtomicBool,
+    /// The decommitment's kernels, made at its first use.
+    fold: Mutex<Option<crate::decommit::FoldKernels>>,
+    decommit_stats: Mutex<DecommitStats>,
+}
+
+/// The decommitments served on the GPU (see [`GpuCommitter::decommit_values`]), since the stats
+/// were last taken.
+#[derive(Clone, Debug, Default)]
+pub struct DecommitStats {
+    /// Trees asked for, served, and why not.
+    pub trees: u64,
+    pub served: u64,
+    pub not_resident: u64,
+    pub failed: u64,
+    /// The columns and positions evaluated, and the time in all (wall clock).
+    pub columns: u64,
+    pub positions: u64,
+    pub seconds: f64,
 }
 
 /// Kept free besides a tree's resident columns when checking the policy: the composer's buffers
@@ -188,6 +209,9 @@ impl GpuCommitter {
             recomputer: Mutex::new(None),
             root_cosets: Mutex::new(HashMap::new()),
             vram_policy: Mutex::new(VramPolicy::from_env()),
+            decommit: std::sync::atomic::AtomicBool::new(false),
+            fold: Mutex::new(None),
+            decommit_stats: Mutex::new(DecommitStats::default()),
         })
     }
 
@@ -249,7 +273,11 @@ impl GpuCommitter {
         }
         let mut state = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let mut parts = self.parts.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        let after_lookup = parts.commitment_starts();
+        let parts_mode_now =
+            *self.parts_mode.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let after_lookup = parts.commitment_starts(
+            parts_mode_now == PartsMode::Coefficients && self.decommit_enabled(),
+        );
         let parts_mode = *self.parts_mode.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Some(warm) = &self.warm {
             warm.begin();
@@ -385,25 +413,31 @@ impl GpuCommitter {
         log_sizes: &[u32],
         log_blowup: u32,
     ) -> Option<DeviceStripes> {
-        let ways: &[bool] = match mode {
-            PartsMode::Device => &[false],
-            PartsMode::Resident if !after_lookup => &[true, false],
+        // The ways to try, in order.
+        let ways: &[StripeContent] = match mode {
+            PartsMode::Device => &[StripeContent::Stripe1],
+            PartsMode::Resident if !after_lookup => {
+                &[StripeContent::Stripes01, StripeContent::Stripe1]
+            }
+            // Every tree's, the composition's too if the decommitments read them.
+            PartsMode::Coefficients if !after_lookup || self.decommit_enabled() => {
+                &[StripeContent::Coefficients]
+            }
             _ => return None,
         };
         let limits = self.gpu.device.limits();
         let memory = crate::memory::DeviceMemory::query(&self.gpu);
         let reserved = crate::memory::process_reserved(&self.gpu);
-        for &with_stripe0 in ways {
-            // Both stripes: storage buffers the constraint kernels bind (a tree in one, if it
-            // fits); stripe 1 only: copy sources.
-            let max_bytes = match with_stripe0 {
-                true => {
+        for &content in ways {
+            // Storage buffers the kernels bind (a tree in one, if it fits); stripe 1 only: copy
+            // sources.
+            let max_bytes = match content {
+                StripeContent::Stripe1 => limits.max_buffer_size.min(1 << 30),
+                _ => {
                     limits.max_buffer_size.min(limits.max_storage_buffer_binding_size) / 256 * 256
                 }
-                false => limits.max_buffer_size.min(1 << 30),
             };
-            let bytes =
-                DeviceStripes::planned_bytes(log_sizes, log_blowup, max_bytes, with_stripe0);
+            let bytes = DeviceStripes::planned_bytes(log_sizes, log_blowup, max_bytes, content);
             // The process's share of the device, the driver's budget, the cap: the GPU may drive
             // a display.
             let allowed = self.vram_policy().allows(
@@ -412,7 +446,7 @@ impl GpuCommitter {
                 reserved,
                 memory.as_ref(),
             );
-            parts.offered(bytes, with_stripe0, allowed.is_ok(), reserved.unwrap_or(0));
+            parts.offered(bytes, content, allowed.is_ok(), reserved.unwrap_or(0));
             match allowed {
                 Ok(()) => {
                     return Some(DeviceStripes::new(
@@ -420,7 +454,7 @@ impl GpuCommitter {
                         log_sizes,
                         log_blowup,
                         max_bytes,
-                        with_stripe0,
+                        content,
                     ));
                 }
                 Err(reason) => parts.refused(reason),
@@ -735,6 +769,160 @@ impl GpuCommitter {
             upload: reused.upload.bytes(),
             readback: reused.readback.bytes(),
         })
+    }
+
+    /// Frees the commitment buffers held between commitments (the next commitment allocates
+    /// them again), keeping the twiddles and the staging rings: for constraint evaluation, which
+    /// needs the room while the next commitment is still to come.
+    pub fn release_commit_buffers(&self) {
+        let mut state = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(reused) = state.as_mut() {
+            reused.buffers = CommitBuffers::new();
+        }
+    }
+
+    /// Sets whether the decommitments read the coefficients kept (see
+    /// [`Self::decommit_values`]).
+    pub fn set_decommit(&self, enabled: bool) {
+        self.decommit.store(enabled, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn decommit_enabled(&self) -> bool {
+        self.decommit.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// The decommitments' counts since the last call.
+    pub fn take_decommit_stats(&self) -> DecommitStats {
+        std::mem::take(&mut *self.decommit_stats.lock().unwrap_or_else(|p| p.into_inner()))
+    }
+
+    /// The values a striped tree's decommitment reads at the positions `wanted[c]` of each column
+    /// `columns[c]` doesn't hold (stwo's `StripedDecommitHook`), evaluated on the GPU from the
+    /// coefficients kept ([`PartsMode::Coefficients`]); `None` (the CPU evaluates them) if a column
+    /// that has some isn't kept, or the GPU fails. The tree's coefficients are dropped either way:
+    /// a tree is decommitted once.
+    pub fn decommit_values(
+        &self,
+        columns: &[&CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>],
+        wanted: &[Vec<usize>],
+    ) -> Option<Vec<Vec<BaseField>>> {
+        use crate::parts::Placement;
+        let start = Instant::now();
+        // The columns to evaluate, by buffer, size, domain and positions.
+        type Job = (wgpu::Buffer, u32, u32, Vec<usize>);
+        let mut jobs: Vec<(Job, Vec<(usize, u32)>)> = vec![];
+        let mut resident = true;
+        {
+            let mut parts = self.parts.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            for (c, (column, wanted)) in columns.iter().zip(wanted).enumerate() {
+                if wanted.is_empty() {
+                    continue;
+                }
+                let log_size = column.values.len().ilog2();
+                let domain_log_size = column.domain.log_size();
+                match parts.placement(
+                    &column.values,
+                    domain_log_size,
+                    domain_log_size - log_size,
+                ) {
+                    Some(Placement::Coefficients { buffer, byte_offset }) => {
+                        let key = (buffer, log_size, domain_log_size, wanted.clone());
+                        let offset = (byte_offset / 4) as u32;
+                        match jobs.iter_mut().find(|(k, _)| *k == key) {
+                            Some((_, members)) => members.push((c, offset)),
+                            None => jobs.push((key, vec![(c, offset)])),
+                        }
+                    }
+                    _ => {
+                        resident = false;
+                        break;
+                    }
+                }
+            }
+        }
+        let n_positions: u64 = jobs.iter().map(|((.., w), m)| (w.len() * m.len()) as u64).sum();
+        let result = resident
+            .then(|| {
+                catch_unwind(AssertUnwindSafe(|| {
+                    let mut fold = self.fold.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                    let kernels =
+                        fold.get_or_insert_with(|| crate::decommit::FoldKernels::new(&self.gpu));
+                    let mut values: Vec<Vec<BaseField>> = columns.iter().map(|_| vec![]).collect();
+                    let offsets = jobs
+                        .iter()
+                        .map(|(_, members)| members.iter().map(|&(_, offset)| offset).collect_vec())
+                        .collect_vec();
+                    let fold_jobs = jobs
+                        .iter()
+                        .zip(&offsets)
+                        .map(|((key, members), offsets)| {
+                            let (buffer, log_size, domain_log_size, positions) = key;
+                            let domain = columns[members[0].0].domain;
+                            assert_eq!(domain.log_size(), *domain_log_size);
+                            crate::decommit::FoldJob {
+                                buffer,
+                                columns: offsets,
+                                log_size: *log_size,
+                                domain,
+                                indices: positions,
+                            }
+                        })
+                        .collect_vec();
+                    let evaluated = crate::decommit::eval_jobs(&self.gpu, kernels, &fold_jobs);
+                    for ((_, members), job_values) in jobs.iter().zip(evaluated) {
+                        for (&(c, _), column_values) in members.iter().zip(job_values) {
+                            values[c] = column_values;
+                        }
+                    }
+                    values
+                }))
+                .ok()
+            })
+            .flatten();
+        // The tree's coefficients are no longer needed (after the GPU's work on them).
+        drop(jobs);
+        let stripe0 = columns.iter().map(|column| &column.values).collect_vec();
+        self.parts.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).decommitted(&stripe0);
+        let mut stats = self.decommit_stats.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        stats.trees += 1;
+        match (&result, resident) {
+            (Some(_), _) => {
+                stats.served += 1;
+                stats.columns += wanted.iter().filter(|w| !w.is_empty()).count() as u64;
+                stats.positions += n_positions;
+            }
+            (None, false) => stats.not_resident += 1,
+            (None, true) => stats.failed += 1,
+        }
+        stats.seconds += start.elapsed().as_secs_f64();
+        result
+    }
+
+    /// The extension's kernels (the commitment's).
+    pub fn extension_kernels(&self) -> &crate::extension::ExtensionKernels {
+        &self.kernels.extension
+    }
+
+    /// Every stripe's twiddles of columns of `2^log_size` coefficients committed at blowup
+    /// `log_blowup`, as the commitments evaluated them (the last commitment's twiddle tree at that
+    /// blowup); `None` if no commitment kept them.
+    pub fn stripe_twiddles(
+        &self,
+        log_size: u32,
+        log_blowup: u32,
+    ) -> Option<std::sync::Arc<crate::extension::StripeTwiddles>> {
+        let root_coset = *self
+            .root_cosets
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(&log_blowup)?;
+        let mut state = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let reused = state.as_mut()?;
+        let log_sizes = [log_size].into_iter().collect();
+        reused
+            .twiddles
+            .try_get_with(&self.gpu, &log_sizes, log_blowup, root_coset, || Err(()))
+            .ok()
     }
 
     /// Frees the device buffers and the twiddles held between commitments (the next commitment

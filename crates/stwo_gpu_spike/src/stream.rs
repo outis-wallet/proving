@@ -644,11 +644,16 @@ impl StreamedCommitment {
                 .device
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("group") });
             self.encode_group(kernels, &mut encoder, group);
-            if let KeepStripe1::Device(stripes) = &keep {
+            if let KeepStripe1::Device(stripes) = &keep
+                && stripes.content == StripeContent::Coefficients
+            {
+                // The group's coefficients (every column's), into place.
+                stripes.encode_coefficient_copies(&mut encoder, &self.group_uploads(group));
+            } else if let KeepStripe1::Device(stripes) = &keep {
                 // Stripe 1 of the group's columns (not kept whole), into place; and stripe 0 if
                 // the places hold both.
                 let places = self.group_reads(group);
-                if stripes.with_stripe0 {
+                if stripes.with_stripe0() {
                     stripes.encode_copies(&mut encoder, &places, 0, &self.log_sizes, 0);
                 }
                 stripes.encode_copies(
@@ -681,8 +686,14 @@ impl StreamedCommitment {
                     .device
                     .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("top") });
                 self.encode_top(kernels, &mut encoder, stripe);
-                if let KeepStripe1::Device(stripes) = &keep
-                    && (stripe == 1 || (stripe == 0 && stripes.with_stripe0))
+                if let (KeepStripe1::Device(stripes), 0) = (&keep, stripe)
+                    && stripes.content == StripeContent::Coefficients
+                {
+                    // The largest columns' coefficients, into place.
+                    stripes.encode_coefficient_copies(&mut encoder, &self.top_uploads());
+                } else if let KeepStripe1::Device(stripes) = &keep
+                    && stripes.content != StripeContent::Coefficients
+                    && (stripe == 1 || (stripe == 0 && stripes.with_stripe0()))
                 {
                     stripes.encode_copies(
                         &mut encoder,
@@ -715,7 +726,7 @@ impl StreamedCommitment {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("levels") });
         self.encode_levels(&mut encoder);
         if let (KeepStripe1::Device(stripes), Some(whole)) = (&keep, &self.whole)
-            && stripes.with_stripe0
+            && stripes.with_stripe0()
         {
             // The columns kept whole: their stripes 0 and 1, into place.
             for (i, stripe, offset) in self.whole_reads() {
@@ -909,19 +920,28 @@ pub enum KeepStripe1<'k> {
     Device(&'k DeviceStripes),
 }
 
-/// Buffers on the GPU holding stripe 1 of a tree's columns (those not kept whole), each column's
-/// `2^log_size` words at its place, for constraint evaluation to read back later; or, with
-/// stripe 0 too (`with_stripe0`), every column's stripes 0 and 1 one after the other (its
-/// evaluations on the first two parts of its committed domain: what constraint evaluation reads,
-/// as a column of `2^(log_size + 1)` words in bit-reversed order), in storage buffers a kernel
-/// can bind.
+/// What a [`DeviceStripes`] holds of each of a tree's columns.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StripeContent {
+    /// Its stripe 1 (the columns kept whole: nothing), for reading back.
+    Stripe1,
+    /// Its stripes 0 and 1 one after the other: its evaluations on the first two parts of its
+    /// committed domain, as constraint evaluation reads them (a column of `2^(log_size + 1)`
+    /// words in bit-reversed order).
+    Stripes01,
+    /// Its coefficients (`2^log_size` words, in stwo's storage order), from which a kernel
+    /// evaluates what it needs: any stripe, or the decommitment's rows.
+    Coefficients,
+}
+
+/// Buffers on the GPU holding a tree's columns as [`StripeContent`] says, each column at its
+/// place; storage buffers a kernel can bind, except for [`StripeContent::Stripe1`].
 pub struct DeviceStripes {
     pub buffers: Vec<wgpu::Buffer>,
     /// Per column (polynomial order): `(buffer, byte offset)` of its place, `None` for a column
-    /// not kept (kept whole, without stripe 0).
+    /// not kept (kept whole, with stripe 1 only).
     pub places: Vec<Option<(usize, u64)>>,
-    /// Whether the places hold stripes 0 and 1 (and the columns kept whole are kept too).
-    pub with_stripe0: bool,
+    pub content: StripeContent,
     log_sizes: Vec<u32>,
 }
 
@@ -933,16 +953,19 @@ impl DeviceStripes {
         log_sizes: &[u32],
         log_blowup: u32,
         max_buffer_bytes: u64,
-        with_stripe0: bool,
+        content: StripeContent,
     ) -> (Vec<Option<(usize, u64)>>, Vec<u64>) {
         let mut sizes: Vec<u64> = vec![];
         let places = log_sizes
             .iter()
             .map(|&log_size| {
-                if kept_whole(log_size, log_blowup) && !with_stripe0 {
+                if kept_whole(log_size, log_blowup) && content == StripeContent::Stripe1 {
                     return None;
                 }
-                let bytes = (4u64 << log_size) * if with_stripe0 { 2 } else { 1 };
+                let bytes = match content {
+                    StripeContent::Stripes01 => 8u64 << log_size,
+                    _ => 4u64 << log_size,
+                };
                 assert!(bytes <= max_buffer_bytes, "a column exceeds a buffer");
                 let n = sizes.len();
                 match sizes.last_mut() {
@@ -965,53 +988,98 @@ impl DeviceStripes {
         log_sizes: &[u32],
         log_blowup: u32,
         max_buffer_bytes: u64,
-        with_stripe0: bool,
+        content: StripeContent,
     ) -> u64 {
-        Self::layout(log_sizes, log_blowup, max_buffer_bytes, with_stripe0).1.iter().sum()
+        Self::layout(log_sizes, log_blowup, max_buffer_bytes, content).1.iter().sum()
     }
 
-    /// Buffers for stripe 1 (and stripe 0 if `with_stripe0`) of columns of coefficients log
-    /// sizes `log_sizes` (in polynomial order) committed with blowup `log_blowup`, of at most
-    /// `max_buffer_bytes` each.
+    /// Buffers for `content` of columns of coefficients log sizes `log_sizes` (in polynomial
+    /// order) committed with blowup `log_blowup`, of at most `max_buffer_bytes` each.
     pub fn new(
         gpu: &GpuContext,
         log_sizes: &[u32],
         log_blowup: u32,
         max_buffer_bytes: u64,
-        with_stripe0: bool,
+        content: StripeContent,
     ) -> Self {
-        let (places, sizes) = Self::layout(log_sizes, log_blowup, max_buffer_bytes, with_stripe0);
-        let usage = match with_stripe0 {
-            true => {
+        let (places, sizes) = Self::layout(log_sizes, log_blowup, max_buffer_bytes, content);
+        let usage = match content {
+            StripeContent::Stripe1 => wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+            _ => {
                 wgpu::BufferUsages::STORAGE
                     | wgpu::BufferUsages::COPY_SRC
                     | wgpu::BufferUsages::COPY_DST
             }
-            false => wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+        };
+        let label = match content {
+            StripeContent::Stripe1 => "stripe 1",
+            StripeContent::Stripes01 => "stripes 0 and 1",
+            StripeContent::Coefficients => "coefficients",
         };
         let buffers = sizes
             .iter()
             .map(|&size| {
                 gpu.device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some(if with_stripe0 { "stripes 0 and 1" } else { "stripe 1" }),
+                    label: Some(label),
                     size,
                     usage,
                     mapped_at_creation: false,
                 })
             })
             .collect();
-        Self { buffers, places, with_stripe0, log_sizes: log_sizes.to_vec() }
+        Self { buffers, places, content, log_sizes: log_sizes.to_vec() }
     }
 
-    /// Where column `i`'s stripe 1 is: `(buffer, byte offset)`.
+    /// Whether the places hold stripes 0 and 1.
+    pub fn with_stripe0(&self) -> bool {
+        self.content == StripeContent::Stripes01
+    }
+
+    /// Where column `i`'s stripe 1 is: `(buffer, byte offset)` (none for coefficients).
     pub fn stripe1_place(&self, i: usize) -> Option<(usize, u64)> {
-        let shift = if self.with_stripe0 { 4u64 << self.log_sizes[i] } else { 0 };
+        let shift = match self.content {
+            StripeContent::Stripe1 => 0,
+            StripeContent::Stripes01 => 4u64 << self.log_sizes[i],
+            StripeContent::Coefficients => return None,
+        };
         self.places[i].map(|(buffer, offset)| (buffer, offset + shift))
     }
 
     /// The bytes of its buffers.
     pub fn bytes(&self) -> u64 {
         self.buffers.iter().map(wgpu::Buffer::size).sum()
+    }
+
+    /// Records the copies of the coefficients of the columns at `places` (`(column, buffer, byte
+    /// offset)`) into their places; adjacent columns adjacent on both sides go in one copy.
+    fn encode_coefficient_copies(&self, encoder: &mut wgpu::CommandEncoder, places: &[Place<'_>]) {
+        let mut run: Option<(&wgpu::Buffer, u64, usize, u64, u64)> = None;
+        let flush = |encoder: &mut wgpu::CommandEncoder,
+                     (src, src_offset, dst, dst_offset, bytes): (&wgpu::Buffer, u64, usize, u64, u64)| {
+            encoder.copy_buffer_to_buffer(src, src_offset, &self.buffers[dst], dst_offset, bytes);
+        };
+        for &(i, src, src_offset) in places {
+            let (dst, dst_offset) = self.places[i].expect("every column's coefficients kept");
+            let bytes = 4u64 << self.log_sizes[i];
+            run = match run {
+                Some((s, so, d, dof, b))
+                    if std::ptr::eq(s, src)
+                        && so + b == src_offset
+                        && d == dst
+                        && dof + b == dst_offset =>
+                {
+                    Some((s, so, d, dof, b + bytes))
+                }
+                Some(previous) => {
+                    flush(encoder, previous);
+                    Some((src, src_offset, dst, dst_offset, bytes))
+                }
+                None => Some((src, src_offset, dst, dst_offset, bytes)),
+            };
+        }
+        if let Some(run) = run {
+            flush(encoder, run);
+        }
     }
 
     /// Records the copies of stripe `stripe` (0 or 1) of the columns at `places` (`(column,

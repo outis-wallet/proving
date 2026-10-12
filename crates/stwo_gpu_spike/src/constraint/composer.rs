@@ -40,6 +40,7 @@ use super::ir::{Program, lower, param_values_of, words};
 use super::kernel::{ConstraintKernels, KernelOptions, meta_words, read_timestamps};
 use crate::GpuContext;
 use crate::committer::GpuCommitter;
+use crate::extension::{ColumnsLayout, GpuColumns, Merge, StripeExtension, max_buffer_words};
 use crate::parts::Placement;
 use crate::transfer::Upload;
 
@@ -604,6 +605,11 @@ impl GpuComposer {
                         if placement.is_none() && held < column_bytes {
                             return self.decline("not resident");
                         }
+                        // Coefficients: evaluated on stripes 0 and 1 through a copy of them and
+                        // the extension's output, besides the scratch.
+                        if let Some(Placement::Coefficients { .. }) = placement {
+                            scratch_bytes += column_bytes;
+                        }
                     }
                     sources.push(Source::Assembled { first: at, k });
                     scratch_bytes += k as u64 * column_bytes;
@@ -615,7 +621,7 @@ impl GpuComposer {
         // allocates its own): released while the components are evaluated, so that the trees
         // kept, a component's assembled columns and its output fit beside them.
         if self.committer.held_bytes().buffers > 0 {
-            self.committer.release_buffers();
+            self.committer.release_commit_buffers();
             lock(&self.stats).releases += 1;
         }
         // Within the video memory policy.
@@ -664,6 +670,8 @@ impl GpuComposer {
             let mut trees: Vec<wgpu::Buffer> = vec![];
             let mut offsets: Vec<u32> = vec![];
             let mut uploaded = 0u64;
+            // The extensions from coefficients, alive until the work is done.
+            let mut extensions = vec![];
             // Host data for assembled columns: through the committer's upload ring (bounded
             // staging), before the encoder's copies and kernels.
             let mut scratches: Vec<Option<wgpu::Buffer>> = vec![];
@@ -684,7 +692,7 @@ impl GpuComposer {
                     let host = columns[first + j].0.as_slice();
                     let host: &[u32] = bytemuck::cast_slice(host);
                     match &placements[first + j] {
-                        Some(Placement::Both { .. }) => {}
+                        Some(Placement::Both { .. } | Placement::Coefficients { .. }) => {}
                         Some(Placement::Stripe1 { .. }) => uploads.push((
                             scratches.len(),
                             dst,
@@ -722,6 +730,7 @@ impl GpuComposer {
                     Source::Assembled { first, k } => {
                         let scratch = scratch.clone().expect("a scratch buffer");
                         let half = column_bytes / 2;
+                        let mut from_coefficients = vec![];
                         for j in 0..*k {
                             let dst = j as u64 * column_bytes;
                             match &placements[first + j] {
@@ -744,10 +753,61 @@ impl GpuComposer {
                                         half,
                                     );
                                 }
+                                Some(Placement::Coefficients { buffer, byte_offset }) => {
+                                    from_coefficients.push((j, buffer.clone(), *byte_offset));
+                                }
                                 // A column the tree keeps whole: both stripes uploaded above.
                                 None => {}
                             }
                             offsets.push((j as u64 * column_bytes / 4) as u32);
+                        }
+                        if !from_coefficients.is_empty() {
+                            // Stripes 0 and 1 from the coefficients: the commitment's extension,
+                            // its own twiddles, then into place.
+                            let n = job.trace_log_size;
+                            let twiddles = self
+                                .committer
+                                .stripe_twiddles(n, log_blowup)
+                                .ok_or_else(|| "no stripe twiddles".to_string())?;
+                            let layout = Arc::new(ColumnsLayout::new(
+                                &vec![n; from_coefficients.len()],
+                                max_buffer_words(gpu),
+                            ));
+                            let coefficients = GpuColumns::alloc(gpu, layout.clone());
+                            let evaluations = GpuColumns::alloc(gpu, layout.clone());
+                            for (q, (_, buffer, byte_offset)) in from_coefficients.iter().enumerate() {
+                                let slot = layout.slots[q];
+                                encoder.copy_buffer_to_buffer(
+                                    buffer,
+                                    *byte_offset,
+                                    &coefficients.buffers[slot.buffer],
+                                    slot.offset * 4,
+                                    half,
+                                );
+                            }
+                            let kernels = self.committer.extension_kernels();
+                            let extension = StripeExtension::with_twiddles(
+                                gpu,
+                                kernels,
+                                &coefficients,
+                                &evaluations,
+                                twiddles,
+                                Merge::Off,
+                            );
+                            for stripe in 0..2u64 {
+                                extension.encode(kernels, &mut encoder, stripe as usize);
+                                for (q, (j, ..)) in from_coefficients.iter().enumerate() {
+                                    let slot = layout.slots[q];
+                                    encoder.copy_buffer_to_buffer(
+                                        &evaluations.buffers[slot.buffer],
+                                        slot.offset * 4,
+                                        &scratch,
+                                        *j as u64 * column_bytes + stripe * half,
+                                        half,
+                                    );
+                                }
+                            }
+                            extensions.push((coefficients, evaluations, extension));
                         }
                         trees.push(scratch);
                     }
@@ -788,6 +848,11 @@ impl GpuComposer {
             gpu.queue.submit([encoder.finish()]);
             gpu.device.poll(wgpu::PollType::wait_indefinitely()).expect("poll");
             let wait = submitted.elapsed();
+            for (coefficients, evaluations, extension) in extensions.drain(..) {
+                extension.destroy();
+                coefficients.destroy();
+                evaluations.destroy();
+            }
             let timestamps_start = Instant::now();
             let gpu_time = timestamps
                 .map(|(_, _, readback, _)| read_timestamps(gpu, &readback, count))
