@@ -15,6 +15,9 @@ import init, { Gpu, layout } from "./pkg/gpu/stwo_gpu_web_worker.js";
 const absNow = () => performance.timeOrigin + performance.now();
 let gpu = null;
 let L = null;
+let io = null; // transfer sizes from the page's { configure }, before start() finishes
+// Interval of empty submits while a job waits, in ms (0: none); Firefox only by default.
+let kickMs = navigator.userAgent.includes("Firefox") ? 2 : 0;
 const sessions = new Set();
 
 /** The device, or why there's none. */
@@ -29,8 +32,18 @@ async function start() {
   await init({ module_or_path: new URL("./pkg/gpu/stwo_gpu_web_worker_bg.wasm", import.meta.url) });
   L = layout();
   gpu = await Gpu.create();
+  applyIo();
   const adapterInfo = { vendor, architecture, device, description, fallback: adapter.info?.isFallbackAdapter };
-  return { adapter: adapterInfo, info: JSON.parse(gpu.info()), start_ms: performance.now() - started };
+  return { adapter: adapterInfo, info: { ...JSON.parse(gpu.info()), kick_ms: kickMs }, start_ms: performance.now() - started };
+}
+
+/** The page's transfer sizes, over the module's defaults. */
+function applyIo() {
+  if (io && io.kick_ms !== undefined) kickMs = io.kick_ms;
+  if (!gpu || !io) return;
+  const current = JSON.parse(gpu.info());
+  const pick = (key) => io[key] ?? current[key];
+  gpu.configure(pick("upload_chunk"), pick("upload_window"), pick("readback_chunk"));
 }
 
 const slotBase = (s) => L.HEADER_WORDS + s * L.SLOT_WORDS;
@@ -71,6 +84,8 @@ async function runSlot(session, s) {
   const args = new Uint32Array(Math.min(h[slot + L.S_NARGS], L.MAX_ARGS));
   for (let i = 0; i < args.length; i++) args[i] = h[slot + L.S_ARGS + i];
   let state = L.DONE;
+  // Firefox: empty submits while the job waits make it poll for completions (see Gpu.kick).
+  const kicks = kickMs > 0 && op !== 0 ? setInterval(() => gpu.kick(), kickMs) : null;
   try {
     const phases = await gpu.execute(op, args, buffer);
     times[L.T_UPLOAD] = phases[0];
@@ -79,6 +94,8 @@ async function runSlot(session, s) {
   } catch (error) {
     state = L.ERROR;
     writeError(session, s, error && error.message ? error.message : error);
+  } finally {
+    if (kicks !== null) clearInterval(kicks);
   }
   times[L.T_DONE] = absNow();
   Atomics.add(h, L.H_COMPLETED, 1);
@@ -142,7 +159,11 @@ const started = start().then(
   (error) => (self.postMessage({ ready: false, error: String(error) }), false),
 );
 
-self.onmessage = async ({ data: { connect } }) => {
+self.onmessage = async ({ data: { connect, configure } }) => {
+  if (configure) {
+    io = configure;
+    applyIo();
+  }
   if (!connect) return;
   const ok = await started;
   connect.onmessage = ({ data }) => {

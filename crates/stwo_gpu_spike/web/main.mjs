@@ -8,7 +8,16 @@ const threads = number("threads", Math.min(navigator.hardwareConcurrency || 4, 8
 const jobs = number("jobs", 256);
 const iters = number("iters", 200);
 const reps = number("reps", 3);
+const phases = (params.get("phases") || "correctness,errors,latency,throughput").split(",");
 const sizes = (params.get("sizes") || "64,128,256,512").split(",").map(Number).filter(Boolean);
+// The GPU worker's transfer sizes in MiB (0 allowed: see Gpu.configure); unset: its defaults.
+const mib = (key) => (params.has(key) ? Math.round(Number(params.get(key)) * 2 ** 20) : undefined);
+const io = {
+  upload_chunk: mib("upload_chunk_mib"),
+  upload_window: mib("upload_window_mib"),
+  readback_chunk: mib("readback_chunk_mib"),
+  kick_ms: params.has("kick_ms") ? Number(params.get("kick_ms")) : undefined,
+};
 
 const log = document.getElementById("log");
 function report(message) {
@@ -32,15 +41,16 @@ async function main() {
     threads,
   });
   const gpuWorker = new Worker("./gpu.worker.mjs", { type: "module" });
+  gpuWorker.postMessage({ configure: io });
   const gpu = await once(gpuWorker);
   report({ event: "gpu", ...gpu });
   gpuWorker.addEventListener("message", ({ data }) => data.failed && report({ event: "gpu-failed", ...data }));
 
   const plan = [
-    { fn: "demo_correctness", args: [jobs] },
-    { fn: "demo_errors", args: [] },
-    { fn: "demo_latency", args: [iters] },
-    ...sizes.map((mib) => ({ fn: "demo_throughput", args: [mib, reps] })),
+    ...(phases.includes("correctness") ? [{ fn: "demo_correctness", args: [jobs] }] : []),
+    ...(phases.includes("errors") ? [{ fn: "demo_errors", args: [] }] : []),
+    ...(phases.includes("latency") ? [{ fn: "demo_latency", args: [iters] }] : []),
+    ...(phases.includes("throughput") ? sizes.map((mib) => ({ fn: "demo_throughput", args: [mib, reps] })) : []),
   ];
   const prover = new Worker("./prover.worker.mjs", { type: "module" });
   const channel = new MessageChannel();

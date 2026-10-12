@@ -13,7 +13,8 @@
 //! The kernels' host code is shared with native through `stwo_gpu_spike` (the `GpuContext`, the
 //! WGSL): only these I/O edges differ (see [`upload`] and [`read_into`]).
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
+use std::collections::VecDeque;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -108,7 +109,8 @@ struct Pool {
     a: Option<wgpu::Buffer>,
     b: Option<wgpu::Buffer>,
     out: Option<wgpu::Buffer>,
-    staging: Option<wgpu::Buffer>,
+    /// Two mappable buffers: the readback copies chunk k + 1 while chunk k is copied out.
+    staging: [Option<wgpu::Buffer>; 2],
 }
 
 fn pooled(
@@ -143,8 +145,28 @@ struct Inner {
     pool: RefCell<Pool>,
     /// Elements per dispatch: what one binding and one dimension of workgroups allow.
     chunk_words: u64,
-    /// The largest single `writeBuffer` (bounds the browser's staging copies).
+    io: Cell<Io>,
+}
+
+/// How data moves between the prover's memory and the GPU: the browsers' WebGPU make a
+/// temporary copy of each write and back each mappable buffer with memory of the tab's (Chrome:
+/// shared memory per mappable buffer and per write of 4 MiB or more; Safari: a copy into the
+/// WebContent process of any write over 16 MiB, Metal buffers charged to the tab), so large
+/// transfers go in chunks, with bounded data in flight.
+#[derive(Clone, Copy)]
+struct Io {
+    /// The largest single `writeBuffer`.
     upload_chunk: u64,
+    /// Bytes written before waiting for the queue (0: never wait mid-upload).
+    upload_window: u64,
+    /// Size of each of the two mappable staging buffers (0: one, as large as the readback).
+    readback_chunk: u64,
+}
+
+impl Default for Io {
+    fn default() -> Self {
+        Io { upload_chunk: 16 << 20, upload_window: 64 << 20, readback_chunk: 16 << 20 }
+    }
 }
 
 type JobResult = Result<[f64; 3], String>;
@@ -182,7 +204,7 @@ impl Gpu {
                 m31_mul,
                 pool: RefCell::default(),
                 chunk_words,
-                upload_chunk: 64 << 20,
+                io: Cell::default(),
             }),
         })
     }
@@ -192,7 +214,7 @@ impl Gpu {
         let info = &self.inner.gpu.adapter_info;
         let limits = self.inner.gpu.device.limits();
         format!(
-            "{{\"name\":{:?},\"vendor\":{},\"device\":{},\"backend\":{:?},\"driver\":{:?},\"max_buffer_size\":{},\"max_storage_buffer_binding_size\":{},\"max_compute_workgroups_per_dimension\":{},\"max_compute_invocations_per_workgroup\":{},\"chunk_words\":{}}}",
+            "{{\"name\":{:?},\"vendor\":{},\"device\":{},\"backend\":{:?},\"driver\":{:?},\"max_buffer_size\":{},\"max_storage_buffer_binding_size\":{},\"max_compute_workgroups_per_dimension\":{},\"max_compute_invocations_per_workgroup\":{},\"chunk_words\":{},\"upload_chunk\":{},\"upload_window\":{},\"readback_chunk\":{}}}",
             info.name,
             info.vendor,
             info.device,
@@ -203,7 +225,25 @@ impl Gpu {
             limits.max_compute_workgroups_per_dimension,
             limits.max_compute_invocations_per_workgroup,
             self.inner.chunk_words,
+            self.inner.io.get().upload_chunk,
+            self.inner.io.get().upload_window,
+            self.inner.io.get().readback_chunk,
         )
+    }
+
+    /// Sets the transfer sizes (bytes; see `Io`): the largest `writeBuffer`, the bytes written
+    /// before waiting for the queue (0: never), each staging buffer's size (0: the whole readback).
+    pub fn configure(&self, upload_chunk: u32, upload_window: u32, readback_chunk: u32) {
+        let round = |bytes: u32| (bytes as u64).next_multiple_of(wgpu::COPY_BUFFER_ALIGNMENT);
+        self.inner.io.set(Io {
+            upload_chunk: round(upload_chunk).max(4),
+            upload_window: round(upload_window),
+            readback_chunk: round(readback_chunk),
+        });
+        // The staging buffers' size changes with readback_chunk.
+        for buffer in self.inner.pool.borrow_mut().staging.iter_mut().filter_map(Option::take) {
+            buffer.destroy();
+        }
     }
 
     /// Whether the device was lost.
@@ -223,10 +263,19 @@ impl Gpu {
         })
     }
 
+    /// An empty submit. Firefox polls WebGPU for completions on a 100 ms timer and at each
+    /// submit (bugs 1870699, 2008103), so a job waiting for the GPU there waits up to 100 ms per
+    /// sync; the GPU worker calls this every few ms while a job waits, to make it poll.
+    pub fn kick(&self) {
+        self.inner.gpu.queue.submit([]);
+    }
+
     /// Frees the pooled buffers (between runs: they can be large).
     pub fn release(&self) {
         let mut pool = self.inner.pool.borrow_mut();
-        for buffer in [pool.a.take(), pool.b.take(), pool.out.take(), pool.staging.take()].into_iter().flatten() {
+        let [s0, s1] = &mut pool.staging;
+        let (s0, s1) = (s0.take(), s1.take());
+        for buffer in [pool.a.take(), pool.b.take(), pool.out.take(), s0, s1].into_iter().flatten() {
             buffer.destroy();
         }
     }
@@ -279,52 +328,77 @@ async fn queue_done(queue: &wgpu::Queue) {
     let _ = receiver.await;
 }
 
-/// `writeBuffer` of `source` (a view of the shared memory) into `buffer` at 0, in chunks.
-/// This is the web side of `GpuContext::upload`: the data goes from the prover's memory to the
-/// browser's staging without passing through this module.
-fn upload(inner: &Inner, buffer: &wgpu::Buffer, source: &Uint8Array) -> Result<(), String> {
+/// `writeBuffer` of `source` (a view of the shared memory) into `buffer` at 0, in chunks of at
+/// most `upload_chunk`, waiting for the queue after each `upload_window`. The web side of
+/// `GpuContext::upload`: the data goes from the prover's memory to the browser's staging without
+/// passing through this module.
+async fn upload(inner: &Inner, buffer: &wgpu::Buffer, source: &Uint8Array) -> Result<(), String> {
+    let io = inner.io.get();
     let queue = inner.gpu.queue.as_webgpu().ok_or("not on the WebGPU backend")?;
     let target = buffer.as_webgpu().ok_or("not on the WebGPU backend")?;
     let len = source.length() as u64;
-    let mut offset = 0;
+    let (mut offset, mut unwaited) = (0, 0);
     while offset < len {
-        let end = (offset + inner.upload_chunk).min(len);
+        let end = (offset + io.upload_chunk).min(len);
         let part = source.subarray(offset as u32, end as u32);
         queue
             .write_buffer_with_f64_and_u8_array(target, offset as f64, &part)
             .map_err(|e| format!("writeBuffer: {e:?}"))?;
+        unwaited += end - offset;
         offset = end;
+        if io.upload_window > 0 && unwaited >= io.upload_window && offset < len {
+            queue_done(&inner.gpu.queue).await;
+            unwaited = 0;
+        }
     }
     Ok(())
 }
 
-/// Copies the first `dest.length()` bytes of `buffer` into `dest` (a view of the shared memory),
-/// through the pooled staging buffer. The web side of `GpuContext::read`.
-async fn read_into(inner: &Inner, buffer: &wgpu::Buffer, dest: &Uint8Array, already_copied: bool) -> Result<(), String> {
-    let len = dest.length() as u64;
-    if len == 0 {
-        return Ok(());
-    }
-    let staging = if already_copied {
-        inner.pool.borrow().staging.clone().ok_or("no staging buffer")?
-    } else {
-        let staging = pooled(&inner.gpu.device, &mut inner.pool.borrow_mut().staging, "staging", len, STAGING);
-        let mut encoder = inner.gpu.device.create_command_encoder(&Default::default());
-        encoder.copy_buffer_to_buffer(buffer, 0, &staging, 0, len);
-        inner.gpu.queue.submit([encoder.finish()]);
-        staging
-    };
-    let slice = staging.slice(..len);
-    let (sender, receiver) = futures_channel::oneshot::channel();
-    slice.map_async(wgpu::MapMode::Read, move |result| {
-        let _ = sender.send(result);
-    });
-    receiver.await.map_err(|_| "map callback dropped")?.map_err(|e| format!("mapAsync: {e}"))?;
+/// A mapping in flight: its staging buffer, its callback's result, where it goes in `dest`.
+type InFlight = (wgpu::Buffer, futures_channel::oneshot::Receiver<Result<(), wgpu::BufferAsyncError>>, u32, u32);
+
+/// Copies the mapped staging buffer into `dest` at `at`, and unmaps it.
+async fn finish_chunk(dest: &Uint8Array, (staging, mapped, at, len): InFlight) -> Result<(), String> {
+    mapped.await.map_err(|_| "map callback dropped")?.map_err(|e| format!("mapAsync: {e}"))?;
     {
-        let mapped = slice.get_mapped_range().map_err(|e| format!("getMappedRange: {e:?}"))?;
-        dest.set(mapped.as_uint8array(), 0);
+        let slice = staging.slice(..len as u64);
+        let view = slice.get_mapped_range().map_err(|e| format!("getMappedRange: {e:?}"))?;
+        dest.subarray(at, at + len).set(view.as_uint8array(), 0);
     }
     staging.unmap();
+    Ok(())
+}
+
+/// Copies the first `dest.length()` bytes of `buffer` into `dest` (a view of the shared memory)
+/// through two staging buffers of `readback_chunk` bytes: chunk k + 1 is copied on the GPU and
+/// mapped while chunk k is copied out. The web side of `GpuContext::read`.
+async fn read_into(inner: &Inner, buffer: &wgpu::Buffer, dest: &Uint8Array) -> Result<(), String> {
+    let len = dest.length() as u64;
+    let io = inner.io.get();
+    let chunk = if io.readback_chunk == 0 { len } else { io.readback_chunk.min(len) };
+    let mut in_flight: VecDeque<InFlight> = VecDeque::new();
+    let mut offset = 0;
+    let mut index = 0;
+    while offset < len {
+        if in_flight.len() == 2 {
+            finish_chunk(dest, in_flight.pop_front().unwrap()).await?;
+        }
+        let size = chunk.min(len - offset);
+        let staging = pooled(&inner.gpu.device, &mut inner.pool.borrow_mut().staging[index % 2], "staging", chunk, STAGING);
+        let mut encoder = inner.gpu.device.create_command_encoder(&Default::default());
+        encoder.copy_buffer_to_buffer(buffer, offset, &staging, 0, size);
+        inner.gpu.queue.submit([encoder.finish()]);
+        let (sender, receiver) = futures_channel::oneshot::channel();
+        staging.slice(..size).map_async(wgpu::MapMode::Read, move |result| {
+            let _ = sender.send(result);
+        });
+        in_flight.push_back((staging, receiver, offset as u32, size as u32));
+        offset += size;
+        index += 1;
+    }
+    while let Some(next) = in_flight.pop_front() {
+        finish_chunk(dest, next).await?;
+    }
     Ok(())
 }
 
@@ -373,7 +447,7 @@ impl Inner {
         let source = view(memory, *src, *len)?;
         let buffer = pooled(&self.gpu.device, &mut self.pool.borrow_mut().a, "a", *len as u64, STORAGE);
         let start = perf_now();
-        upload(self, &buffer, &source)?;
+        upload(self, &buffer, &source).await?;
         queue_done(&self.gpu.queue).await;
         Ok([perf_now() - start, 0.0, 0.0])
     }
@@ -383,7 +457,7 @@ impl Inner {
         let dest = view(memory, *dst, *len)?;
         let buffer = pooled(&self.gpu.device, &mut self.pool.borrow_mut().out, "out", *len as u64, STORAGE);
         let start = perf_now();
-        read_into(self, &buffer, &dest, false).await?;
+        read_into(self, &buffer, &dest).await?;
         Ok([0.0, 0.0, perf_now() - start])
     }
 
@@ -438,21 +512,19 @@ impl Inner {
             return Ok([0.0; 3]);
         }
         if pipelined {
-            // One submit (uploads, dispatches, copy to staging), one map: what a kernel would do.
+            // No waits between the phases (queue order is enough): what a kernel would do.
             let start = perf_now();
-            upload(self, &a, &a_view)?;
-            upload(self, &b, &b_view)?;
-            let staging = pooled(device, &mut self.pool.borrow_mut().staging, "staging", n * 4, STAGING);
+            upload(self, &a, &a_view).await?;
+            upload(self, &b, &b_view).await?;
             let mut encoder = device.create_command_encoder(&Default::default());
             self.encode_m31_mul(&mut encoder, &a, &b, &out, n);
-            encoder.copy_buffer_to_buffer(&out, 0, &staging, 0, n * 4);
             self.gpu.queue.submit([encoder.finish()]);
-            read_into(self, &out, &out_view, true).await?;
+            read_into(self, &out, &out_view).await?;
             return Ok([0.0, perf_now() - start, 0.0]);
         }
         let t0 = perf_now();
-        upload(self, &a, &a_view)?;
-        upload(self, &b, &b_view)?;
+        upload(self, &a, &a_view).await?;
+        upload(self, &b, &b_view).await?;
         queue_done(&self.gpu.queue).await;
         let t1 = perf_now();
         let mut encoder = device.create_command_encoder(&Default::default());
@@ -460,7 +532,7 @@ impl Inner {
         self.gpu.queue.submit([encoder.finish()]);
         queue_done(&self.gpu.queue).await;
         let t2 = perf_now();
-        read_into(self, &out, &out_view, false).await?;
+        read_into(self, &out, &out_view).await?;
         let t3 = perf_now();
         Ok([t1 - t0, t2 - t1, t3 - t2])
     }
