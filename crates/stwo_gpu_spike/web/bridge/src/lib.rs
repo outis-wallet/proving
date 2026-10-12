@@ -113,8 +113,9 @@ pub mod op {
 /// them; it checks every length against its own layout first, and fails the job on any
 /// difference (the prover then commits on the CPU).
 pub mod commit {
-    /// The descriptor's own version ([`D_VERSION`]).
-    pub const DESCRIPTOR_VERSION: u32 = 1;
+    /// The descriptor's own version ([`D_VERSION`]). 2: the stats of a commitment whose
+    /// transfers overlap its compute (the streamed one).
+    pub const DESCRIPTOR_VERSION: u32 = 2;
 
     // Header words.
     pub const D_VERSION: usize = 0;
@@ -122,7 +123,8 @@ pub mod commit {
     pub const D_LOG_BLOWUP: usize = 2;
     pub const D_LIFTING_LOG_SIZE: usize = 3;
     /// The prover's twiddle tree's `twiddles` (u32 words, stwo's doubled twiddles), or 0: the GPU
-    /// worker reads the tail it needs, or computes the twiddles itself.
+    /// worker reads it when it has none of its own for this tree yet, or computes the twiddles
+    /// itself.
     pub const D_TWIDDLES_PTR: usize = 4;
     /// Its length in words.
     pub const D_TWIDDLES_LEN: usize = 5;
@@ -130,7 +132,7 @@ pub mod commit {
     pub const D_FLAGS: usize = 6;
     /// [`NSTATS`] f64, each as two words (low, high), written by the GPU worker.
     pub const D_STATS: usize = 8;
-    pub const NSTATS: usize = 14;
+    pub const NSTATS: usize = 28;
     pub const HEADER_WORDS: usize = D_STATS + 2 * NSTATS;
 
     /// Per column: its coefficients (pointer; `2^log_size` words), its log size, and where its
@@ -153,31 +155,63 @@ pub mod commit {
         HEADER_WORDS + n_columns * COLUMN_WORDS + (lifting_log_size + 1) * LAYER_WORDS
     }
 
-    // The stats, in ms unless named otherwise.
-    /// The twiddles: read from the prover's tree (or computed), then laid out per stripe.
+    // The stats, in ms unless named otherwise. The upload, the compute and the readback overlap
+    // (the coefficients of a group go up while the GPU works on the one before, its stripe 0
+    // comes back while the GPU works on later ones), so their times are each side's own work, and
+    // `ST_COMMIT` is the whole of it.
+    /// Getting the stripes' twiddles: kept ones, or (a miss) read the prover's tree (or compute
+    /// one) and compute every stripe's.
     pub const ST_TWIDDLES: usize = 0;
-    /// The commitment's buffers and plans, the twiddles' upload.
+    /// The commitment's plans (uniforms, bind groups), and its buffers if they had to grow.
     pub const ST_SETUP: usize = 1;
-    /// The coefficients' `writeBuffer`s (and the waits that bound them).
+    /// The worker's own upload work: copying the coefficients into the ring's mapped chunks (or
+    /// its `writeBuffer` calls). In the serial mode ([`ST_SERIAL`]), the upload until the GPU has
+    /// it.
     pub const ST_UPLOAD: usize = 2;
-    /// From the submission to the queue's completion (the upload's tail included).
+    /// Recording and submitting the GPU's work. In the serial mode, the GPU's compute alone.
     pub const ST_COMPUTE: usize = 3;
-    /// The outputs into the prover's memory.
+    /// The worker's copies out of the readback ring's chunks into the prover's memory. In the
+    /// serial mode, the readback with its waits.
     pub const ST_READBACK: usize = 4;
-    /// Freeing the commitment's buffers.
+    /// Freeing the commitment's plans (its buffers are kept).
     pub const ST_DESTROY: usize = 5;
     pub const ST_UPLOAD_BYTES: usize = 6;
     pub const ST_READBACK_BYTES: usize = 7;
-    /// The commitment's device buffers.
+    /// The device buffers the commitment ran on (bytes; kept buffers count whole).
     pub const ST_GPU_BYTES: usize = 8;
     /// The whole job, as the GPU worker timed it.
     pub const ST_TOTAL: usize = 9;
-    /// 1 if the twiddles came from the prover's tree, 0 if computed (or cached) by the worker.
+    /// 1 if the twiddles were read from the prover's tree for this commitment.
     pub const ST_TWIDDLES_FROM_PROVER: usize = 10;
-    /// Of [`ST_UPLOAD`], the waits for the upload ring's buffers to be writable again.
+    /// Waiting for an upload chunk to be writable again (the GPU still copying it).
     pub const ST_UPLOAD_WAIT: usize = 11;
-    /// Of [`ST_READBACK`], the waits for the readback ring's buffers to be mapped.
+    /// Waiting for a readback chunk to be mapped (the GPU still computing, or copying it).
     pub const ST_READBACK_WAIT: usize = 12;
+    /// From the first upload to the last copy out: the upload, compute and readback, overlapped.
+    pub const ST_COMMIT: usize = 13;
+    /// 1 if streamed in groups of columns, 0 if stripe by stripe.
+    pub const ST_STREAMED: usize = 14;
+    /// The groups (streamed).
+    pub const ST_GROUPS: usize = 15;
+    /// 1 if the stripes' twiddles were computed for this commitment (none kept covered it).
+    pub const ST_TWIDDLES_COMPUTED: usize = 16;
+    /// What the worker keeps between commitments (bytes): the buffers, the twiddles, the rings.
+    pub const ST_HELD_BYTES: usize = 17;
+    /// 1 in the serial (diagnostic) mode: each phase waited for, for its time alone.
+    pub const ST_SERIAL: usize = 18;
+    /// From the submission of the tree's levels to the end of the readback.
+    pub const ST_TAIL: usize = 19;
+    /// 1 if the commitment's plans were kept from an earlier commitment of the same shape.
+    pub const ST_PLANS_KEPT: usize = 20;
+    /// The GPU's own time (timestamp queries; 0 without them, see `timestamps` in the GPU
+    /// worker's options): its copies of the upload chunks into place, its compute (the
+    /// submissions of the commitment's work), its copies into the readback chunks.
+    pub const ST_GPU_UPLOAD: usize = 21;
+    pub const ST_GPU_COMPUTE: usize = 22;
+    pub const ST_GPU_READBACK: usize = 23;
+    /// The time the GPU was busy with any of them, and from the first to the last.
+    pub const ST_GPU_BUSY: usize = 24;
+    pub const ST_GPU_SPAN: usize = 25;
 }
 
 /// Why a call failed.

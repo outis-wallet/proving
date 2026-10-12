@@ -8,10 +8,16 @@
 //   this worker waits on the doorbell with Atomics.waitAsync, takes SUBMITTED slots (-> RUNNING),
 //   runs them one at a time on the GPU module, marks them DONE or ERROR and Atomics.notify()s.
 // Messages: from the page, { configure: { upload_chunk, upload_window, readback_chunk, kick_ms,
-// compute_twiddles, upload: "mapped" | "gather" | "write", upload_ring, readback_ring,
-// max_gpu_mib } } (each optional), { connect: port } (a port to a prover's worker); on that port,
-// { attach: { memory, base } } -> { attached, info } or { attached: false, error }, and
-// { detach: true } -> { detached: true }.
+// and the commitment's: compute_twiddles, upload: "mapped" | "write", commit_chunk, upload_ring,
+// readback_ring, max_gpu_mib, streamed, keep, serial, max_plans } } (each optional; see the
+// module's Gpu.configure_commit), { release: true } (free what the commitments keep between
+// them: buffers, twiddles, rings, plans; the next one makes them again), { connect: port } (a port
+// to a prover's worker); on that port, { attach: { memory, base } } -> { attached, info } or
+// { attached: false, error }, and { detach: true } -> { detached: true }.
+//
+// What the commitments keep (the device buffers of the largest tree so far, every blowup's
+// twiddles, the rings' mappable chunks, the plans of the last trees) stays between proofs: the
+// page's next proof starts with them.
 import init, { Gpu, layout } from "./pkg/gpu/stwo_gpu_web_worker.js";
 
 const absNow = () => performance.timeOrigin + performance.now();
@@ -20,6 +26,10 @@ let L = null;
 let io = null; // transfer sizes from the page's { configure }, before start() finishes
 // Interval of empty submits while a job waits, in ms (0: none); Firefox only by default.
 let kickMs = navigator.userAgent.includes("Firefox") ? 2 : 0;
+// The page's { configure: { notify_jobs: true } }: a { job: { op, n } } message to the page as each job
+// starts (n counts them), e.g. for a test that ends this worker in the middle of a commitment.
+let notifyJobs = false;
+let jobs = 0;
 const sessions = new Set();
 
 /** The device, or why there's none. */
@@ -44,12 +54,13 @@ async function start() {
 /** The page's transfer sizes, over the module's defaults. */
 function applyIo() {
   if (io && io.kick_ms !== undefined) kickMs = io.kick_ms;
+  if (io && io.notify_jobs !== undefined) notifyJobs = !!io.notify_jobs;
   if (!gpu || !io) return;
   const current = JSON.parse(gpu.info());
   const pick = (key) => io[key] ?? current[key];
   gpu.configure(pick("upload_chunk"), pick("upload_window"), pick("readback_chunk"));
-  // The striped commitment's twiddles: the prover's (default), or computed here and kept.
-  gpu.configure_commit(!!io.compute_twiddles, io.upload ?? "mapped", io.upload_ring ?? 0, io.readback_ring ?? 0, io.max_gpu_mib ?? 0);
+  // The striped commitment's options (the module keeps its defaults for the keys not given).
+  gpu.configure_commit(io);
 }
 
 const slotBase = (s) => L.HEADER_WORDS + s * L.SLOT_WORDS;
@@ -92,6 +103,8 @@ async function runSlot(session, s) {
   let state = L.DONE;
   // Firefox: empty submits while the job waits make it poll for completions (see Gpu.kick).
   const kicks = kickMs > 0 && op !== 0 ? setInterval(() => gpu.kick(), kickMs) : null;
+  if (notifyJobs) self.postMessage({ job: { op, n: jobs } });
+  jobs += 1;
   try {
     const phases = await gpu.execute(op, args, buffer);
     times[L.T_UPLOAD] = phases[0];
@@ -169,11 +182,13 @@ const started = start().then(
   (error) => (self.postMessage({ ready: false, error: String(error) }), false),
 );
 
-self.onmessage = async ({ data: { connect, configure } }) => {
+self.onmessage = async ({ data: { connect, configure, release } }) => {
   if (configure) {
     io = configure;
     applyIo();
   }
+  // Not while a proof is attached: its commitments use what is kept.
+  if (release && gpu && sessions.size === 0) gpu.release_commit();
   if (!connect) return;
   const ok = await started;
   // Until an attach succeeds (attach() then takes the port over), a detach has nothing to end.

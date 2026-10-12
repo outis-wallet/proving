@@ -5,10 +5,10 @@
 //! slot states, notifications, failure) and calls [`Gpu::execute`] for each job, with the
 //! memory's current `SharedArrayBuffer`. This module only runs ops:
 //!
-//! - inputs: `GPUQueue.writeBuffer` straight from a `Uint8Array` view of the shared memory
-//!   (WebGPU takes `AllowSharedBufferSource`; Chrome accepts it), so no copy into this module;
-//! - outputs: the mapped range's `Uint8Array` (`BufferView::as_uint8array`) `.set()` into a view
-//!   of the shared memory: the one copy any readback needs.
+//! - inputs: `GPUQueue.writeBuffer` straight from a `Uint8Array` view of the shared memory (WebGPU
+//!   takes `AllowSharedBufferSource`; Chrome accepts it), so no copy into this module;
+//! - outputs: the mapped range's `Uint8Array` (`BufferView::as_uint8array`) `.set()` into a view of
+//!   the shared memory: the one copy any readback needs.
 //!
 //! The kernels' host code is shared with native through `stwo_gpu_spike` (the `GpuContext`, the
 //! WGSL): only these I/O edges differ (see [`upload`] and [`read_into`]).
@@ -131,7 +131,12 @@ fn pooled(
     if let Some(old) = slot.take() {
         old.destroy();
     }
-    let buffer = device.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size, usage, mapped_at_creation: false });
+    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some(label),
+        size,
+        usage,
+        mapped_at_creation: false,
+    });
     *slot = Some(buffer.clone());
     buffer
 }
@@ -139,7 +144,8 @@ fn pooled(
 const STORAGE: wgpu::BufferUsages = wgpu::BufferUsages::STORAGE
     .union(wgpu::BufferUsages::COPY_SRC)
     .union(wgpu::BufferUsages::COPY_DST);
-const STAGING: wgpu::BufferUsages = wgpu::BufferUsages::MAP_READ.union(wgpu::BufferUsages::COPY_DST);
+const STAGING: wgpu::BufferUsages =
+    wgpu::BufferUsages::MAP_READ.union(wgpu::BufferUsages::COPY_DST);
 
 struct Inner {
     gpu: GpuContext,
@@ -225,7 +231,11 @@ impl Gpu {
         let info = &self.inner.gpu.adapter_info;
         let limits = self.inner.gpu.device.limits();
         format!(
-            "{{\"name\":{:?},\"vendor\":{},\"device\":{},\"backend\":{:?},\"driver\":{:?},\"max_buffer_size\":{},\"max_storage_buffer_binding_size\":{},\"max_compute_workgroups_per_dimension\":{},\"max_compute_invocations_per_workgroup\":{},\"chunk_words\":{},\"upload_chunk\":{},\"upload_window\":{},\"readback_chunk\":{}}}",
+            "{{\"name\":{:?},\"vendor\":{},\"device\":{},\"backend\":{:?},\"driver\":{:?},\"\
+             max_buffer_size\":{},\"max_storage_buffer_binding_size\":{},\"\
+             max_compute_workgroups_per_dimension\":{},\"max_compute_invocations_per_workgroup\":\
+             {},\"chunk_words\":{},\"upload_chunk\":{},\"upload_window\":{},\"readback_chunk\":{},\
+             \"commit\":{}}}",
             info.name,
             info.vendor,
             info.device,
@@ -239,6 +249,7 @@ impl Gpu {
             self.inner.io.get().upload_chunk,
             self.inner.io.get().upload_window,
             self.inner.io.get().readback_chunk,
+            self.inner.committer.options_json(),
         )
     }
 
@@ -257,39 +268,65 @@ impl Gpu {
         }
     }
 
-    /// Where `op::COMMIT_STRIPED` takes the twiddles from: the prover's twiddle tree (the
-    /// default), or, with `compute`, its own, computed once and kept.
-    /// And how it uploads the coefficients: `"mapped"` (the default), `"gather"` or `"write"`;
-    /// the depths of its upload and readback rings (0: the defaults, 4 and 4); and the most
-    /// device memory a commitment may take, in MiB (0: no limit), above which it goes to the CPU.
-    pub fn configure_commit(
-        &self,
-        compute_twiddles: bool,
-        upload: &str,
-        upload_ring: u32,
-        readback_ring: u32,
-        max_gpu_mib: u32,
-    ) -> Result<(), JsValue> {
+    /// `op::COMMIT_STRIPED`'s options, from a JS object (each key optional; see
+    /// `commit::Options`): `compute_twiddles` (compute the twiddles here rather than read the
+    /// prover's tree), `upload` (`"mapped"`, the default, or `"write"`), `commit_chunk` (the
+    /// rings' chunk in bytes, also a group's coefficients), `upload_ring` and `readback_ring`
+    /// (their depths), `max_gpu_mib` (the most device memory a commitment may take, 0: no
+    /// limit), `streamed` (in groups, when the columns fit), `keep` (the buffers, twiddles and
+    /// plans kept between commitments), `serial` (each phase waited for: a diagnostic),
+    /// `max_plans` (the commitments' plans kept, by shape), `timestamps` (the GPU's own time,
+    /// with timestamp queries if the browser has them: a diagnostic).
+    pub fn configure_commit(&self, config: &JsValue) -> Result<(), JsValue> {
         let committer = &self.inner.committer;
-        committer.max_gpu_mib.set(max_gpu_mib);
-        if upload_ring > 0 {
-            committer.upload_ring_depth.set(upload_ring as usize);
+        let mut options = committer.options.get();
+        let get = |key: &str| {
+            Reflect::get(config, &key.into()).ok().filter(|v| !v.is_undefined() && !v.is_null())
+        };
+        let number = |key: &str| get(key).and_then(|v| v.as_f64());
+        let flag = |key: &str| get(key).map(|v| v.is_truthy());
+        if let Some(compute) = flag("compute_twiddles") {
+            options.twiddles = if compute {
+                commit::TwiddleSource::Computed
+            } else {
+                commit::TwiddleSource::Prover
+            };
         }
-        if readback_ring > 0 {
-            committer.readback_ring_depth.set(readback_ring as usize);
+        if let Some(upload) = get("upload").and_then(|v| v.as_string()) {
+            options.upload = match upload.as_str() {
+                "mapped" => commit::UploadMode::Mapped,
+                "write" => commit::UploadMode::Write,
+                _ => return Err(JsValue::from_str(&format!("unknown upload mode {upload}"))),
+            };
         }
-        self.inner.committer.twiddles.set(if compute_twiddles {
-            commit::TwiddleSource::Computed
-        } else {
-            commit::TwiddleSource::Prover
-        });
-        self.inner.committer.upload.set(match upload {
-            "mapped" => commit::UploadMode::Mapped,
-            "gather" => commit::UploadMode::Gather,
-            "write" => commit::UploadMode::Write,
-            _ => return Err(JsValue::from_str(&format!("unknown upload mode {upload}"))),
-        });
+        if let Some(bytes) = number("commit_chunk").filter(|&b| b >= 1.0) {
+            options.chunk = (bytes as u64).next_multiple_of(256);
+        }
+        if let Some(depth) = number("upload_ring").filter(|&d| d >= 1.0) {
+            options.upload_depth = depth as usize;
+        }
+        if let Some(depth) = number("readback_ring").filter(|&d| d >= 1.0) {
+            options.readback_depth = depth as usize;
+        }
+        if let Some(mib) = number("max_gpu_mib") {
+            options.max_gpu_mib = mib as u32;
+        }
+        if let Some(max) = number("max_plans") {
+            options.max_plans = max as usize;
+        }
+        options.streamed = flag("streamed").unwrap_or(options.streamed);
+        options.keep = flag("keep").unwrap_or(options.keep);
+        options.serial = flag("serial").unwrap_or(options.serial);
+        options.timestamps = flag("timestamps").unwrap_or(options.timestamps);
+        committer.configure(options);
         Ok(())
+    }
+
+    /// Frees what the commitments keep between them (the device buffers, the twiddles, the
+    /// rings, the plans): for a page done proving for a while. The next commitment makes them
+    /// again.
+    pub fn release_commit(&self) {
+        self.inner.committer.release();
     }
 
     /// Whether the device was lost.
@@ -321,7 +358,8 @@ impl Gpu {
         let mut pool = self.inner.pool.borrow_mut();
         let [s0, s1] = &mut pool.staging;
         let (s0, s1) = (s0.take(), s1.take());
-        for buffer in [pool.a.take(), pool.b.take(), pool.out.take(), s0, s1].into_iter().flatten() {
+        for buffer in [pool.a.take(), pool.b.take(), pool.out.take(), s0, s1].into_iter().flatten()
+        {
             buffer.destroy();
         }
     }
@@ -362,6 +400,8 @@ async fn context(force_fallback_adapter: bool) -> Result<GpuContext, String> {
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("stwo-gpu-web"),
                 required_limits: limits,
+                // For the commitment's diagnostic timing (`timestamps`), if the browser offers it.
+                required_features: adapter.features() & wgpu::Features::TIMESTAMP_QUERY,
                 ..Default::default()
             })
             .await
@@ -382,7 +422,7 @@ fn view(memory: &SharedArrayBuffer, ptr: u32, len: u32) -> Result<Uint8Array, St
     if ptr as u64 + len as u64 > size {
         return Err(format!("range {ptr}+{len} outside the memory ({size} bytes)"));
     }
-    if ptr % 4 != 0 || len % 4 != 0 {
+    if !ptr.is_multiple_of(4) || !len.is_multiple_of(4) {
         return Err(format!("range {ptr}+{len} not 4-byte aligned"));
     }
     Ok(Uint8Array::new_with_byte_offset_and_length(memory, ptr, len))
@@ -424,10 +464,18 @@ async fn upload(inner: &Inner, buffer: &wgpu::Buffer, source: &Uint8Array) -> Re
 }
 
 /// A mapping in flight: its staging buffer, its callback's result, where it goes in `dest`.
-type InFlight = (wgpu::Buffer, futures_channel::oneshot::Receiver<Result<(), wgpu::BufferAsyncError>>, u32, u32);
+type InFlight = (
+    wgpu::Buffer,
+    futures_channel::oneshot::Receiver<Result<(), wgpu::BufferAsyncError>>,
+    u32,
+    u32,
+);
 
 /// Copies the mapped staging buffer into `dest` at `at`, and unmaps it.
-async fn finish_chunk(dest: &Uint8Array, (staging, mapped, at, len): InFlight) -> Result<(), String> {
+async fn finish_chunk(
+    dest: &Uint8Array,
+    (staging, mapped, at, len): InFlight,
+) -> Result<(), String> {
     mapped.await.map_err(|_| "map callback dropped")?.map_err(|e| format!("mapAsync: {e}"))?;
     {
         let slice = staging.slice(..len as u64);
@@ -453,7 +501,13 @@ async fn read_into(inner: &Inner, buffer: &wgpu::Buffer, dest: &Uint8Array) -> R
             finish_chunk(dest, in_flight.pop_front().unwrap()).await?;
         }
         let size = chunk.min(len - offset);
-        let staging = pooled(&inner.gpu.device, &mut inner.pool.borrow_mut().staging[index % 2], "staging", chunk, STAGING);
+        let staging = pooled(
+            &inner.gpu.device,
+            &mut inner.pool.borrow_mut().staging[index % 2],
+            "staging",
+            chunk,
+            STAGING,
+        );
         let mut encoder = inner.gpu.device.create_command_encoder(&Default::default());
         encoder.copy_buffer_to_buffer(buffer, offset, &staging, 0, size);
         inner.gpu.queue.submit([encoder.finish()]);
@@ -516,7 +570,8 @@ impl Inner {
     async fn upload_op(&self, args: &[u32], memory: &SharedArrayBuffer) -> JobResult {
         let [src, len] = args else { return Err("upload takes [src, len]".into()) };
         let source = view(memory, *src, *len)?;
-        let buffer = pooled(&self.gpu.device, &mut self.pool.borrow_mut().a, "a", *len as u64, STORAGE);
+        let buffer =
+            pooled(&self.gpu.device, &mut self.pool.borrow_mut().a, "a", *len as u64, STORAGE);
         let start = perf_now();
         upload(self, &buffer, &source).await?;
         queue_done(&self.gpu.queue).await;
@@ -526,7 +581,8 @@ impl Inner {
     async fn readback_op(&self, args: &[u32], memory: &SharedArrayBuffer) -> JobResult {
         let [dst, len] = args else { return Err("readback takes [dst, len]".into()) };
         let dest = view(memory, *dst, *len)?;
-        let buffer = pooled(&self.gpu.device, &mut self.pool.borrow_mut().out, "out", *len as u64, STORAGE);
+        let buffer =
+            pooled(&self.gpu.device, &mut self.pool.borrow_mut().out, "out", *len as u64, STORAGE);
         let start = perf_now();
         read_into(self, &buffer, &dest).await?;
         Ok([0.0, 0.0, perf_now() - start])
@@ -534,14 +590,26 @@ impl Inner {
 
     /// Records `out = a * b` over `n` words in chunks: each dispatch binds sub-ranges of at most
     /// `chunk_words` (maxStorageBufferBindingSize, and maxComputeWorkgroupsPerDimension x 256).
-    fn encode_m31_mul(&self, encoder: &mut wgpu::CommandEncoder, a: &wgpu::Buffer, b: &wgpu::Buffer, out: &wgpu::Buffer, n: u64) {
+    fn encode_m31_mul(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        a: &wgpu::Buffer,
+        b: &wgpu::Buffer,
+        out: &wgpu::Buffer,
+        n: u64,
+    ) {
         let layout = self.m31_mul.get_bind_group_layout(0);
         let mut pass = encoder.begin_compute_pass(&Default::default());
         pass.set_pipeline(&self.m31_mul);
         let mut start = 0;
         while start < n {
             let len = self.chunk_words.min(n - start);
-            fn binding(buffer: &wgpu::Buffer, binding: u32, start: u64, len: u64) -> wgpu::BindGroupEntry<'_> {
+            fn binding(
+                buffer: &wgpu::Buffer,
+                binding: u32,
+                start: u64,
+                len: u64,
+            ) -> wgpu::BindGroupEntry<'_> {
                 wgpu::BindGroupEntry {
                     binding,
                     resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
@@ -554,7 +622,11 @@ impl Inner {
             let group = self.gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: None,
                 layout: &layout,
-                entries: &[binding(a, 0, start, len), binding(b, 1, start, len), binding(out, 2, start, len)],
+                entries: &[
+                    binding(a, 0, start, len),
+                    binding(b, 1, start, len),
+                    binding(out, 2, start, len),
+                ],
             });
             pass.set_bind_group(0, &group, &[]);
             pass.dispatch_workgroups(len.div_ceil(WORKGROUP) as u32, 1, 1);
@@ -569,7 +641,11 @@ impl Inner {
         let pipelined = rest.first().is_some_and(|flags| flags & 1 != 0);
         let n = *n as u64;
         let bytes = (n * 4) as u32;
-        let (a_view, b_view, out_view) = (view(memory, *a_ptr, bytes)?, view(memory, *b_ptr, bytes)?, view(memory, *out_ptr, bytes)?);
+        let (a_view, b_view, out_view) = (
+            view(memory, *a_ptr, bytes)?,
+            view(memory, *b_ptr, bytes)?,
+            view(memory, *out_ptr, bytes)?,
+        );
         let device = &self.gpu.device;
         let (a, b, out) = {
             let mut pool = self.pool.borrow_mut();
