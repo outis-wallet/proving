@@ -129,6 +129,45 @@ pub unsafe fn ifft_lower_with_vecwise(
     });
 }
 
+/// Runs the first 5 ifft layers across the entire array.
+///
+/// [`ifft_lower_with_vecwise`] runs this loop inline; it is kept as upstream has it for the
+/// benchmarks (`benches/fft.rs`).
+///
+/// # Arguments
+///
+/// - `values`: Pointer to the entire value array, aligned to 64 bytes.
+/// - `twiddle_dbl`: The doubles of the twiddle factors for each of the 5 ifft layers.
+/// - `high_bits`: The number of bits this loops needs to run on.
+/// - `index_h`: The higher part of the index, iterated by the caller.
+///
+/// # Safety
+///
+/// Behavior is undefined if `values` does not have the same alignment as [`PackedBaseField`].
+pub unsafe fn ifft_vecwise_loop(
+    values: *mut u32,
+    twiddle_dbl: &[&[u32]],
+    loop_bits: usize,
+    index_h: usize,
+) {
+    for index_l in 0..1 << loop_bits {
+        let index = (index_h << loop_bits) + index_l;
+        let mut val0 = PackedBaseField::load(values.add(index * 32).cast_const());
+        let mut val1 = PackedBaseField::load(values.add(index * 32 + 16).cast_const());
+        (val0, val1) = vecwise_ibutterflies(
+            val0,
+            val1,
+            std::array::from_fn(|i| *twiddle_dbl[0].get_unchecked(index * 8 + i)),
+            std::array::from_fn(|i| *twiddle_dbl[1].get_unchecked(index * 4 + i)),
+            std::array::from_fn(|i| *twiddle_dbl[2].get_unchecked(index * 2 + i)),
+        );
+        (val0, val1) =
+            simd_ibutterfly(val0, val1, u32x16::splat(*twiddle_dbl[3].get_unchecked(index)));
+        val0.store(values.add(index * 32));
+        val1.store(values.add(index * 32 + 16));
+    }
+}
+
 /// Computes partial ifft on `2^log_size` M31 elements, skipping the vecwise layers (lower 4 bits of
 /// the index).
 ///

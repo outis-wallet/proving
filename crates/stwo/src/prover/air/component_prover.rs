@@ -156,7 +156,10 @@ impl<B: Backend> ComponentProvers<'_, B> {
         // every column receives the same contributions in the same order.
         let powers = B::generate_secure_powers(random_coeff, total_constraints);
         let mut end = total_constraints;
-        let mut groups: Vec<(u32, Vec<(usize, core::ops::Range<usize>)>)> = vec![];
+        // Per size group: the evaluation domain's log size, and its components' indices with
+        // their ranges of the powers.
+        type Group = (u32, Vec<(usize, core::ops::Range<usize>)>);
+        let mut groups: Vec<Group> = vec![];
         for (index, component) in self.components.iter().enumerate() {
             let n = component.n_constraints();
             let start = end - n;
@@ -192,8 +195,12 @@ impl<B: Backend> ComponentProvers<'_, B> {
             }
             accumulator.into_sub_accumulations()
         };
+        // Without `parallel` the groups always go one after the other.
         #[cfg(not(feature = "parallel"))]
-        let group_results: Vec<_> = groups.iter().map(run_group).collect();
+        let group_results: Vec<_> = {
+            let _ = one_component_at_a_time;
+            groups.iter().map(run_group).collect()
+        };
         // A component that evaluates its columns holds those evaluations while it runs: with
         // `one_component_at_a_time` the groups go one after the other, so that only one
         // component's evaluations are held at a time. A component's evaluation is parallel itself.

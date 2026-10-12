@@ -1,8 +1,8 @@
 mod assert;
 mod component_prover;
 pub mod constraint_hook;
-mod fingerprint;
 mod cpu_domain;
+mod fingerprint;
 mod logup;
 pub mod relation_tracker;
 mod simd_domain;

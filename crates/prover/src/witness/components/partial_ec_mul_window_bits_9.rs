@@ -42,8 +42,7 @@ impl ClaimGenerator {
         // NOTE: This is not autogened, when updating the code, re-add this.
         // TODO(Ohad): remove.
         const RAYON_THREAD_STACK_SIZE: usize = 1024 * 1024 * 8;
-        let pool =
-            rayon::ThreadPoolBuilder::new().stack_size(RAYON_THREAD_STACK_SIZE).build().ok();
+        let pool = rayon::ThreadPoolBuilder::new().stack_size(RAYON_THREAD_STACK_SIZE).build().ok();
         let (trace, lookup_data, sub_component_inputs) = run_in(pool.as_ref(), || {
             write_trace_simd(
                 packed_inputs,

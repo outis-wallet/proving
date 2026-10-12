@@ -331,10 +331,8 @@ impl<'a, B: BackendForChannel<MC>, MC: MerkleChannel> CommitmentSchemeProver<'a,
         self.polynomials().zip_cols(sampled_points).map_cols(|(poly, points)| {
             let compute_weights = |(log_size, point): (u32, CirclePoint<SecureField>)| {
                 weights_dashmap.entry((log_size, point)).or_insert_with(|| {
-                    let weights_log_size = B::barycentric_log_size(
-                        log_size,
-                        self.config.fri_config.log_blowup_factor,
-                    );
+                    let weights_log_size =
+                        B::barycentric_log_size(log_size, self.config.fri_config.log_blowup_factor);
                     let buffer = SecureColumnByCoords {
                         columns: array::from_fn(|_| {
                             self.base_column_pool.take_or_alloc(weights_log_size)
@@ -382,8 +380,9 @@ impl<'a, B: BackendForChannel<MC>, MC: MerkleChannel> CommitmentSchemeProver<'a,
                 .map(|&point| PointSample { point, value: SecureField::default() })
                 .collect_vec()
         });
-        let mut groups: HashMap<(u32, CirclePoint<SecureField>), Vec<(usize, usize, usize)>> =
-            HashMap::new();
+        // The (tree, column, sample) of every sample, by (column log size, projected point).
+        type Members = Vec<(usize, usize, usize)>;
+        let mut groups: HashMap<(u32, CirclePoint<SecureField>), Members> = HashMap::new();
         assert_eq!(polynomials.len(), sampled_points.len());
         for (tree_index, columns) in polynomials.iter().enumerate() {
             assert_eq!(columns.len(), sampled_points[tree_index].len());
@@ -1054,7 +1053,11 @@ mod striped_commit_hook_tests {
             .map(|(c, &log_size)| {
                 CircleCoefficients::new(
                     (0..1u32 << log_size)
-                        .map(|i| BaseField::from(i.wrapping_mul(2_654_435_761).wrapping_add(c as u32) >> 1))
+                        .map(|i| {
+                            BaseField::from(
+                                i.wrapping_mul(2_654_435_761).wrapping_add(c as u32) >> 1,
+                            )
+                        })
                         .collect::<BaseColumn>(),
                 )
             })
@@ -1099,7 +1102,14 @@ mod striped_commit_hook_tests {
                 if !ours(&polynomials, lifting_log_size) {
                     return Err(polynomials);
                 }
-                Ok(Tree::new(polynomials, log_blowup, twiddles, false, lifting_log_size, &pool_for_hook))
+                Ok(Tree::new(
+                    polynomials,
+                    log_blowup,
+                    twiddles,
+                    false,
+                    lifting_log_size,
+                    &pool_for_hook,
+                ))
             },
         )));
         let hooked = Tree::new_striped(polys(), LOG_BLOWUP, &twiddles, LIFTING_LOG_SIZE, &pool);
