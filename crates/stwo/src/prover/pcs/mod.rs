@@ -872,7 +872,11 @@ mod striped_commit_hook_tests {
             .map(|(c, &log_size)| {
                 CircleCoefficients::new(
                     (0..1u32 << log_size)
-                        .map(|i| BaseField::from(i.wrapping_mul(2_654_435_761).wrapping_add(c as u32) >> 1))
+                        .map(|i| {
+                            BaseField::from(
+                                i.wrapping_mul(2_654_435_761).wrapping_add(c as u32) >> 1,
+                            )
+                        })
                         .collect::<BaseColumn>(),
                 )
             })
@@ -917,7 +921,14 @@ mod striped_commit_hook_tests {
                 if !ours(&polynomials, lifting_log_size) {
                     return Err(polynomials);
                 }
-                Ok(Tree::new(polynomials, log_blowup, twiddles, false, lifting_log_size, &pool_for_hook))
+                Ok(Tree::new(
+                    polynomials,
+                    log_blowup,
+                    twiddles,
+                    false,
+                    lifting_log_size,
+                    &pool_for_hook,
+                ))
             },
         )));
         let hooked = Tree::new_striped(polys(), LOG_BLOWUP, &twiddles, LIFTING_LOG_SIZE, &pool);
