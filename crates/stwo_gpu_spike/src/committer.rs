@@ -90,6 +90,26 @@ pub struct GpuCommitter {
     /// The decommitment's kernels, made at its first use.
     fold: Mutex<Option<crate::decommit::FoldKernels>>,
     decommit_stats: Mutex<DecommitStats>,
+    /// The out-of-domain samples' kernels, made at their first use.
+    ood: Mutex<Option<crate::ood::OodKernels>>,
+    ood_stats: Mutex<OodStats>,
+}
+
+/// The out-of-domain samples served on the GPU (see [`GpuCommitter::ood_values`]), since the
+/// stats were last taken.
+#[derive(Clone, Debug, Default)]
+pub struct OodStats {
+    /// The samplings asked for, their groups and columns.
+    pub calls: u64,
+    pub groups: u64,
+    pub columns: u64,
+    /// The columns sampled on the GPU, those left to the CPU (not kept as coefficients, too
+    /// small, or kept whole), and those the GPU failed.
+    pub served: u64,
+    pub not_resident: u64,
+    pub failed: u64,
+    /// The time in all (wall clock).
+    pub seconds: f64,
 }
 
 /// The decommitments served on the GPU (see [`GpuCommitter::decommit_values`]), since the stats
@@ -224,6 +244,8 @@ impl GpuCommitter {
             fold: Mutex::new(None),
             transient: Mutex::new(vec![]),
             decommit_stats: Mutex::new(DecommitStats::default()),
+            ood: Mutex::new(None),
+            ood_stats: Mutex::new(OodStats::default()),
         })
     }
 
@@ -802,6 +824,111 @@ impl GpuCommitter {
     /// The decommitments' counts since the last call.
     pub fn take_decommit_stats(&self) -> DecommitStats {
         std::mem::take(&mut *self.decommit_stats.lock().unwrap_or_else(|p| p.into_inner()))
+    }
+
+    /// The out-of-domain samples' counts since the last call.
+    pub fn take_ood_stats(&self) -> OodStats {
+        std::mem::take(&mut *self.ood_stats.lock().unwrap_or_else(|p| p.into_inner()))
+    }
+
+    /// The values of the columns of every group of a proof's out-of-domain samples at the group's
+    /// point (stwo's `OodSampleHook`), evaluated on the GPU from the coefficients kept
+    /// ([`PartsMode::Coefficients`]): per group and column, `None` for the columns left to the
+    /// CPU (not kept as coefficients, too small, or kept whole), and for all if the GPU fails.
+    /// The coefficients stay (the decommitment reads them after).
+    pub fn ood_values(
+        &self,
+        groups: &[stwo::prover::OodSampleGroup<'_, SimdBackend>],
+    ) -> Vec<Vec<Option<stwo::core::fields::qm31::SecureField>>> {
+        use stwo::core::circle::CirclePoint;
+        use stwo::core::fields::qm31::SecureField;
+
+        use crate::parts::Placement;
+        let start = Instant::now();
+        let mut answers: Vec<Vec<Option<SecureField>>> =
+            groups.iter().map(|group| vec![None; group.columns.len()]).collect();
+        // The columns to sample, by buffer, size and point: their group, index and word offset.
+        type Key = (wgpu::Buffer, u32, CirclePoint<SecureField>);
+        type Member = (usize, usize, u32);
+        let mut jobs: Vec<(Key, Vec<Member>)> = vec![];
+        let mut not_resident = 0;
+        {
+            let mut parts = self.parts.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            for (g, group) in groups.iter().enumerate() {
+                for (i, column) in group.columns.iter().enumerate() {
+                    let log_size = column.values.len().ilog2();
+                    let domain_log_size = column.domain.log_size();
+                    let placement = (log_size >= crate::ood::MIN_LOG_SIZE
+                        && log_size < domain_log_size)
+                        .then(|| {
+                            parts.placement(
+                                &column.values,
+                                domain_log_size,
+                                domain_log_size - log_size,
+                            )
+                        })
+                        .flatten();
+                    let Some(Placement::Coefficients { buffer, byte_offset }) = placement else {
+                        not_resident += 1;
+                        continue;
+                    };
+                    let key = (buffer, log_size, group.point);
+                    let member = (g, i, (byte_offset / 4) as u32);
+                    match jobs.iter_mut().find(|(k, _)| *k == key) {
+                        Some((_, members)) => members.push(member),
+                        None => jobs.push((key, vec![member])),
+                    }
+                }
+            }
+        }
+        let n_asked: usize = jobs.iter().map(|(_, members)| members.len()).sum();
+        let result = (!jobs.is_empty())
+            .then(|| {
+                catch_unwind(AssertUnwindSafe(|| {
+                    let mut kernels =
+                        self.ood.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                    let kernels =
+                        kernels.get_or_insert_with(|| crate::ood::OodKernels::new(&self.gpu));
+                    let offsets = jobs
+                        .iter()
+                        .map(|(_, members)| {
+                            members.iter().map(|&(.., offset)| offset).collect_vec()
+                        })
+                        .collect_vec();
+                    let ood_jobs = jobs
+                        .iter()
+                        .zip(&offsets)
+                        .map(|(((buffer, log_size, point), _), offsets)| crate::ood::OodJob {
+                            buffer,
+                            columns: offsets,
+                            log_size: *log_size,
+                            point: *point,
+                        })
+                        .collect_vec();
+                    crate::ood::eval_jobs(&self.gpu, kernels, &ood_jobs)
+                }))
+                .ok()
+            })
+            .flatten();
+        let served = result.is_some();
+        if let Some(values) = result {
+            for ((_, members), values) in jobs.iter().zip(values) {
+                for (&(g, i, _), value) in members.iter().zip(values) {
+                    answers[g][i] = Some(value);
+                }
+            }
+        }
+        let mut stats = self.ood_stats.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        stats.calls += 1;
+        stats.groups += groups.len() as u64;
+        stats.columns += groups.iter().map(|group| group.columns.len() as u64).sum::<u64>();
+        stats.not_resident += not_resident;
+        match served {
+            true => stats.served += n_asked as u64,
+            false => stats.failed += n_asked as u64,
+        }
+        stats.seconds += start.elapsed().as_secs_f64();
+        answers
     }
 
     /// The values a striped tree's decommitment reads at the positions `wanted[c]` of each column

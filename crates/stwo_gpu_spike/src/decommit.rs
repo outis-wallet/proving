@@ -168,14 +168,18 @@ pub fn eval_jobs(
             continue;
         };
         let per_column_partial = (plan.n_chunks * plan.n_groups * 16 * 4) as u64;
-        let batch =
-            ((MAX_PARTIAL_BYTES / per_column_partial).max(1) as usize).min(job.columns.len());
+        // Batches of a multiple of 4 columns, so that every batch's output starts at a multiple
+        // of 256 bytes (WebGPU's storage offset alignment), as every job's does.
+        let batch = ((MAX_PARTIAL_BYTES / per_column_partial) as usize / 4 * 4)
+            .max(4)
+            .min(job.columns.len());
         layout.push(Some(out_words));
         for first in (0..job.columns.len()).step_by(batch) {
             let n = batch.min(job.columns.len() - first);
             pieces.push((j, first, n, out_words));
             out_words += n * plan.n_groups * 16;
         }
+        out_words = out_words.next_multiple_of(64);
     }
     if out_words == 0 {
         return jobs.iter().map(|job| job.columns.iter().map(|_| vec![]).collect()).collect();
