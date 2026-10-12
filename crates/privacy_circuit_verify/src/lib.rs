@@ -11,10 +11,8 @@ use cairo_air::verifier::INTERACTION_POW_BITS;
 use cairo_vm::types::program::Program;
 use circuit_cairo_verifier::all_components::all_components;
 use circuit_cairo_verifier::privacy::PRIVACY_TRANSACTION_COMPONENTS;
-use circuit_cairo_verifier::statement::AUX_DATA_FIXED_LEN;
 use circuit_cairo_verifier::verify::{
     CairoVerifierConfig, NON_QUERY_INFO_LEAK, build_cairo_verifier_circuit, get_preprocessed_root,
-    verify_fixed_cairo_circuit,
 };
 use circuit_common::preprocessed::{PreprocessedCircuit, layout_from_component_sizes};
 use circuit_registry::{CircuitProofConfig, CircuitRegistry};
@@ -32,7 +30,6 @@ use circuits_stark_verifier::proof::ProofConfig;
 use itertools::Itertools;
 use starknet_types_core::felt::Felt;
 use starknet_types_core::hash::Blake2Felt252;
-use stwo::core::fields::m31::M31;
 use stwo::core::fields::qm31::QM31;
 use stwo::core::fri::FriConfig;
 use stwo::core::pcs::PcsConfig;
@@ -44,8 +41,7 @@ pub use utils::Version;
 
 use crate::consts::{
     CAIRO_PCS_CONFIG, CIRCUIT_FRI_CONFIG, CIRCUIT_PCS_CONFIG, LARGE_PROOFS_CIRCUIT_REGISTRY_JSON,
-    LEAF_BOOTLOADER_JSON, MAX_CAIRO_PROOF_UNCOMPRESSED_BYTES,
-    MAX_RECURSIVE_PROOF_UNCOMPRESSED_BYTES, PRIVACY_BOOTLOADER_JSON,
+    LEAF_BOOTLOADER_JSON, MAX_RECURSIVE_PROOF_UNCOMPRESSED_BYTES, PRIVACY_BOOTLOADER_JSON,
     PRIVACY_CIRCUIT_PREPROCESSED_IDS, PRIVACY_CIRCUIT_PREPROCESSED_LOG_SIZES,
     PRIVACY_RECURSION_CIRCUIT_PREPROCESSED_ROOT,
 };
@@ -54,9 +50,8 @@ use crate::utils::ProofHeader;
 pub struct PrivacyProofOutput {
     /// Proof bytes, laid out as the serialized [`ProofHeader`] of the `privacy-prove` crate that
     /// generated the proof, followed by the compressed proof. The format must be consistent
-    /// between the prover and verifier:
-    /// - `privacy_prove` / `verify_cairo`
-    /// - `privacy_recursive_prove` / `verify_recursive_circuit`
+    /// between the prover (`privacy_recursive_prove`) and the verifier
+    /// (`verify_recursive_circuit`).
     pub proof: Vec<u8>,
     pub output_preimage: Vec<Felt>,
 }
@@ -75,39 +70,6 @@ pub(crate) fn decompress_proof(
     max_bytes: usize,
 ) -> Result<Vec<u8>, Box<dyn Error>> {
     Ok(zstd::bulk::decompress(compressed, max_bytes)?)
-}
-
-pub fn verify_cairo(proof_output: &PrivacyProofOutput) -> Result<(), Box<dyn Error>> {
-    let _span = span!(Level::INFO, "verify_privacy_bootloader").entered();
-
-    let verifier_config = get_cairo_verifier_config()?;
-
-    info!("Decompress and deserialize the proof");
-    let (_header, compressed_proof) = split_proof_header(&proof_output.proof)?;
-    let proof_bytes = decompress_proof(compressed_proof, MAX_CAIRO_PROOF_UNCOMPRESSED_BYTES)?;
-    let bootloader_program = get_privacy_bootloader_program()?;
-    let program_len = bootloader_program.data_len();
-    let n_components = verifier_config.proof_config.n_components();
-    let (serialized_aux_data_bytes, serialized_proof_bytes) =
-        proof_bytes.split_at((AUX_DATA_FIXED_LEN + program_len + n_components) * 4);
-    let serialized_aux_data: Vec<M31> = serialized_aux_data_bytes
-        .chunks_exact(4)
-        .map(|c| M31::from(u32::from_le_bytes(c.try_into().unwrap())))
-        .collect();
-    let mut serialized_proof: &[u8] = serialized_proof_bytes;
-    let proof =
-        deserialize_proof_with_config(&mut serialized_proof, &verifier_config.proof_config)?;
-    if !serialized_proof.is_empty() {
-        return Err("Proof deserialization failed".into());
-    }
-
-    info!("Compute the output");
-    let output_hash = compute_privacy_bootloader_output_hash(&proof_output.output_preimage);
-
-    info!("Call the verifier");
-    verify_fixed_cairo_circuit(&verifier_config, proof, serialized_aux_data, output_hash)?;
-
-    Ok(())
 }
 
 pub fn verify_recursive_circuit(proof_output: &PrivacyProofOutput) -> Result<(), Box<dyn Error>> {

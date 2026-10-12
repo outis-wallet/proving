@@ -1,20 +1,12 @@
 use stwo::core::fri::{FriConfig, FriParams};
 use stwo::core::pcs::PcsConfig;
 
-/// Uncompressed size in bytes of the serialized cairo proof (including public claim prefix).
-pub const CAIRO_PROOF_UNCOMPRESSED_BYTES: usize = 627_212;
-
 /// Uncompressed size in bytes of the serialized recursive circuit proof.
 pub const RECURSIVE_PROOF_UNCOMPRESSED_BYTES: usize = 263_812;
 
-/// Multiplicative safety factor applied to the proof size constants to derive decompression limits
-/// used in `verify_cairo` and `verify_recursive_circuit` as zip-bomb protection.
+/// Multiplicative safety factor applied to the proof size constant to derive the decompression
+/// limit used in `verify_recursive_circuit` as zip-bomb protection.
 pub const PROOF_MAX_DECOMPRESSED_RATIO: usize = 2;
-
-/// Maximum allowed uncompressed size in bytes when decompressing the cairo proof.
-/// Used in `verify_cairo` to prevent zip-bomb attacks.
-pub const MAX_CAIRO_PROOF_UNCOMPRESSED_BYTES: usize =
-    CAIRO_PROOF_UNCOMPRESSED_BYTES * PROOF_MAX_DECOMPRESSED_RATIO;
 
 /// Maximum allowed uncompressed size in bytes when decompressing the recursive circuit proof.
 /// Used in `verify_recursive_circuit` to prevent zip-bomb attacks.
