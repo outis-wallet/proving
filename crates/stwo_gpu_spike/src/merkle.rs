@@ -303,6 +303,11 @@ fn stream_word(row: u32, prev_row: u32, k: u32) -> u32 {{
     return cols[P.col_offset + ((k - P.r_in) << P.log_rows) + row];
 }}
 
+// The batch's column c at the row.
+fn column_word(row: u32, c: u32) -> u32 {{
+    return cols[P.col_offset + (c << P.log_rows) + row];
+}}
+
 // The same, with zeros past the end: the padding of the last block.
 fn tail_word(row: u32, prev_row: u32, k: u32) -> u32 {{
     if (k < P.r_in + P.n_cols) {{ return stream_word(row, prev_row, k); }}
@@ -324,11 +329,19 @@ fn absorb_blocks(row: u32) -> Absorbed {{
     }}
     let total = P.r_in + P.n_cols;
     let n_blocks = select(0u, (total - 1u) / 16u, total > 0u);
-    for (var b = 0u; b < n_blocks; b++) {{
-        let base = 16u * b;
+    var b = 0u;
+    // The first block may start with the words carried over.
+    if (P.r_in > 0u && n_blocks > 0u) {{
+        let base = 0u;
+        h = blake2s_compress(h, {stream_block}, P.t_lo + 64u, P.t_hi + select(0u, 1u, P.t_lo + 64u < P.t_lo), false);
+        b = 1u;
+    }}
+    // The others are 16 of the batch's columns: no branch per word.
+    for (; b < n_blocks; b++) {{
+        let base = 16u * b - P.r_in;
         let t0 = P.t_lo + 64u * (b + 1u);
         let t1 = P.t_hi + select(0u, 1u, t0 < P.t_lo);
-        h = blake2s_compress(h, {stream_block}, t0, t1, false);
+        h = blake2s_compress(h, {column_block}, t0, t1, false);
     }}
     return Absorbed(h, prev_row, n_blocks);
 }}
@@ -395,6 +408,7 @@ fn absorb_final(
         SH_WORDS = 8 * WORKGROUP,
         SHARED_HELPERS = shared_helpers_wgsl(),
         stream_block = block_expr("stream_word", "row, prev_row", "base"),
+        column_block = block_expr("column_word", "row", "base"),
         tail_block = block_expr("tail_word", "row, a.prev_row", "base"),
     )
 }
