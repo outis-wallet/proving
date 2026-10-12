@@ -1,14 +1,15 @@
 use std::collections::HashMap;
 
-use num_traits::Zero;
+use num_traits::{One, Zero};
 use stwo::core::Fraction;
+use stwo::core::fields::qm31::SecureField;
 
 use super::assignment::{ExprVarAssignment, ExprVariables};
 use super::degree::NamedExprs;
 use super::{BaseExpr, ExtExpr};
 use crate::expr::ColumnExpr;
 use crate::preprocessed_columns::PreProcessedColumnId;
-use crate::{EvalAtRow, INTERACTION_TRACE_IDX, Relation, RelationEntry};
+use crate::{EvalAtRow, INTERACTION_TRACE_IDX, MAX_N_INTERACTIONS, PREPROCESSED_TRACE_IDX, Relation, RelationEntry};
 
 pub struct FormalLogupAtRow {
     pub interaction: usize,
@@ -63,6 +64,24 @@ pub struct ExprEvaluator {
     pub ext_intermediates: HashMap<String, ExtExpr>,
     // Save all intermediate names by order they can be assigned.
     ordered_intermediates: Vec<String>,
+    /// Where each column the evaluator handed out is in the component's trace, by the index its
+    /// [`ColumnExpr`]s carry (`cur_var_index`, counted over all interactions): its interaction,
+    /// and its index among that interaction's columns, as the domain evaluators count them (one
+    /// column per `next_interaction_mask` call, and in interaction 0 one per
+    /// `get_preprocessed_column` call too). Not used by the formatting.
+    pub column_slots: Vec<(usize, usize)>,
+    /// The preprocessed columns in the order the component asked for them, each with its index
+    /// among the component's preprocessed columns (interaction 0, after the component's
+    /// `preprocessed_column_indices` remap). They appear in the expressions as
+    /// `BaseExpr::Param(id)`. Not used by the formatting.
+    pub preprocessed_columns: Vec<(String, usize)>,
+    /// The values of the formal parameters of each relation the component adds to, by relation
+    /// name, in the order first added to: `(name, z, [alpha_0, alpha_1, ...])`, the values of
+    /// `<name>_z` and `<name>_alpha<k>` (see `combine_formal`), recovered from the relation's own
+    /// `combine`. Not used by the formatting.
+    pub relation_values: Vec<(String, SecureField, Vec<SecureField>)>,
+    /// The columns handed out so far, per interaction.
+    n_columns_per_interaction: [usize; MAX_N_INTERACTIONS],
 }
 
 impl Default for ExprEvaluator {
@@ -81,7 +100,40 @@ impl ExprEvaluator {
             intermediates: HashMap::new(),
             ext_intermediates: HashMap::new(),
             ordered_intermediates: vec![],
+            column_slots: vec![],
+            preprocessed_columns: vec![],
+            relation_values: vec![],
+            n_columns_per_interaction: [0; MAX_N_INTERACTIONS],
         }
+    }
+
+    /// The names of the intermediates (`intermediate<k>`, in `intermediates` or
+    /// `ext_intermediates`) in the order they were added, each defined in terms of earlier ones.
+    pub fn ordered_intermediates(&self) -> &[String] {
+        &self.ordered_intermediates
+    }
+
+    /// Records the values of `relation`'s formal parameters (see [`Self::relation_values`]), once
+    /// per relation name: `combine` of `[0]` is `-z`, and `combine` of the unit vector `e_k` of
+    /// length `k + 1` is `alpha_k - z`.
+    fn record_relation_values<R: Relation<BaseExpr, ExtExpr>>(&mut self, relation: &R) {
+        let name = relation.get_name();
+        if self.relation_values.iter().any(|(recorded, ..)| recorded == name) {
+            return;
+        }
+        let no_vars: ExprVarAssignment = Default::default();
+        let combine = |values: &[BaseExpr]| -> SecureField {
+            Relation::<BaseExpr, ExtExpr>::combine(relation, values).assign(&no_vars)
+        };
+        let z = -combine(&[BaseExpr::zero()]);
+        let alphas = (0..relation.get_size())
+            .map(|k| {
+                let mut unit = vec![BaseExpr::zero(); k + 1];
+                unit[k] = BaseExpr::one();
+                combine(&unit) + z
+            })
+            .collect();
+        self.relation_values.push((name.to_owned(), z, alphas));
     }
 
     pub fn format_constraints(&self) -> String {
@@ -183,6 +235,8 @@ impl EvalAtRow for ExprEvaluator {
             let col = ColumnExpr::from((interaction, self.cur_var_index, offsets[i]));
             BaseExpr::Col(col)
         });
+        self.column_slots.push((interaction, self.n_columns_per_interaction[interaction]));
+        self.n_columns_per_interaction[interaction] += 1;
         self.cur_var_index += 1;
         res
     }
@@ -207,6 +261,7 @@ impl EvalAtRow for ExprEvaluator {
         &mut self,
         entry: RelationEntry<'_, Self::F, Self::EF, R>,
     ) {
+        self.record_relation_values(entry.relation);
         let intermediate =
             self.add_extension_intermediate(combine_formal(entry.relation, entry.values));
         let frac = Fraction::new(entry.multiplicity.clone(), intermediate);
@@ -232,6 +287,9 @@ impl EvalAtRow for ExprEvaluator {
     }
 
     fn get_preprocessed_column(&mut self, column: PreProcessedColumnId) -> Self::F {
+        let slot = &mut self.n_columns_per_interaction[PREPROCESSED_TRACE_IDX];
+        self.preprocessed_columns.push((column.id.clone(), *slot));
+        *slot += 1;
         BaseExpr::Param(column.id)
     }
 

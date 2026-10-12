@@ -22,6 +22,23 @@ pub struct ColumnExpr {
     offset: isize,
 }
 
+impl ColumnExpr {
+    /// The interaction (trace tree) of the column.
+    pub const fn interaction(&self) -> usize {
+        self.interaction
+    }
+
+    /// The index the evaluator gave the column (see [`ExprEvaluator::column_slots`]).
+    pub const fn idx(&self) -> usize {
+        self.idx
+    }
+
+    /// The mask offset, in rows of the trace domain.
+    pub const fn offset(&self) -> isize {
+        self.offset
+    }
+}
+
 impl From<(usize, usize, isize)> for ColumnExpr {
     fn from((interaction, idx, offset): (usize, usize, isize)) -> Self {
         Self { interaction, idx, offset }

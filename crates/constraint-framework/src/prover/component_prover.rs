@@ -11,7 +11,7 @@ use stwo::core::pcs::TreeVec;
 use stwo::core::poly::circle::{CanonicCoset, CircleDomain};
 use stwo::core::utils::bit_reverse;
 use stwo::prover::backend::simd::SimdBackend;
-use stwo::prover::backend::simd::column::VeryPackedSecureColumnByCoords;
+use stwo::prover::backend::simd::column::{BaseColumn, VeryPackedSecureColumnByCoords};
 use stwo::prover::backend::simd::m31::LOG_N_LANES;
 use stwo::prover::backend::simd::very_packed_m31::{LOG_N_VERY_PACKED_ELEMS, VeryPackedBaseField};
 use stwo::prover::backend::{Backend, Column, CpuBackend};
@@ -21,7 +21,9 @@ use stwo::prover::secure_column::SecureColumnByCoords;
 use stwo::prover::{ComponentProver, DomainEvaluationAccumulator, EvaluationMode, Poly, Trace};
 use tracing::{Level, span};
 
+use super::constraint_hook::{ConstraintEvalJob, ConstraintEvalOutcome, constraint_eval_hook};
 use super::{CpuDomainEvaluator, SimdDomainEvaluator};
+use crate::expr::ExprEvaluator;
 use crate::{FrameworkComponent, FrameworkEval, PREPROCESSED_TRACE_IDX};
 
 const CHUNK_SIZE: usize = 1;
@@ -199,8 +201,13 @@ impl<E: FrameworkEval + Sync> ComponentProver<SimdBackend> for FrameworkComponen
             evaluation_accumulator.columns([(eval_domain.log_size(), self.n_constraints())]);
         accum.random_coeff_powers.reverse();
 
-        let _span =
-            span!(Level::INFO, "Constraint point-wise eval", class = "ConstraintEval").entered();
+        let _span = span!(
+            Level::INFO,
+            "Constraint point-wise eval",
+            class = "ConstraintEval",
+            component = core::any::type_name::<E>()
+        )
+        .entered();
 
         let holds_eval_domain = trace.iter().flatten().all(|c| c.values.len() >= eval_domain.size());
         // Fall back to CPU if the trace is too small.
@@ -219,6 +226,32 @@ impl<E: FrameworkEval + Sync> ComponentProver<SimdBackend> for FrameworkComponen
             ));
             return;
         }
+
+        // A registered hook (see `constraint_hook`) evaluates the component, or declines and
+        // possibly observes the evaluation below. Without one, nothing changes.
+        let observer = match constraint_eval_hook() {
+            None => None,
+            Some(hook) => {
+                let trace_constraints = || self.eval.evaluate(ExprEvaluator::new());
+                let job = ConstraintEvalJob {
+                    component: core::any::type_name::<E>(),
+                    trace_log_size: trace_domain.log_size(),
+                    eval_log_size: eval_domain.log_size(),
+                    n_constraints: self.n_constraints(),
+                    random_coeff_powers: &accum.random_coeff_powers,
+                    denom_inv: &denom_inv,
+                    claimed_sum: self.claimed_sum,
+                    preprocessed_column_indices: &self.preprocessed_column_indices,
+                    polys: &polys,
+                    evaluations: &trace,
+                    trace_constraints: &trace_constraints,
+                };
+                match hook(&job, accum.col) {
+                    ConstraintEvalOutcome::Evaluated => return,
+                    ConstraintEvalOutcome::Declined(observer) => observer,
+                }
+            }
+        };
 
         let col = unsafe { VeryPackedSecureColumnByCoords::transform_under_mut(accum.col) };
 
@@ -309,6 +342,52 @@ impl<E: FrameworkEval + Sync> ComponentProver<SimdBackend> for FrameworkComponen
                 evaluate_rows(trace_cols, part * n_vec_rows, n_vec_rows, &parts);
             }
         }
+        if let Some(observer) = observer {
+            observer(accum.col);
+        }
+    }
+}
+
+impl ConstraintEvalJob<'_> {
+    /// The component's columns on the whole evaluation domain, per interaction (the preprocessed
+    /// ones remapped), as the SIMD evaluation reads them: a column's values on part 0 of the
+    /// domain (the trace domain's size), then on part 1, and so on, each part a column does not
+    /// hold evaluated on the CPU as the SIMD evaluation evaluates it (`trace_part`). The values
+    /// are the columns' words as stored.
+    pub fn columns_on_eval_domain(&self) -> TreeVec<Vec<BaseColumn>> {
+        let trace_domain = CanonicCoset::new(self.trace_log_size);
+        let part_size = trace_domain.size();
+        let eval_size = 1usize << self.eval_log_size;
+        let n_parts = eval_size / part_size;
+        if self.evaluations.iter().flatten().all(|c| c.values.len() >= eval_size) {
+            return self
+                .evaluations
+                .as_cols_ref()
+                .map_cols(|c| c.values.as_slice()[..eval_size].iter().copied().collect());
+        }
+        let parts = (0..n_parts)
+            .map(|part| trace_part(self.evaluations, self.polys, trace_domain, part))
+            .collect_vec();
+        TreeVec(
+            self.evaluations
+                .iter()
+                .enumerate()
+                .map(|(interaction, columns)| {
+                    (0..columns.len())
+                        .map(|index| {
+                            parts
+                                .iter()
+                                .flat_map(|part| {
+                                    part[interaction][index].values.as_slice()[..part_size]
+                                        .iter()
+                                        .copied()
+                                })
+                                .collect()
+                        })
+                        .collect()
+                })
+                .collect(),
+        )
     }
 }
 
@@ -333,8 +412,13 @@ impl<E: FrameworkEval + Sync> ComponentProver<CpuBackend> for FrameworkComponent
             evaluation_accumulator.columns([(eval_domain.log_size(), self.n_constraints())]);
         accum.random_coeff_powers.reverse();
 
-        let _span =
-            span!(Level::INFO, "Constraint point-wise eval", class = "ConstraintEval").entered();
+        let _span = span!(
+            Level::INFO,
+            "Constraint point-wise eval",
+            class = "ConstraintEval",
+            component = core::any::type_name::<E>()
+        )
+        .entered();
         let trace_cols = trace.as_cols_ref().map_cols(|c| c.as_ref());
 
         *accum.col = accumulate_pointwise_cpu(

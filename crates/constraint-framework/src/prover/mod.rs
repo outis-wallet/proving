@@ -1,5 +1,6 @@
 mod assert;
 mod component_prover;
+pub mod constraint_hook;
 mod cpu_domain;
 mod logup;
 pub mod relation_tracker;
