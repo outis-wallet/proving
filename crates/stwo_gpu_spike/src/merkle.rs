@@ -585,6 +585,13 @@ impl GpuMerkle {
         }
     }
 
+    /// The same kernels, binding at most `bytes` of a buffer at a time (if below the device's
+    /// limit): to exercise the splitting of batches on small inputs.
+    pub fn with_binding_limit(mut self, bytes: u64) -> Self {
+        self.max_binding = self.max_binding.min(bytes);
+        self
+    }
+
     /// The buffer of a tree's layers.
     pub fn tree_buffer(&self, gpu: &GpuContext, layout: &TreeLayout) -> wgpu::Buffer {
         let bytes = layout.total_words * 4;
@@ -595,7 +602,7 @@ impl GpuMerkle {
     /// The state buffers for the leaves of stripes of these `(log_size, n_columns)` batches in a
     /// tree of height `height`.
     pub fn state_buffers(&self, gpu: &GpuContext, shapes: &[(u32, u32)], height: u32) -> StateBuffers {
-        let words = absorb_schedule(shapes, height)
+        let words = absorb_schedule(&self.dispatch_shapes(shapes), height)
             .iter()
             .filter(|step| !step.is_final)
             .map(AbsorbStep::state_words)
@@ -607,6 +614,46 @@ impl GpuMerkle {
             buffers: [gpu.storage("states a", words as usize), gpu.storage("states b", words as usize)],
             words,
         }
+    }
+
+    /// The most columns of `2^log_size` values one dispatch binds: a batch's binding starts at
+    /// the alignment boundary below it and is at most `max_storage_buffer_binding_size` long
+    /// (128 MiB by default in WebGPU, and on lavapipe).
+    pub fn max_columns_per_dispatch(&self, log_size: u32) -> u32 {
+        let column_bytes = 4u64 << log_size;
+        let n = (self.max_binding - self.storage_align) / column_bytes;
+        assert!(n >= 1, "a column of 2^{log_size} values exceeds a storage binding");
+        n.min(u32::MAX as u64) as u32
+    }
+
+    /// The batches as dispatched: a batch larger than a binding is split at column boundaries.
+    fn dispatch_batches<'a>(&self, batches: &[ColumnBatch<'a>]) -> Vec<ColumnBatch<'a>> {
+        let mut split = vec![];
+        for batch in batches {
+            let max = self.max_columns_per_dispatch(batch.log_size);
+            let mut first = 0;
+            while first < batch.n_columns {
+                let n_columns = (batch.n_columns - first).min(max);
+                let word_offset = batch.word_offset + ((first as u64) << batch.log_size);
+                split.push(ColumnBatch { word_offset, n_columns, ..*batch });
+                first += n_columns;
+            }
+        }
+        split
+    }
+
+    /// [`Self::dispatch_batches`]'s shapes.
+    fn dispatch_shapes(&self, shapes: &[(u32, u32)]) -> Vec<(u32, u32)> {
+        let mut split = vec![];
+        for &(log_size, n) in shapes {
+            let max = self.max_columns_per_dispatch(log_size);
+            let mut first = 0;
+            while first < n {
+                split.push((log_size, (n - first).min(max)));
+                first += (n - first).min(max);
+            }
+        }
+        split
     }
 
     /// The dispatches that hash stripe `stripe` of the tree: its leaves, from `batches` (see the
@@ -621,6 +668,7 @@ impl GpuMerkle {
         stripe: u32,
     ) -> Plan {
         assert!(stripe < 1 << layout.log_n_stripes);
+        let batches = &self.dispatch_batches(batches);
         let height = layout.stripe_height;
         let shapes: Vec<(u32, u32)> = batches.iter().map(|b| (b.log_size, b.n_columns)).collect();
         let schedule = absorb_schedule(&shapes, height);

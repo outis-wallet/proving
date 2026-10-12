@@ -173,7 +173,7 @@ fn split_batches_in_one_buffer() {
     let gpu = GpuContext::new();
     let merkle = GpuMerkle::new(&gpu);
     let mut rng = SmallRng::seed_from_u64(30);
-    let log_sizes = [vec![5; 7], vec![8; 21], vec![10; 40]].concat();
+    let log_sizes = [vec![5; 7], vec![8; 150], vec![10; 40]].concat();
     let columns = random_columns(&mut rng, &log_sizes);
     let height = 10;
     let layout = TreeLayout::new(height, 0, stwo_min_stored_level(&log_sizes, height));
@@ -207,6 +207,15 @@ fn split_batches_in_one_buffer() {
     let tree = merkle.tree_buffer(&gpu, &layout);
     gpu.run_plans(&[&merkle.plan_stripe(&gpu, &batches, &states, &tree, &layout, 0)]);
     assert_levels_eq(&merkle.read_levels(&gpu, &tree, &layout), &expected, "split batches");
+
+    // One batch per size, split by the planner into dispatches of at most 128 KiB (31 columns of
+    // 2^10, 127 of 2^8).
+    let small = GpuMerkle::new(&gpu).with_binding_limit(128 << 10);
+    assert_eq!((small.max_columns_per_dispatch(8), small.max_columns_per_dispatch(10)), (127, 31));
+    let states = small.state_buffers(&gpu, &uploaded.shapes, height);
+    let tree = small.tree_buffer(&gpu, &layout);
+    gpu.run_plans(&[&small.plan_stripe(&gpu, &uploaded.batches(), &states, &tree, &layout, 0)]);
+    assert_levels_eq(&small.read_levels(&gpu, &tree, &layout), &expected, "batches split at the binding limit");
 }
 
 /// The Cairo base trace's shapes, every column's log size less `scale` (at least 4, the smallest

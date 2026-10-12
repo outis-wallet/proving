@@ -71,10 +71,21 @@ pub struct UploadedStripe {
 }
 
 impl UploadedStripe {
-    /// Uploads columns given in tree order (nondecreasing sizes), a buffer per size.
+    /// Uploads columns given in tree order (nondecreasing sizes): a buffer per size, or several
+    /// for a size whose columns exceed the device's largest buffer.
     pub fn new(gpu: &GpuContext, sorted_columns: &[Vec<u32>]) -> Self {
         let log_sizes = sorted_columns.iter().map(|c| c.len().ilog2()).collect_vec();
-        let shapes = size_batches(&log_sizes);
+        let max_buffer = gpu.device.limits().max_buffer_size;
+        let mut shapes = vec![];
+        for (log_size, n) in size_batches(&log_sizes) {
+            let per_buffer = (max_buffer / (4 << log_size)).min(n as u64) as u32;
+            assert!(per_buffer > 0, "a column of 2^{log_size} values exceeds a buffer");
+            let mut first = 0;
+            while first < n {
+                shapes.push((log_size, per_buffer.min(n - first)));
+                first += per_buffer.min(n - first);
+            }
+        }
         let mut columns = sorted_columns.iter();
         let buffers = shapes
             .iter()
@@ -86,15 +97,20 @@ impl UploadedStripe {
         Self { buffers, shapes }
     }
 
-    /// Writes new columns of the same shapes into the buffers (`queue.write_buffer`).
-    pub fn write(&self, gpu: &GpuContext, sorted_columns: &[Vec<u32>]) {
+    /// The columns, given in tree order, as the batches' words: one vector per buffer.
+    pub fn batch_words(&self, sorted_columns: &[Vec<u32>]) -> Vec<Vec<u32>> {
         let mut columns = sorted_columns.iter();
-        for (buffer, &(_, n)) in self.buffers.iter().zip(&self.shapes) {
-            let mut offset = 0;
-            for column in columns.by_ref().take(n as usize) {
-                gpu.queue.write_buffer(buffer, offset, bytemuck::cast_slice(column));
-                offset += 4 * column.len() as u64;
-            }
+        self.shapes
+            .iter()
+            .map(|&(_, n)| columns.by_ref().take(n as usize).flatten().copied().collect())
+            .collect()
+    }
+
+    /// Writes new values into the buffers (`queue.write_buffer`, one per batch), as
+    /// [`Self::batch_words`] lays them out.
+    pub fn write(&self, gpu: &GpuContext, batch_words: &[Vec<u32>]) {
+        for (buffer, words) in self.buffers.iter().zip(batch_words) {
+            gpu.queue.write_buffer(buffer, 0, bytemuck::cast_slice(words));
         }
     }
 
