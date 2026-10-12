@@ -167,6 +167,14 @@ pub struct ComposerStats {
     pub per_component: HashMap<String, (u64, f64)>,
 }
 
+/// The committer's transient slots the composer uses: its output, the coefficients and the
+/// extension's evaluations of an interaction (one at a time), the assembled columns of each
+/// interaction (from this slot on).
+const TRANSIENT_OUT: usize = 0;
+const TRANSIENT_COEFFICIENTS: usize = 1;
+const TRANSIENT_EVALUATIONS: usize = 2;
+const TRANSIENT_ASSEMBLED: usize = 3;
+
 /// Where a component's columns of one interaction are read from.
 enum Source {
     /// All in `buffer`, both stripes, at these byte offsets.
@@ -624,12 +632,32 @@ impl GpuComposer {
             self.committer.release_commit_buffers();
             lock(&self.stats).releases += 1;
         }
-        // Within the video memory policy.
-        if scratch_bytes > 0
-            && !self.committer.vram_allows(scratch_bytes + (16u64 << job.eval_log_size))
-        {
+        // Within the video memory policy: what the transient buffers must grow by.
+        let mut requests = vec![(TRANSIENT_OUT, 16u64 << job.eval_log_size)];
+        let mut n_coefficients = 0u64;
+        for (s, source) in sources.iter().enumerate() {
+            if let Source::Assembled { first, k } = source {
+                requests.push((TRANSIENT_ASSEMBLED + s, *k as u64 * column_bytes));
+                let from_coefficients = placements[*first..first + k]
+                    .iter()
+                    .filter(|p| matches!(p, Some(Placement::Coefficients { .. })))
+                    .count() as u64;
+                n_coefficients = n_coefficients.max(from_coefficients);
+            }
+        }
+        if n_coefficients > 0 {
+            requests.push((TRANSIENT_COEFFICIENTS, n_coefficients * column_bytes / 2));
+            requests.push((TRANSIENT_EVALUATIONS, n_coefficients * column_bytes / 2));
+        }
+        let growth = self.committer.transient_growth(&requests);
+        if growth > 0 && !self.committer.vram_allows(growth) {
             return self.decline("video memory");
         }
+        // Every slot at its size before any work is recorded on it.
+        for &(slot, bytes) in &requests {
+            self.committer.transient(slot, bytes);
+        }
+        let _ = scratch_bytes;
 
         let params =
             param_values_of(&fingerprint.relation_values, job.claimed_sum, job.trace_log_size);
@@ -651,17 +679,7 @@ impl GpuComposer {
         let setup_start = Instant::now();
         let result = catch_unwind(AssertUnwindSafe(|| {
             let out_bytes = 16u64 << eval_log;
-            if run.out.as_ref().is_none_or(|out| out.size() < out_bytes) {
-                run.out = Some(gpu.device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some("constraint eval out"),
-                    size: out_bytes,
-                    usage: wgpu::BufferUsages::STORAGE
-                        | wgpu::BufferUsages::COPY_SRC
-                        | wgpu::BufferUsages::COPY_DST,
-                    mapped_at_creation: false,
-                }));
-            }
-            let out = run.out.clone().unwrap();
+            let out = self.committer.transient(TRANSIENT_OUT, out_bytes);
             let uniforms = run.small(gpu, 0, &kernel.kernels.uniform_words(&uniform_values));
             let coeffs = run.small(gpu, 1, &coeffs);
             let denom = run.small(gpu, 2, &denom_inv);
@@ -681,12 +699,9 @@ impl GpuComposer {
                     scratches.push(None);
                     continue;
                 };
-                let scratch = gpu.device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some("constraint eval assembled columns"),
-                    size: *k as u64 * column_bytes,
-                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-                    mapped_at_creation: false,
-                });
+                let scratch = self
+                    .committer
+                    .transient(TRANSIENT_ASSEMBLED + scratches.len(), *k as u64 * column_bytes);
                 for j in 0..*k {
                     let dst = j as u64 * column_bytes;
                     let host = columns[first + j].0.as_slice();
@@ -773,8 +788,23 @@ impl GpuComposer {
                                 &vec![n; from_coefficients.len()],
                                 max_buffer_words(gpu),
                             ));
-                            let coefficients = GpuColumns::alloc(gpu, layout.clone());
-                            let evaluations = GpuColumns::alloc(gpu, layout.clone());
+                            // One buffer each (the extension's layout in one, if it fits).
+                            let (coefficients, evaluations) = match layout.buffer_words.as_slice() {
+                                [words] => (
+                                    GpuColumns::with_buffers(
+                                        vec![self.committer.transient(TRANSIENT_COEFFICIENTS, words * 4)],
+                                        layout.clone(),
+                                    ),
+                                    GpuColumns::with_buffers(
+                                        vec![self.committer.transient(TRANSIENT_EVALUATIONS, words * 4)],
+                                        layout.clone(),
+                                    ),
+                                ),
+                                _ => (
+                                    GpuColumns::alloc(gpu, layout.clone()),
+                                    GpuColumns::alloc(gpu, layout.clone()),
+                                ),
+                            };
                             for (q, (_, buffer, byte_offset)) in from_coefficients.iter().enumerate() {
                                 let slot = layout.slots[q];
                                 encoder.copy_buffer_to_buffer(
@@ -848,10 +878,13 @@ impl GpuComposer {
             gpu.queue.submit([encoder.finish()]);
             gpu.device.poll(wgpu::PollType::wait_indefinitely()).expect("poll");
             let wait = submitted.elapsed();
+            // (The transient buffers stay for the next components.)
             for (coefficients, evaluations, extension) in extensions.drain(..) {
                 extension.destroy();
-                coefficients.destroy();
-                evaluations.destroy();
+                if coefficients.buffers.len() > 1 {
+                    coefficients.destroy();
+                    evaluations.destroy();
+                }
             }
             let timestamps_start = Instant::now();
             let gpu_time = timestamps
@@ -876,7 +909,13 @@ impl GpuComposer {
         }));
         let (gpu_time, wait, readback, setup, timestamps_time, uploaded) = match result {
             Ok(Ok(times)) => times,
-            Ok(Err(_)) | Err(_) => {
+            failed => {
+                let message = match failed {
+                    Ok(Err(message)) => message,
+                    Err(panic) => panic_message(&panic),
+                    Ok(Ok(_)) => unreachable!(),
+                };
+                eprintln!("constraint eval {}: the GPU failed: {message}", short_name(job.component));
                 run.out = None;
                 run.small.clear();
                 drop(run);

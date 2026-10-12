@@ -84,6 +84,9 @@ pub struct GpuCommitter {
     /// Whether the decommitments read the coefficients kept (see [`Self::decommit_values`]):
     /// then they stay until their tree's decommitment, the composition's tree's too.
     decommit: std::sync::atomic::AtomicBool,
+    /// Device buffers lent to constraint evaluation between commitments ([`Self::transient`]):
+    /// grow-only per slot, released at every commitment's start and on [`Self::clear_parts`].
+    transient: Mutex<Vec<Option<wgpu::Buffer>>>,
     /// The decommitment's kernels, made at its first use.
     fold: Mutex<Option<crate::decommit::FoldKernels>>,
     decommit_stats: Mutex<DecommitStats>,
@@ -102,6 +105,14 @@ pub struct DecommitStats {
     pub columns: u64,
     pub positions: u64,
     pub seconds: f64,
+}
+
+/// A transient buffer's size for `bytes`: rounded up to 16 MiB (so that it serves the next
+/// requests of about that size), never past a storage binding.
+fn transient_size(bytes: u64, gpu: &GpuContext) -> u64 {
+    let limits = gpu.device.limits();
+    let max = limits.max_storage_buffer_binding_size.min(limits.max_buffer_size) / 256 * 256;
+    bytes.next_multiple_of(16 << 20).min(max).max(bytes).max(256)
 }
 
 /// Kept free besides a tree's resident columns when checking the policy: the composer's buffers
@@ -211,6 +222,7 @@ impl GpuCommitter {
             vram_policy: Mutex::new(VramPolicy::from_env()),
             decommit: std::sync::atomic::AtomicBool::new(false),
             fold: Mutex::new(None),
+            transient: Mutex::new(vec![]),
             decommit_stats: Mutex::new(DecommitStats::default()),
         })
     }
@@ -275,6 +287,7 @@ impl GpuCommitter {
         let mut parts = self.parts.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let parts_mode_now =
             *self.parts_mode.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.release_transient();
         let after_lookup = parts.commitment_starts(
             parts_mode_now == PartsMode::Coefficients && self.decommit_enabled(),
         );
@@ -586,6 +599,7 @@ impl GpuCommitter {
     /// Drops whatever the commitments kept for constraint evaluation (e.g. at a proof's start, or
     /// when a commitment is made elsewhere).
     pub fn clear_parts(&self) {
+        self.release_transient();
         self.parts.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clear();
     }
 
@@ -896,6 +910,56 @@ impl GpuCommitter {
         }
         stats.seconds += start.elapsed().as_secs_f64();
         result
+    }
+
+    /// The bytes [`Self::transient`] would add to give these slots these sizes (growths only).
+    pub fn transient_growth(&self, requests: &[(usize, u64)]) -> u64 {
+        let transient = self.transient.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        requests
+            .iter()
+            .map(|&(slot, bytes)| {
+                let held = transient.get(slot).and_then(Option::as_ref).map_or(0, wgpu::Buffer::size);
+                transient_size(bytes, &self.gpu).saturating_sub(held).min(transient_size(bytes, &self.gpu))
+            })
+            .sum()
+    }
+
+    /// A storage buffer of at least `bytes` (rounded up to 16 MiB) in slot `slot`, kept
+    /// for the next calls until the next commitment starts: constraint evaluation's scratch, which
+    /// then neither allocates nor clears (wgpu zero-fills a buffer's first use) per component.
+    pub fn transient(&self, slot: usize, bytes: u64) -> wgpu::Buffer {
+        let mut transient = self.transient.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if transient.len() <= slot {
+            transient.resize(slot + 1, None);
+        }
+        if transient[slot].as_ref().is_none_or(|buffer| buffer.size() < bytes) {
+            // Dropped, not destroyed: work recorded on it may still be to run (wgpu frees it
+            // when that is done).
+            transient[slot] = None;
+            transient[slot] = Some(self.gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("transient"),
+                size: transient_size(bytes, &self.gpu),
+                usage: wgpu::BufferUsages::STORAGE
+                    | wgpu::BufferUsages::COPY_SRC
+                    | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }));
+        }
+        transient[slot].clone().unwrap()
+    }
+
+    /// The transient buffers' bytes now.
+    pub fn transient_bytes(&self) -> u64 {
+        let transient = self.transient.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        transient.iter().flatten().map(wgpu::Buffer::size).sum()
+    }
+
+    /// Releases the transient buffers.
+    pub fn release_transient(&self) {
+        let mut transient = self.transient.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        for buffer in transient.drain(..).flatten() {
+            buffer.destroy();
+        }
     }
 
     /// The extension's kernels (the commitment's).
