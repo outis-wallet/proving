@@ -958,18 +958,21 @@ impl GpuCommitter {
             stats.seconds += start.elapsed().as_secs_f64();
         };
         // The buffers it would take, within the policy.
-        let Some(bytes) = crate::fri::plan_bytes(
+        let bytes = match crate::fri::plan_bytes(
             &columns,
             request.samples,
             request.lifting_log_size,
             request.log_blowup_factor,
             crate::extension::max_buffer_words(&self.gpu),
-        ) else {
-            record(&|stats| {
-                stats.declined += 1;
-                stats.reason = Some("a shape the GPU doesn't take".into());
-            });
-            return None;
+        ) {
+            Ok(bytes) => bytes,
+            Err(reason) => {
+                record(&|stats| {
+                    stats.declined += 1;
+                    stats.reason = Some(reason.clone());
+                });
+                return None;
+            }
         };
         let requests = bytes
             .iter()

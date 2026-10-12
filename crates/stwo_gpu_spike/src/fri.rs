@@ -147,17 +147,16 @@ pub mod slot {
 }
 
 /// The bytes of [`FriResources::buffer`]'s slots a call would take (in [`slot`]'s order), for a
-/// policy check before it: `None` if the GPU doesn't take it.
+/// policy check before it, or why the GPU doesn't take it.
 pub fn plan_bytes(
     columns: &TreeVec<Vec<FriColumn<'_>>>,
     samples: &TreeVec<Vec<Vec<PointSample>>>,
     lifting_log_size: u32,
     log_blowup: u32,
     max_buffer_words: u64,
-) -> Option<[u64; slot::N_SLOTS]> {
-    let plan =
-        Plan::new(columns, samples, SecureField::from(1u32), lifting_log_size, log_blowup).ok()?;
-    plan.bytes(max_buffer_words).ok()
+) -> Result<[u64; slot::N_SLOTS], String> {
+    let plan = Plan::new(columns, samples, SecureField::from(1u32), lifting_log_size, log_blowup)?;
+    plan.bytes(max_buffer_words)
 }
 
 /// Where the time of a call went (wall clock, seconds): the plan (stwo's constants, on the CPU),
