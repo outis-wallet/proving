@@ -126,7 +126,13 @@ fn cpu_extension(
             .zip(buffers.into_par_iter())
             .map(|((poly, domain), buffer)| {
                 let stripe_domain = part_domain(*domain, log_blowup, stripe);
-                SimdBackend::evaluate_into(poly, stripe_domain, &twiddles[&domain.log_size()], buffer).values
+                SimdBackend::evaluate_into(
+                    poly,
+                    stripe_domain,
+                    &twiddles[&domain.log_size()],
+                    buffer,
+                )
+                .values
             })
             .collect();
     }
@@ -140,7 +146,8 @@ fn main() {
     let n_stripes = 1usize << args.log_blowup;
     let distinct = log_sizes.iter().copied().collect::<BTreeSet<_>>();
     println!(
-        "shapes: {} at 1/{} scale: {} columns, {} cells ({:.1} MiB), log sizes {:?}; blowup {}, {} stripes",
+        "shapes: {} at 1/{} scale: {} columns, {} cells ({:.1} MiB), log sizes {:?}; blowup {}, \
+         {} stripes",
         args.data,
         args.scale,
         log_sizes.len(),
@@ -158,13 +165,20 @@ fn main() {
         .map(|(i, &log_size)| {
             let mut rng = SmallRng::seed_from_u64(i as u64);
             CircleCoefficients::<SimdBackend>::new(
-                (0..1 << log_size).map(|_| BaseField::from_u32_unchecked(rng.random_range(0..P))).collect(),
+                (0..1 << log_size)
+                    .map(|_| BaseField::from_u32_unchecked(rng.random_range(0..P)))
+                    .collect(),
             )
         })
         .collect::<Vec<_>>();
-    let words = polys.iter().map(|poly| bytemuck::cast_slice::<_, u32>(poly.coeffs.as_slice())).collect::<Vec<_>>();
+    let words = polys
+        .iter()
+        .map(|poly| bytemuck::cast_slice::<_, u32>(poly.coeffs.as_slice()))
+        .collect::<Vec<_>>();
     let max_log_size = distinct.last().unwrap() + args.log_blowup;
-    let tree = SimdBackend::precompute_twiddles(CanonicCoset::new(max_log_size).circle_domain().half_coset);
+    let tree = SimdBackend::precompute_twiddles(
+        CanonicCoset::new(max_log_size).circle_domain().half_coset,
+    );
 
     // CPU.
     let pool = {
@@ -177,12 +191,14 @@ fn main() {
     let mut cpu_stripe0 = None;
     if args.cpu {
         let (times, stripe0) = pool.install(|| {
-            let mut buffers = log_sizes.iter().map(|&l| BaseColumn::zeros(1 << l)).collect::<Vec<_>>();
+            let mut buffers =
+                log_sizes.iter().map(|&l| BaseColumn::zeros(1 << l)).collect::<Vec<_>>();
             buffers = cpu_extension(&polys, args.log_blowup, &tree, buffers);
             let times = (0..args.iters)
                 .map(|_| {
                     let start = Instant::now();
-                    buffers = cpu_extension(&polys, args.log_blowup, &tree, std::mem::take(&mut buffers));
+                    buffers =
+                        cpu_extension(&polys, args.log_blowup, &tree, std::mem::take(&mut buffers));
                     start.elapsed()
                 })
                 .collect::<Vec<_>>();
@@ -200,11 +216,15 @@ fn main() {
 
     // GPU.
     let gpu = GpuContext::new();
-    println!("adapter: {} ({:?}, {:?})", gpu.adapter_info.name, gpu.adapter_info.backend, gpu.adapter_info.device_type);
+    println!(
+        "adapter: {} ({:?}, {:?})",
+        gpu.adapter_info.name, gpu.adapter_info.backend, gpu.adapter_info.device_type
+    );
     let kernels = ExtensionKernels::new(&gpu);
     let layout = Arc::new(ColumnsLayout::new(&log_sizes, max_buffer_words(&gpu)));
     let coeffs = GpuColumns::alloc(&gpu, layout.clone());
     let out = GpuColumns::alloc(&gpu, layout.clone());
+    let staging = out.staging(&gpu);
 
     let start = Instant::now();
     let twiddles = (0..n_stripes)
@@ -212,10 +232,17 @@ fn main() {
         .map(|stripe| stripe_twiddle_words(&distinct, args.log_blowup, stripe, &tree))
         .collect::<Vec<_>>();
     let twiddle_prep = start.elapsed();
-    let extension = StripeExtension::with_twiddle_words(&gpu, &kernels, &coeffs, &out, args.log_blowup, &twiddles);
+    let extension = StripeExtension::with_twiddle_words(
+        &gpu,
+        &kernels,
+        &coeffs,
+        &out,
+        args.log_blowup,
+        &twiddles,
+    );
     println!(
-        "GPU layout: {} buffer(s), {} batches, {} dispatches per stripe; twiddles {:.1} MiB (all stripes, \
-         prepared on the host in {})",
+        "GPU layout: {} buffer(s), {} batches, {} dispatches per stripe; twiddles {:.1} MiB (all \
+         stripes, prepared on the host in {})",
         layout.buffer_words.len(),
         layout.batches.len(),
         extension.n_dispatches(),
@@ -261,7 +288,7 @@ fn main() {
         let start = Instant::now();
         upload();
         stripes();
-        stripe0 = out.read(&gpu);
+        stripe0 = out.read_into(&gpu, &staging);
         with_readback.push(start.elapsed());
     }
     let per_stripe = |d: Duration| ms(d / n_stripes as u32);

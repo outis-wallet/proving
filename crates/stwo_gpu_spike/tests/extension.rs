@@ -15,7 +15,8 @@ use stwo::prover::poly::circle::{CircleCoefficients, PolyOps, part_domain};
 use stwo::prover::poly::twiddles::TwiddleTree;
 use stwo_gpu_spike::GpuContext;
 use stwo_gpu_spike::extension::{
-    ColumnsLayout, ExtensionKernels, GpuColumns, StripeExtension, TILE_LOG, max_buffer_words, passes,
+    ColumnsLayout, ExtensionKernels, GpuColumns, StripeExtension, TILE_LOG, max_buffer_words,
+    passes,
 };
 
 /// The distinct log sizes of the Cairo base trace's columns (`data/cairo_trace_shapes_pay.txt`).
@@ -26,7 +27,10 @@ fn cairo_log_sizes() -> Vec<u32> {
         .filter(|line| !line.trim().is_empty() && !line.starts_with('#'))
         .map(|line| line.split_whitespace().nth(1).unwrap().parse::<u32>().unwrap())
         .collect::<std::collections::BTreeSet<_>>();
-    assert_eq!(log_sizes.iter().copied().collect::<Vec<_>>(), [4, 6, 7, 8, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]);
+    assert_eq!(
+        log_sizes.iter().copied().collect::<Vec<_>>(),
+        [4, 6, 7, 8, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
+    );
     log_sizes.into_iter().collect()
 }
 
@@ -40,8 +44,12 @@ fn simd_stripe(
     let domain = CanonicCoset::new(poly.log_size() + log_blowup).circle_domain();
     let twiddles = SimdBackend::part_twiddles(domain, log_blowup, stripe, tree);
     let buffer = BaseColumn::zeros(1 << poly.log_size());
-    let eval =
-        SimdBackend::evaluate_into(poly, part_domain(domain, log_blowup, stripe), &twiddles, buffer);
+    let eval = SimdBackend::evaluate_into(
+        poly,
+        part_domain(domain, log_blowup, stripe),
+        &twiddles,
+        buffer,
+    );
     eval.values.as_slice().iter().map(|x| x.0).collect()
 }
 
@@ -83,7 +91,8 @@ fn check_columns(gpu: &GpuContext, kernels: &ExtensionKernels, case: &Case, coef
     let max_words = case.max_buffer_words.unwrap_or_else(|| max_buffer_words(gpu));
     let layout = Arc::new(ColumnsLayout::new(case.log_sizes, max_words));
     let gpu_coeffs = GpuColumns::alloc(gpu, layout.clone());
-    let words = polys.iter().map(|poly| bytemuck::cast_slice(poly.coeffs.as_slice())).collect::<Vec<_>>();
+    let words =
+        polys.iter().map(|poly| bytemuck::cast_slice(poly.coeffs.as_slice())).collect::<Vec<_>>();
     gpu_coeffs.write(gpu, &words);
     let out = GpuColumns::alloc(gpu, layout.clone());
     let extension = StripeExtension::new(gpu, kernels, &gpu_coeffs, &out, case.log_blowup, &tree);
@@ -94,8 +103,8 @@ fn check_columns(gpu: &GpuContext, kernels: &ExtensionKernels, case: &Case, coef
             let want = simd_stripe(poly, case.log_blowup, stripe, &tree);
             if let Some(j) = (0..want.len()).find(|&j| got[i][j] != want[j]) {
                 panic!(
-                    "column {i} (log size {}), blowup {}, stripe {stripe}: word {j} is {}, stwo's {} \
-                     ({} of {} words differ)",
+                    "column {i} (log size {}), blowup {}, stripe {stripe}: word {j} is {}, stwo's \
+                     {} ({} of {} words differ)",
                     case.log_sizes[i],
                     case.log_blowup,
                     got[i][j],
@@ -109,7 +118,8 @@ fn check_columns(gpu: &GpuContext, kernels: &ExtensionKernels, case: &Case, coef
         }
     }
     eprintln!(
-        "ok: {} columns, log sizes {:?}, blowup {}, stripes {:?}, {} buffer(s), {} batch(es), {} dispatches per stripe",
+        "ok: {} columns, log sizes {:?}, blowup {}, stripes {:?}, {} buffer(s), {} batch(es), {} \
+         dispatches per stripe",
         case.log_sizes.len(),
         case.log_sizes,
         case.log_blowup,
@@ -218,7 +228,11 @@ fn coefficients_equal_to_p() {
     let mut rng = SmallRng::seed_from_u64(12);
     let columns = log_sizes
         .iter()
-        .map(|&l| (0..1u32 << l).map(|_| if rng.random_bool(0.3) { P } else { rng.random_range(0..P) }).collect())
+        .map(|&l| {
+            (0..1u32 << l)
+                .map(|_| if rng.random_bool(0.3) { P } else { rng.random_range(0..P) })
+                .collect()
+        })
         .collect();
     check_columns(&gpu, &kernels, &Case::new(&log_sizes, 3, &[0, 4, 7]), columns);
 }
@@ -249,7 +263,10 @@ fn layout_groups_by_log_size_within_buffer_limits() {
         for (k, &i) in batch.columns.iter().enumerate() {
             let slot = layout.slots[i];
             assert_eq!(slot.log_size, log_sizes[i]);
-            assert_eq!((slot.buffer, slot.offset), (batch.buffer, batch.offset + ((k as u64) << slot.log_size)));
+            assert_eq!(
+                (slot.buffer, slot.offset),
+                (batch.buffer, batch.offset + ((k as u64) << slot.log_size))
+            );
         }
     }
     for (b, &words) in layout.buffer_words.iter().enumerate() {
@@ -295,8 +312,8 @@ fn print_adapter_limits() {
     let limits = gpu.device.limits();
     eprintln!("adapter: {:?}", gpu.adapter_info);
     eprintln!(
-        "max_buffer_size {} max_storage_buffer_binding_size {} max_compute_workgroup_storage_size {} \
-         max_compute_invocations_per_workgroup {} max_compute_workgroups_per_dimension {} \
+        "max_buffer_size {} max_storage_buffer_binding_size {} max_compute_workgroup_storage_size \
+         {} max_compute_invocations_per_workgroup {} max_compute_workgroups_per_dimension {} \
          min_uniform_buffer_offset_alignment {}",
         limits.max_buffer_size,
         limits.max_storage_buffer_binding_size,

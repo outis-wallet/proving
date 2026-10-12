@@ -16,8 +16,8 @@
 //! - [`stripe_twiddle_words`]: stwo's twiddles of a stripe (from `part_twiddles`, as the CPU uses
 //!   them), for every log size of a tree, laid out for the kernels.
 //! - [`ExtensionKernels`]: the compute pipelines.
-//! - [`StripeExtension`]: the dispatches for one tree, from a [`GpuColumns`] of coefficients into
-//!   a [`GpuColumns`] of evaluations, with the twiddles of every stripe uploaded once.
+//! - [`StripeExtension`]: the dispatches for one tree, from a [`GpuColumns`] of coefficients into a
+//!   [`GpuColumns`] of evaluations, with the twiddles of every stripe uploaded once.
 //!
 //! The output contract, for kernels that consume a stripe on the GPU (the Merkle hashing): the
 //! values of input column `i` are the `2^log_size` words at word offset `slots[i].offset` of
@@ -121,7 +121,8 @@ impl ColumnsLayout {
                 batch.log_size == log_size && buffer_words[batch.buffer] + len <= max_buffer_words
             });
             if !continues {
-                let fill = buffer_words.last().map(|&fill| fill.next_multiple_of(BATCH_ALIGN_WORDS));
+                let fill =
+                    buffer_words.last().map(|&fill| fill.next_multiple_of(BATCH_ALIGN_WORDS));
                 let buffer = match fill {
                     Some(fill) if fill + len <= max_buffer_words => buffer_words.len() - 1,
                     _ => {
@@ -138,7 +139,8 @@ impl ColumnsLayout {
                 });
             }
             let batch = batches.last_mut().unwrap();
-            slots[i] = ColumnSlot { buffer: batch.buffer, offset: buffer_words[batch.buffer], log_size };
+            slots[i] =
+                ColumnSlot { buffer: batch.buffer, offset: buffer_words[batch.buffer], log_size };
             buffer_words[batch.buffer] += len;
             batch.columns.push(i);
         }
@@ -185,32 +187,56 @@ impl GpuColumns {
     /// Queues the writes of the columns' words (`columns[i]` for input column `i`).
     pub fn write(&self, gpu: &GpuContext, columns: &[&[u32]]) {
         assert_eq!(columns.len(), self.layout.slots.len());
-        for (slot, words) in self.layout.slots.iter().zip(columns) {
-            assert_eq!(words.len() as u64, 1 << slot.log_size);
-            gpu.queue.write_buffer(&self.buffers[slot.buffer], slot.offset * 4, bytemuck::cast_slice(words));
+        // One staging write per batch: its columns are contiguous on the GPU.
+        for batch in &self.layout.batches {
+            let size = wgpu::BufferSize::new(batch.n_words() * 4).unwrap();
+            let mut view = gpu
+                .queue
+                .write_buffer_with(&self.buffers[batch.buffer], batch.offset * 4, size)
+                .expect("write_buffer_with");
+            let len = 4usize << batch.log_size;
+            for (k, &i) in batch.columns.iter().enumerate() {
+                assert_eq!(columns[i].len() * 4, len);
+                view.slice(k * len..(k + 1) * len)
+                    .copy_from_slice(bytemuck::cast_slice(columns[i]));
+            }
         }
     }
 
-    /// Every column's words, after all submitted work.
-    pub fn read(&self, gpu: &GpuContext) -> Vec<Vec<u32>> {
-        let mut encoder = gpu.device.create_command_encoder(&Default::default());
-        let staging = self
-            .buffers
+    /// Buffers to read the columns back through (see [`Self::read_into`]).
+    pub fn staging(&self, gpu: &GpuContext) -> Vec<wgpu::Buffer> {
+        self.layout
+            .buffer_words
             .iter()
-            .zip(&self.layout.buffer_words)
-            .map(|(buffer, &words)| {
-                let staging = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            .map(|&words| {
+                gpu.device.create_buffer(&wgpu::BufferDescriptor {
                     label: Some("readback"),
                     size: (words * 4).max(4),
                     usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
                     mapped_at_creation: false,
-                });
-                encoder.copy_buffer_to_buffer(buffer, 0, &staging, 0, words * 4);
-                staging
+                })
             })
-            .collect::<Vec<_>>();
+            .collect()
+    }
+
+    /// Every column's words, after all submitted work.
+    pub fn read(&self, gpu: &GpuContext) -> Vec<Vec<u32>> {
+        self.read_into(gpu, &self.staging(gpu))
+    }
+
+    /// Every column's words, after all submitted work, through `staging` (from
+    /// [`Self::staging`], unmapped).
+    pub fn read_into(&self, gpu: &GpuContext, staging: &[wgpu::Buffer]) -> Vec<Vec<u32>> {
+        use rayon::prelude::*;
+        assert_eq!(staging.len(), self.buffers.len());
+        let mut encoder = gpu.device.create_command_encoder(&Default::default());
+        for ((buffer, staging), &words) in
+            self.buffers.iter().zip(staging).zip(&self.layout.buffer_words)
+        {
+            encoder.copy_buffer_to_buffer(buffer, 0, staging, 0, words * 4);
+        }
         gpu.queue.submit([encoder.finish()]);
-        for staging in &staging {
+        for staging in staging {
             staging.slice(..).map_async(wgpu::MapMode::Read, |result| result.expect("map"));
         }
         gpu.device.poll(wgpu::PollType::wait_indefinitely()).expect("poll");
@@ -219,12 +245,12 @@ impl GpuColumns {
             {
                 let view = staging.slice(..).get_mapped_range().expect("mapped range");
                 let words: &[u32] = bytemuck::cast_slice(&view[..]);
-                for (column, slot) in columns.iter_mut().zip(&self.layout.slots) {
+                columns.par_iter_mut().zip(&self.layout.slots).for_each(|(column, slot)| {
                     if slot.buffer == b {
                         let start = slot.offset as usize;
                         *column = words[start..start + (1 << slot.log_size)].to_vec();
                     }
-                }
+                });
             }
             staging.unmap();
         }
@@ -358,7 +384,8 @@ fn radix_function(r: u32) -> String {
                 let (a, b) = (block * 2 * half + jj, block * 2 * half + jj + half);
                 writeln!(
                     s,
-                    "        {{ let p = m31_mul(x{b}, t); let a = x{a}; x{a} = m31_add(a, p); x{b} = m31_sub(a, p); }}"
+                    "        {{ let p = m31_mul(x{b}, t); let a = x{a}; x{a} = m31_add(a, p); \
+                     x{b} = m31_sub(a, p); }}"
                 )
                 .unwrap();
             }
@@ -375,11 +402,14 @@ fn radix_function(r: u32) -> String {
 /// The kernel source, out of place (from the coefficients) or in place.
 fn shader_source(in_place: bool) -> String {
     let (bindings, load) = if in_place {
-        ("@group(0) @binding(1) var<storage, read_write> dst: array<u32>;", "dst[params.dst_base + g]")
+        (
+            "@group(0) @binding(1) var<storage, read_write> dst: array<u32>;",
+            "dst[params.dst_base + g]",
+        )
     } else {
         (
-            "@group(0) @binding(0) var<storage, read> src: array<u32>;\n\
-             @group(0) @binding(1) var<storage, read_write> dst: array<u32>;",
+            "@group(0) @binding(0) var<storage, read> src: array<u32>;\n@group(0) @binding(1) \
+             var<storage, read_write> dst: array<u32>;",
             "src[src_index(g)]",
         )
     };
@@ -432,11 +462,12 @@ impl ExtensionKernels {
                 label: Some(label),
                 entries,
             });
-            let pipeline_layout = gpu.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some(label),
-                bind_group_layouts: &[Some(&layout)],
-                immediate_size: 0,
-            });
+            let pipeline_layout =
+                gpu.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: Some(label),
+                    bind_group_layouts: &[Some(&layout)],
+                    immediate_size: 0,
+                });
             let module = gpu.device.create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some(label),
                 source: wgpu::ShaderSource::Wgsl(shader_source(in_place).into()),
@@ -533,7 +564,11 @@ impl StripeExtension {
                 assert_eq!(words.len(), twiddles_len);
                 gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: Some(&format!("twiddles of stripe {stripe}")),
-                    contents: bytemuck::cast_slice(if words.is_empty() { &[0u32][..] } else { words }),
+                    contents: bytemuck::cast_slice(if words.is_empty() {
+                        &[0u32][..]
+                    } else {
+                        words
+                    }),
                     usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
                 })
             })
@@ -575,7 +610,8 @@ impl StripeExtension {
         let stride = kernels.params_stride as usize;
         let mut params_bytes = vec![0u8; (params.len() * stride).max(stride)];
         for (i, p) in params.iter().enumerate() {
-            params_bytes[i * stride..i * stride + size_of::<Params>()].copy_from_slice(bytemuck::bytes_of(p));
+            params_bytes[i * stride..i * stride + size_of::<Params>()]
+                .copy_from_slice(bytemuck::bytes_of(p));
         }
         let params_buffer = gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("extension params"),
@@ -660,7 +696,12 @@ impl StripeExtension {
     }
 
     /// Records the evaluation of stripe `stripe` of every column into `out`, in one compute pass.
-    pub fn encode(&self, kernels: &ExtensionKernels, encoder: &mut wgpu::CommandEncoder, stripe: usize) {
+    pub fn encode(
+        &self,
+        kernels: &ExtensionKernels,
+        encoder: &mut wgpu::CommandEncoder,
+        stripe: usize,
+    ) {
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("extension"),
             timestamp_writes: None,
@@ -668,10 +709,15 @@ impl StripeExtension {
         let mut current = None;
         for dispatch in &self.dispatches {
             if current != Some(dispatch.in_place) {
-                pass.set_pipeline(if dispatch.in_place { &kernels.in_place } else { &kernels.out_of_place });
+                pass.set_pipeline(if dispatch.in_place {
+                    &kernels.in_place
+                } else {
+                    &kernels.out_of_place
+                });
                 current = Some(dispatch.in_place);
             }
-            let groups = if dispatch.in_place { &self.in_place_groups } else { &self.out_of_place_groups };
+            let groups =
+                if dispatch.in_place { &self.in_place_groups } else { &self.out_of_place_groups };
             pass.set_bind_group(0, &groups[stripe][dispatch.buffer], &[dispatch.params_offset]);
             pass.dispatch_workgroups(dispatch.workgroups.0, dispatch.workgroups.1, 1);
         }
