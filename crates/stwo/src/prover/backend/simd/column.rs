@@ -941,9 +941,8 @@ struct LiveAnonymousBlocks {
 }
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-static LIVE_ANONYMOUS_BLOCKS: LiveAnonymousBlocks = LiveAnonymousBlocks {
-    slots: [const { AtomicUsize::new(0) }; 1 << 14],
-};
+static LIVE_ANONYMOUS_BLOCKS: LiveAnonymousBlocks =
+    LiveAnonymousBlocks { slots: [const { AtomicUsize::new(0) }; 1 << 14] };
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 impl LiveAnonymousBlocks {
@@ -953,17 +952,15 @@ impl LiveAnonymousBlocks {
 
     fn register(&self, address: usize) {
         if address != 0 {
-            let _ = self.slot(address).compare_exchange(
-                0, address, Ordering::SeqCst, Ordering::SeqCst,
-            );
+            let _ =
+                self.slot(address).compare_exchange(0, address, Ordering::SeqCst, Ordering::SeqCst);
         }
     }
 
     fn unregister(&self, address: usize) {
         if address != 0 {
-            let _ = self.slot(address).compare_exchange(
-                address, 0, Ordering::SeqCst, Ordering::SeqCst,
-            );
+            let _ =
+                self.slot(address).compare_exchange(address, 0, Ordering::SeqCst, Ordering::SeqCst);
         }
     }
 
@@ -972,9 +969,11 @@ impl LiveAnonymousBlocks {
         // slot modification, so an address removed before unmap cannot authorize a later,
         // unrelated allocation reusing that address. Exclusive Vec ownership prevents the
         // currently matching allocation from being deallocated before the caller's advice.
-        address != 0 && self.slot(address).compare_exchange(
-            address, address, Ordering::SeqCst, Ordering::SeqCst,
-        ).is_ok()
+        address != 0
+            && self
+                .slot(address)
+                .compare_exchange(address, address, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
     }
 }
 
@@ -1022,7 +1021,9 @@ impl LargeBlocks {
         if self.idle.load(Ordering::Relaxed) <= LARGE_LOW_WATER {
             return None;
         }
-        (0..LARGE_CLASSES).rev().find_map(|class| Some((self.take(class)?, large_class_size(class))))
+        (0..LARGE_CLASSES)
+            .rev()
+            .find_map(|class| Some((self.take(class)?, large_class_size(class))))
     }
 }
 

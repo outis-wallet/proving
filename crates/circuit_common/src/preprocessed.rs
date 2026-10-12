@@ -498,7 +498,9 @@ impl CompactColumn {
     /// The value at `row`, without any allocation.
     fn at(&self, row: usize) -> usize {
         match self {
-            Self::Narrow(values) => usize::try_from(values[row]).expect("value originally fit usize"),
+            Self::Narrow(values) => {
+                usize::try_from(values[row]).expect("value originally fit usize")
+            }
             Self::Wide(values) => values[row],
             Self::Bits { words, .. } => ((words[row / 64] >> (row % 64)) & 1) as usize,
             Self::Fixed { log_size, kind } => kind.at(*log_size, row),
@@ -508,7 +510,10 @@ impl CompactColumn {
     /// Materializes the column's exact values.
     fn to_vec(&self) -> Vec<usize> {
         match self {
-            Self::Narrow(values) => values.iter().map(|&value| usize::try_from(value).expect("value originally fit usize")).collect(),
+            Self::Narrow(values) => values
+                .iter()
+                .map(|&value| usize::try_from(value).expect("value originally fit usize"))
+                .collect(),
             Self::Wide(values) => values.clone(),
             _ => (0..self.len()).map(|row| self.at(row)).collect(),
         }
@@ -519,9 +524,9 @@ impl CompactColumn {
     #[cfg(feature = "prover")]
     fn to_field_column<B: Backend>(&self) -> Col<B, BaseField> {
         match self {
-            Self::Narrow(values) => Col::<B, BaseField>::from_iter(
-                values.iter().map(|&value| BaseField::from(usize::try_from(value).expect("value originally fit usize"))),
-            ),
+            Self::Narrow(values) => Col::<B, BaseField>::from_iter(values.iter().map(|&value| {
+                BaseField::from(usize::try_from(value).expect("value originally fit usize"))
+            })),
             Self::Wide(values) => {
                 Col::<B, BaseField>::from_iter(values.iter().cloned().map(BaseField::from))
             }
@@ -749,20 +754,23 @@ impl PreprocessedCircuit {
             || {
                 rayon::join(
                     || {
-                                let mut trace = PreProcessedTrace::default();
-                                triple_xor_preprocessed_columns(triple_xor, multiplicities).push_to(&mut trace);
-                                trace
-                            },
+                        let mut trace = PreProcessedTrace::default();
+                        triple_xor_preprocessed_columns(triple_xor, multiplicities)
+                            .push_to(&mut trace);
+                        trace
+                    },
                     || {
                         rayon::join(
                             || {
                                 let mut trace = PreProcessedTrace::default();
-                                m31_to_u32_preprocessed_columns(m31_to_u32, multiplicities).push_to(&mut trace);
+                                m31_to_u32_preprocessed_columns(m31_to_u32, multiplicities)
+                                    .push_to(&mut trace);
                                 trace
                             },
                             || {
                                 let mut trace = PreProcessedTrace::default();
-                                blake_g_gate_preprocessed_columns(blake_g_gate, multiplicities).push_to(&mut trace);
+                                blake_g_gate_preprocessed_columns(blake_g_gate, multiplicities)
+                                    .push_to(&mut trace);
                                 trace
                             },
                         )
@@ -773,8 +781,13 @@ impl PreprocessedCircuit {
         // Compact within each joined task, then merge by the original component order.
         // A completed component no longer retains its full-width staging columns while
         // another component is still being built.
-        for component in [eq_columns, qm31_ops_columns, triple_xor_columns,
-            m31_to_u32_columns, blake_g_gate_columns] {
+        for component in [
+            eq_columns,
+            qm31_ops_columns,
+            triple_xor_columns,
+            m31_to_u32_columns,
+            blake_g_gate_columns,
+        ] {
             for (id, column) in component.columns {
                 pp_trace.push_compact_column(id, column);
             }

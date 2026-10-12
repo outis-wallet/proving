@@ -225,7 +225,8 @@ fn twin_coset_barycentric_weights_into(
     let p = p.into_ef::<SecureField>();
     let p_0 = domain.at(0).into_ef::<SecureField>();
     let si_0 = SecureField::one()
-        / ((p_0.y * SecureField::from(-2)) * coset_vanishing_derivative(Coset::new(initial, s), p_0));
+        / ((p_0.y * SecureField::from(-2))
+            * coset_vanishing_derivative(Coset::new(initial, s), p_0));
 
     #[cfg(not(feature = "parallel"))]
     let vi_p = (0..weights_vec_len)
@@ -269,7 +270,9 @@ fn twin_coset_barycentric_weights_into(
 
     #[cfg(not(feature = "parallel"))]
     for (i, vi_p_inverse) in vi_p_inverse.iter().enumerate() {
-        for (column, value) in buffer.columns.iter_mut().zip((*vi_p_inverse * si_i_vn_p).into_packed_m31s()) {
+        for (column, value) in
+            buffer.columns.iter_mut().zip((*vi_p_inverse * si_i_vn_p).into_packed_m31s())
+        {
             column.data[i] = value;
         }
     }
@@ -280,7 +283,9 @@ fn twin_coset_barycentric_weights_into(
         buffer.par_chunks_mut(CHUNK_SIZE).zip(vi_p_inverse.par_chunks(CHUNK_SIZE)).for_each(
             |(mut chunk, vi_p_inverse_chunk)| {
                 for (i, vi_p_inverse) in vi_p_inverse_chunk.iter().enumerate() {
-                    for (column, value) in chunk.0.iter_mut().zip((*vi_p_inverse * si_i_vn_p).into_packed_m31s()) {
+                    for (column, value) in
+                        chunk.0.iter_mut().zip((*vi_p_inverse * si_i_vn_p).into_packed_m31s())
+                    {
                         column.0[i] = value;
                     }
                 }

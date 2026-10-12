@@ -89,8 +89,7 @@ impl<'a> SimdDomainEvaluator<'a> {
     ) {
         let constraint = match fractions {
             [a, b] => {
-                (diff * a.denominator - a.numerator) * b.denominator
-                    - b.numerator * a.denominator
+                (diff * a.denominator - a.numerator) * b.denominator - b.numerator * a.denominator
             }
             _ => {
                 let frac: Fraction<VeryPackedSecureField, VeryPackedSecureField> =

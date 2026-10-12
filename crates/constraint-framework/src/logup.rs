@@ -87,13 +87,12 @@ impl<const N: usize> LookupElements<N> {
         );
         // Drawn lookup elements start with alpha^0 = 1. Keep the generic path for
         // manually constructed element sets whose first coefficient is different.
-        let (start, initial) = if !values.is_empty()
-            && self.alpha_powers.first() == Some(&SecureField::one())
-        {
-            (1, EF::from(values[0].clone()))
-        } else {
-            (0, EF::zero())
-        };
+        let (start, initial) =
+            if !values.is_empty() && self.alpha_powers.first() == Some(&SecureField::one()) {
+                (1, EF::from(values[0].clone()))
+            } else {
+                (0, EF::zero())
+            };
         values[start..]
             .iter()
             .zip(&self.alpha_powers[start..])

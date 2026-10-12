@@ -223,10 +223,8 @@ impl<'a, B: BackendForChannel<MC>, MC: MerkleChannel> CommitmentSchemeProver<'a,
         self.polynomials().zip_cols(sampled_points).map_cols(|(poly, points)| {
             let compute_weights = |(log_size, point): (u32, CirclePoint<SecureField>)| {
                 weights_dashmap.entry((log_size, point)).or_insert_with(|| {
-                    let weights_log_size = B::barycentric_log_size(
-                        log_size,
-                        self.config.fri_config.log_blowup_factor,
-                    );
+                    let weights_log_size =
+                        B::barycentric_log_size(log_size, self.config.fri_config.log_blowup_factor);
                     let buffer = SecureColumnByCoords {
                         columns: array::from_fn(|_| {
                             self.base_column_pool.take_or_alloc(weights_log_size)
