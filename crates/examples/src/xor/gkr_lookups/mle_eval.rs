@@ -194,7 +194,9 @@ impl<O: MleCoeffColumnOracle> Component for MleEvalProverComponent<'_, '_, O> {
     }
 }
 
-impl<O: MleCoeffColumnOracle> ComponentProver<SimdBackend> for MleEvalProverComponent<'_, '_, O> {
+impl<O: MleCoeffColumnOracle + Sync> ComponentProver<SimdBackend>
+    for MleEvalProverComponent<'_, '_, O>
+{
     fn evaluate_constraint_quotients_on_domain(
         &self,
         trace: &Trace<'_, SimdBackend>,
