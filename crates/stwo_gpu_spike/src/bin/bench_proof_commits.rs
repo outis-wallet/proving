@@ -521,18 +521,19 @@ fn rss_breakdown() {
     step("the readback ring (MAP_READ chunks)");
     let target = gpu.storage("target", (upload.bytes() / 4) as usize);
     let data = vec![7u8; upload.bytes() as usize];
-    step("(a host buffer of the upload ring's size, written)");
+    step("(the upload's source, a host buffer of the upload ring's size, written)");
     upload.upload(&gpu, &[Upload { dst: &target, dst_offset: 0, src: &data }]);
     gpu.device.poll(wgpu::PollType::wait_indefinitely()).expect("poll");
     step("the upload ring's chunks written");
-    let mut back = vec![0u8; upload.bytes() as usize];
-    step("(a host buffer of the upload ring's size, written)");
+    // Written (not left to calloc's untouched pages), so that the next step is the ring's alone.
+    let mut back = vec![1u8; upload.bytes() as usize];
+    step("(the readback's destination, a host buffer of that size, written)");
     let mut readback = readback;
     readback.read(
         &gpu,
         vec![stwo_gpu_spike::transfer::Readback { src: &target, src_offset: 0, dst: &mut back }],
     );
-    step("the readback ring's chunks read (two of three)");
+    step("the readback ring's chunks mapped and read");
     drop((data, back, target, upload, readback, kernels, gpu));
     step("all dropped");
 }
