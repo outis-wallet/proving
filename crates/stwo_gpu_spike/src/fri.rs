@@ -136,16 +136,14 @@ pub trait FriResources {
     fn read(&self, pieces: Vec<Readback<'_, '_>>) -> Result<(), String>;
 }
 
-/// The buffers' uses ([`FriResources::buffer`]'s slots).
+/// The buffers' uses ([`FriResources::buffer`]'s slots). The quotients' buffers reuse the
+/// numerators' once these are done with: the inverse FFT's work and the stripes' evaluations the
+/// combined coefficients', the quotients' coefficients the numerators' evaluations'.
 pub mod slot {
     pub const COMBINED: usize = 0;
     pub const EVALUATIONS: usize = 1;
     pub const VALUES: usize = 2;
-    pub const WORK: usize = 3;
-    pub const COEFFICIENTS: usize = 4;
-    pub const STRIPE: usize = 5;
-    pub const OUT: usize = 6;
-    pub const N_SLOTS: usize = 7;
+    pub const N_SLOTS: usize = 3;
 }
 
 /// The bytes of [`FriResources::buffer`]'s slots a call would take (in [`slot`]'s order), for a
@@ -200,7 +198,6 @@ struct Plan<'a> {
     batches: Vec<Batch<'a>>,
     /// The lifting domain's stripe-0 log size.
     log_n: u32,
-    lifting_log_size: u32,
 }
 
 impl<'a> Plan<'a> {
@@ -263,7 +260,7 @@ impl<'a> Plan<'a> {
         if batches.iter().any(|batch| batch.log_size > log_n) {
             return Err("a column larger than the lifting domain".into());
         }
-        Ok(Self { batches, log_n, lifting_log_size })
+        Ok(Self { batches, log_n })
     }
 
     /// The layout of the batches' numerators (4 columns each).
@@ -298,13 +295,9 @@ impl<'a> Plan<'a> {
             return Err("the quotients past one buffer".into());
         };
         let mut bytes = [0u64; slot::N_SLOTS];
-        bytes[slot::COMBINED] = words * 4;
-        bytes[slot::EVALUATIONS] = words * 4;
+        bytes[slot::COMBINED] = words.max(quotient_words) * 4;
+        bytes[slot::EVALUATIONS] = words.max(quotient_words) * 4;
         bytes[slot::VALUES] = value_bytes.max(256);
-        bytes[slot::WORK] = quotient_words * 4;
-        bytes[slot::COEFFICIENTS] = quotient_words * 4;
-        bytes[slot::STRIPE] = quotient_words * 4;
-        bytes[slot::OUT] = 16u64 << self.lifting_log_size;
         Ok(bytes)
     }
 }
@@ -470,19 +463,12 @@ pub fn fri_quotients(
 
     // The quotients on the lifting domain's stripe 0: the points, their batches, the domain.
     let quotient_layout = Arc::new(ColumnsLayout::new(&[log_n; 4], max_words));
-    let work = GpuColumns::with_buffers(
-        vec![resources.buffer(slot::WORK, bytes[slot::WORK])],
-        quotient_layout.clone(),
-    );
-    let coefficients = GpuColumns::with_buffers(
-        vec![resources.buffer(slot::COEFFICIENTS, bytes[slot::COEFFICIENTS])],
-        quotient_layout.clone(),
-    );
-    let stripe = GpuColumns::with_buffers(
-        vec![resources.buffer(slot::STRIPE, bytes[slot::STRIPE])],
-        quotient_layout.clone(),
-    );
-    let out = resources.buffer(slot::OUT, bytes[slot::OUT]);
+    // The combined coefficients are done with once evaluated, the numerators' evaluations once
+    // the quotients are formed.
+    let work = GpuColumns::with_buffers(combined.buffers.clone(), quotient_layout.clone());
+    let coefficients =
+        GpuColumns::with_buffers(evaluations.buffers.clone(), quotient_layout.clone());
+    let stripe = GpuColumns::with_buffers(combined.buffers.clone(), quotient_layout.clone());
     let points = plan.batches.iter().map(|batch| batch.point).unique().collect_vec();
     let mut point_words: Vec<u32> = vec![];
     let mut point_batches: Vec<[u32; 2]> = vec![];
@@ -583,39 +569,35 @@ pub fn fri_quotients(
         pass.dispatch_workgroups(x, y, 1);
     }
     ifft.encode(&state.ifft, &mut encoder);
-    // Stripe s of coordinate k at words (k 2^B + s) 2^N of `out`: each coordinate's column whole.
-    let n_stripes = 1u64 << log_blowup;
-    let stripe_bytes = 4u64 << log_n;
-    for s in 0..n_stripes {
-        final_extension.encode(extension_kernels, &mut encoder, s as usize);
-        for k in 0..4 {
-            encoder.copy_buffer_to_buffer(
-                &stripe.buffers[0],
-                quotient_layout.slots[k].offset * 4,
-                &out,
-                (k as u64 * n_stripes + s) * stripe_bytes,
-                stripe_bytes,
-            );
-        }
-    }
-    gpu.queue.submit([encoder.finish()]);
     times.setup = started.elapsed().as_secs_f64();
     let started = Instant::now();
 
+    // Stripe by stripe, evaluated and read back into place: stripe s of the lifting domain is
+    // rows s 2^N .. (s + 1) 2^N (bit-reversed).
     // Safety: every value is read back.
     let mut result: [BaseColumn; 4] =
         std::array::from_fn(|_| unsafe { BaseColumn::uninitialized(1 << lifting_log_size) });
-    let column_bytes = 4u64 << lifting_log_size;
-    let pieces = result
-        .iter_mut()
-        .enumerate()
-        .map(|(k, column)| Readback {
-            src: &out,
-            src_offset: k as u64 * column_bytes,
-            dst: bytemuck::cast_slice_mut::<BaseField, u8>(column.as_mut_slice()),
-        })
-        .collect_vec();
-    resources.read(pieces)?;
+    let stripe_words = 1usize << log_n;
+    let mut encoder = Some(encoder);
+    for s in 0..1usize << log_blowup {
+        let mut stripe_encoder = encoder
+            .take()
+            .unwrap_or_else(|| gpu.device.create_command_encoder(&Default::default()));
+        final_extension.encode(extension_kernels, &mut stripe_encoder, s);
+        gpu.queue.submit([stripe_encoder.finish()]);
+        let pieces = result
+            .iter_mut()
+            .enumerate()
+            .map(|(k, column)| Readback {
+                src: &stripe.buffers[0],
+                src_offset: quotient_layout.slots[k].offset * 4,
+                dst: bytemuck::cast_slice_mut::<BaseField, u8>(
+                    &mut column.as_mut_slice()[s * stripe_words..(s + 1) * stripe_words],
+                ),
+            })
+            .collect_vec();
+        resources.read(pieces)?;
+    }
     times.gpu = started.elapsed().as_secs_f64();
 
     extension.destroy();

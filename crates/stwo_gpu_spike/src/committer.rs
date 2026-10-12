@@ -92,6 +92,9 @@ pub struct GpuCommitter {
     decommit_stats: Mutex<DecommitStats>,
     /// The out-of-domain samples' kernels, made at their first use.
     ood: Mutex<Option<crate::ood::OodKernels>>,
+    /// The FRI quotients' kernels and tables, made at their first use, and their counts.
+    fri: Mutex<Option<crate::fri::FriState>>,
+    fri_stats: Mutex<FriStats>,
     ood_stats: Mutex<OodStats>,
 }
 
@@ -128,6 +131,56 @@ pub struct DecommitStats {
     pub seconds: f64,
     /// The GPU evaluations' phases.
     pub times: crate::EvalTimes,
+}
+
+/// The FRI quotients served on the GPU (see [`GpuCommitter::fri_quotients`]), since the stats
+/// were last taken.
+#[derive(Clone, Debug, Default)]
+pub struct FriStats {
+    /// The quotients asked for, served, and why not: the GPU doesn't take their shape (or too
+    /// many values not kept as coefficients), the video memory policy, the GPU failed.
+    pub calls: u64,
+    pub served: u64,
+    pub declined: u64,
+    pub refused_vram: u64,
+    pub failed: u64,
+    /// The last reason one was declined or failed.
+    pub reason: Option<String>,
+    /// The columns of the served ones, those taken from their values.
+    pub columns: u64,
+    pub value_columns: u64,
+    /// The time in all (wall clock), and the phases'.
+    pub seconds: f64,
+    pub times: crate::fri::FriTimes,
+}
+
+/// The transient slots of the FRI quotients' buffers (past the composer's).
+const FRI_TRANSIENT_BASE: usize = 16;
+
+/// [`crate::fri::FriResources`] from the committer: its transient buffers, its twiddles, its
+/// rings.
+struct CommitterFri<'a>(&'a GpuCommitter);
+
+impl crate::fri::FriResources for CommitterFri<'_> {
+    fn buffer(&self, slot: usize, bytes: u64) -> wgpu::Buffer {
+        self.0.transient(FRI_TRANSIENT_BASE + slot, bytes)
+    }
+
+    fn stripe_twiddles(
+        &self,
+        log_sizes: &std::collections::BTreeSet<u32>,
+        log_blowup: u32,
+    ) -> Option<std::sync::Arc<crate::extension::StripeTwiddles>> {
+        self.0.stripe_twiddles_covering(log_sizes, log_blowup)
+    }
+
+    fn upload(&self, pieces: &[Upload<'_>]) -> Result<(), String> {
+        self.0.upload(pieces).map(|_| ())
+    }
+
+    fn read(&self, pieces: Vec<Readback<'_, '_>>) -> Result<(), String> {
+        self.0.read_back_pieces(pieces).map(|_| ())
+    }
 }
 
 /// A transient buffer's size for `bytes`: rounded up to 16 MiB (so that it serves the next
@@ -248,6 +301,8 @@ impl GpuCommitter {
             transient: Mutex::new(vec![]),
             decommit_stats: Mutex::new(DecommitStats::default()),
             ood: Mutex::new(None),
+            fri: Mutex::new(None),
+            fri_stats: Mutex::new(FriStats::default()),
             ood_stats: Mutex::new(OodStats::default()),
         })
     }
@@ -829,6 +884,200 @@ impl GpuCommitter {
         std::mem::take(&mut *self.decommit_stats.lock().unwrap_or_else(|p| p.into_inner()))
     }
 
+    /// The FRI quotients' counts since the last call.
+    pub fn take_fri_stats(&self) -> FriStats {
+        std::mem::take(&mut *self.fri_stats.lock().unwrap_or_else(|p| p.into_inner()))
+    }
+
+    /// stwo's FRI quotients of `request` (its `FriQuotientsHook`), computed on the GPU from the
+    /// coefficients kept ([`PartsMode::Coefficients`]) and the values of the columns not kept as
+    /// coefficients; `None` (the CPU computes them) if the GPU doesn't take their shape, the
+    /// video memory policy refuses its buffers, or the GPU fails.
+    pub fn fri_quotients(
+        &self,
+        request: &stwo::prover::FriQuotientsRequest<'_, SimdBackend>,
+    ) -> Option<stwo::prover::poly::circle::SecureEvaluation<SimdBackend, BitReversedOrder>> {
+        use crate::fri::{FriColumn, Source};
+        use crate::parts::Placement;
+        let start = Instant::now();
+        // Every column's coefficients, if kept.
+        let placements: Vec<Vec<Option<(wgpu::Buffer, u32)>>> = {
+            let mut parts = self.parts.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            request
+                .columns
+                .iter()
+                .map(|tree| {
+                    tree.iter()
+                        .map(|column| {
+                            let log_size = column.values.len().ilog2();
+                            let domain_log_size = column.domain.log_size();
+                            if log_size >= domain_log_size {
+                                return None;
+                            }
+                            match parts.placement(
+                                &column.values,
+                                domain_log_size,
+                                domain_log_size - log_size,
+                            ) {
+                                Some(Placement::Coefficients { buffer, byte_offset }) => {
+                                    Some((buffer, (byte_offset / 4) as u32))
+                                }
+                                _ => None,
+                            }
+                        })
+                        .collect()
+                })
+                .collect()
+        };
+        let columns: stwo::core::pcs::TreeVec<Vec<FriColumn<'_>>> = stwo::core::pcs::TreeVec::new(
+            request
+                .columns
+                .iter()
+                .zip(&placements)
+                .map(|(tree, placements)| {
+                    tree.iter()
+                        .zip(placements)
+                        .map(|(column, placement)| FriColumn {
+                            source: match placement {
+                                Some((buffer, offset)) => {
+                                    Source::Coefficients { buffer, offset: *offset }
+                                }
+                                None => Source::Values(column.values.as_slice()),
+                            },
+                            log_size: column.domain.log_size(),
+                        })
+                        .collect()
+                })
+                .collect(),
+        );
+        let n_columns: u64 = columns.iter().map(|tree| tree.len() as u64).sum();
+        self.fri_stats.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).calls += 1;
+        let record = |f: &dyn Fn(&mut FriStats)| {
+            let mut stats = self.fri_stats.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            f(&mut stats);
+            stats.seconds += start.elapsed().as_secs_f64();
+        };
+        // The buffers it would take, within the policy.
+        let Some(bytes) = crate::fri::plan_bytes(
+            &columns,
+            request.samples,
+            request.lifting_log_size,
+            request.log_blowup_factor,
+            crate::extension::max_buffer_words(&self.gpu),
+        ) else {
+            record(&|stats| {
+                stats.declined += 1;
+                stats.reason = Some("a shape the GPU doesn't take".into());
+            });
+            return None;
+        };
+        let requests = bytes
+            .iter()
+            .enumerate()
+            .map(|(slot, &bytes)| (FRI_TRANSIENT_BASE + slot, bytes))
+            .collect_vec();
+        let growth = self.transient_growth(&requests);
+        if growth > 0 && !self.vram_allows(growth) {
+            record(&|stats| {
+                stats.refused_vram += 1;
+                stats.reason = Some(format!("video memory: {} MiB more", growth >> 20));
+            });
+            return None;
+        }
+        for &(slot, bytes) in &requests {
+            self.transient(slot, bytes);
+        }
+        // The buffers go when the quotients are done (the decommitment and the next leg need
+        // the room).
+        struct Release<'a>(&'a GpuCommitter);
+        impl Drop for Release<'_> {
+            fn drop(&mut self) {
+                self.0.release_transient_slots(
+                    FRI_TRANSIENT_BASE..FRI_TRANSIENT_BASE + crate::fri::slot::N_SLOTS,
+                );
+            }
+        }
+        let _release = Release(self);
+        let computed = catch_unwind(AssertUnwindSafe(|| {
+            let mut state = self.fri.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            let state = state.get_or_insert_with(|| crate::fri::FriState::new(&self.gpu));
+            crate::fri::fri_quotients(
+                &self.gpu,
+                state,
+                self.extension_kernels(),
+                &CommitterFri(self),
+                &columns,
+                request.samples,
+                request.random_coeff,
+                request.lifting_log_size,
+                request.log_blowup_factor,
+            )
+        }));
+        match computed {
+            Ok(Ok((values, times))) => {
+                record(&|stats| {
+                    stats.served += 1;
+                    stats.columns += n_columns;
+                    stats.value_columns += times.value_columns as u64;
+                    stats.times += times;
+                });
+                let domain = stwo::core::poly::circle::CanonicCoset::new(request.lifting_log_size)
+                    .circle_domain();
+                Some(stwo::prover::poly::circle::SecureEvaluation::new(
+                    domain,
+                    stwo::prover::secure_column::SecureColumnByCoords { columns: values },
+                ))
+            }
+            Ok(Err(reason)) => {
+                record(&|stats| {
+                    stats.declined += 1;
+                    stats.reason = Some(reason.clone());
+                });
+                None
+            }
+            Err(panic) => {
+                let reason = panic_message(&panic);
+                eprintln!("FRI quotients on the GPU failed: {reason}");
+                record(&|stats| {
+                    stats.failed += 1;
+                    stats.reason = Some(reason.clone());
+                });
+                None
+            }
+        }
+    }
+
+    /// [`Self::read_back`] of several pieces.
+    pub fn read_back_pieces(&self, pieces: Vec<Readback<'_, '_>>) -> Result<RingTimes, String> {
+        let mut state = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let read = catch_unwind(AssertUnwindSafe(|| {
+            let reused = state.get_or_insert_with(|| Reused::new(&self.gpu));
+            reused.readback.take_times();
+            reused.readback.read(&self.gpu, pieces);
+            reused.readback.take_times()
+        }));
+        read.map_err(|panic| {
+            *state = None;
+            panic_message(&panic)
+        })
+    }
+
+    /// [`Self::stripe_twiddles`] covering every log size of `log_sizes`.
+    pub fn stripe_twiddles_covering(
+        &self,
+        log_sizes: &std::collections::BTreeSet<u32>,
+        log_blowup: u32,
+    ) -> Option<std::sync::Arc<crate::extension::StripeTwiddles>> {
+        let root_coset = *self
+            .root_cosets
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(&log_blowup)?;
+        let mut state = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let reused = state.as_mut()?;
+        reused.twiddles.try_get_with(&self.gpu, log_sizes, log_blowup, root_coset, || Err(())).ok()
+    }
+
     /// The out-of-domain samples' counts since the last call.
     pub fn take_ood_stats(&self) -> OodStats {
         std::mem::take(&mut *self.ood_stats.lock().unwrap_or_else(|p| p.into_inner()))
@@ -1088,6 +1337,17 @@ impl GpuCommitter {
         let mut transient = self.transient.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         for buffer in transient.drain(..).flatten() {
             buffer.destroy();
+        }
+    }
+
+    /// Frees the transient buffers of slots `slots` (after the work recorded on them: dropped,
+    /// wgpu frees them when it is done).
+    pub fn release_transient_slots(&self, slots: std::ops::Range<usize>) {
+        let mut transient = self.transient.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        for slot in slots {
+            if let Some(buffer) = transient.get_mut(slot) {
+                *buffer = None;
+            }
         }
     }
 
