@@ -9,7 +9,10 @@ use super::degree::NamedExprs;
 use super::{BaseExpr, ExtExpr};
 use crate::expr::ColumnExpr;
 use crate::preprocessed_columns::PreProcessedColumnId;
-use crate::{EvalAtRow, INTERACTION_TRACE_IDX, MAX_N_INTERACTIONS, PREPROCESSED_TRACE_IDX, Relation, RelationEntry};
+use crate::{
+    EvalAtRow, INTERACTION_TRACE_IDX, MAX_N_INTERACTIONS, PREPROCESSED_TRACE_IDX, Relation,
+    RelationEntry,
+};
 
 pub struct FormalLogupAtRow {
     pub interaction: usize,

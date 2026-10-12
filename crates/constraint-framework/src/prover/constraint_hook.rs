@@ -15,13 +15,17 @@ use std::sync::{Arc, RwLock};
 use stwo::core::fields::m31::BaseField;
 use stwo::core::fields::qm31::SecureField;
 use stwo::core::pcs::TreeVec;
+use stwo::prover::Poly;
 use stwo::prover::backend::simd::SimdBackend;
 use stwo::prover::poly::BitReversedOrder;
 use stwo::prover::poly::circle::CircleEvaluation;
 use stwo::prover::secure_column::SecureColumnByCoords;
-use stwo::prover::Poly;
 
 use crate::expr::ExprEvaluator;
+
+/// A component's committed evaluations, per interaction, as the SIMD evaluation borrows them.
+pub(super) type Evaluations<'a> =
+    TreeVec<Vec<Cow<'a, CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>>>;
 
 /// A component's constraint evaluation: everything the SIMD evaluation uses, besides the
 /// component's `FrameworkEval`, which [`Self::constraints`] traces.
@@ -51,8 +55,7 @@ pub struct ConstraintEvalJob<'a> {
     pub preprocessed_column_indices: &'a [usize],
     /// The component's committed polynomials, per interaction, the preprocessed ones remapped.
     pub polys: &'a TreeVec<Vec<&'a Poly<SimdBackend>>>,
-    pub(super) evaluations:
-        &'a TreeVec<Vec<Cow<'a, CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>>>,
+    pub(super) evaluations: &'a Evaluations<'a>,
     pub(super) trace_constraints: &'a dyn Fn() -> ExprEvaluator,
 }
 
@@ -69,13 +72,18 @@ pub enum ConstraintEvalOutcome {
     /// not run.
     Evaluated,
     /// The SIMD evaluation runs; then the observer, if any, is called with the accumulator.
-    Declined(Option<Box<dyn FnOnce(&SecureColumnByCoords<SimdBackend>) + Send>>),
+    Declined(Option<ConstraintEvalObserver>),
 }
 
+/// Called with the accumulator after the SIMD evaluation a hook declined.
+pub type ConstraintEvalObserver = Box<dyn FnOnce(&SimdAccumulator) + Send>;
+
+/// The accumulator a hook adds into: the column of the evaluation domain's size.
+pub type SimdAccumulator = SecureColumnByCoords<SimdBackend>;
+
 /// A constraint evaluation hook: see the module docs.
-pub type ConstraintEvalHook = dyn Fn(&ConstraintEvalJob<'_>, &mut SecureColumnByCoords<SimdBackend>) -> ConstraintEvalOutcome
-    + Send
-    + Sync;
+pub type ConstraintEvalHook =
+    dyn Fn(&ConstraintEvalJob<'_>, &mut SimdAccumulator) -> ConstraintEvalOutcome + Send + Sync;
 
 static CONSTRAINT_EVAL_HOOK: RwLock<Option<Arc<ConstraintEvalHook>>> = RwLock::new(None);
 
