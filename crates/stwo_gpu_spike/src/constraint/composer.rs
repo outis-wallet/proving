@@ -571,6 +571,11 @@ impl GpuComposer {
         let n = 1usize << eval_log;
 
         let mut run = lock(&self.run);
+        // The device buffers are the component's own: freed when it is done, so that nothing of
+        // the composer's stays in the allocator's blocks between components (a block it kept
+        // occupied would stay reserved, 256 MiB).
+        run.out = None;
+        run.small.clear();
         let gpu = self.committer.gpu();
         let setup_start = Instant::now();
         let result = catch_unwind(AssertUnwindSafe(|| {
@@ -742,6 +747,8 @@ impl GpuComposer {
         let (gpu_time, wait, readback, setup, timestamps_time, uploaded) = match result {
             Ok(Ok(times)) => times,
             Ok(Err(_)) | Err(_) => {
+                run.out = None;
+                run.small.clear();
                 drop(run);
                 return self.decline("gpu failed");
             }
@@ -794,6 +801,8 @@ impl GpuComposer {
             ConstraintEvalOutcome::Evaluated
         };
         let add_time = add_start.elapsed();
+        run.out = None;
+        run.small.clear();
         drop(run);
         let mut stats = lock(&self.stats);
         if !shadow {
