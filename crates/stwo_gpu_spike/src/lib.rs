@@ -13,6 +13,8 @@
 //!   GPU, equal to `CommitmentTreeProver::new_striped`'s.
 //! - [`merkle`]: the lifted Merkle tree of a commitment (leaves of a stripe's columns, its subtree,
 //!   the levels above the stripes), its input and output layouts, on the GPU.
+//! - [`constraint`]: a component's constraint evaluation (composition), generated from its traced
+//!   constraints.
 //! - [`shapes`]: the Cairo leg's trace shapes; [`reference`](mod@reference): stwo's SIMD results to
 //!   compare with.
 //! - `bench_merkle`, `bench_extension`, `bench_commit` (`src/bin`): the Merkle hashing, the
@@ -23,6 +25,7 @@ use wgpu::util::DeviceExt;
 pub mod blake2s;
 pub mod commit;
 pub mod committer;
+pub mod constraint;
 pub mod extension;
 pub mod merkle;
 pub mod reference;

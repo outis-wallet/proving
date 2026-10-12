@@ -596,6 +596,8 @@ dependencies = [
  "allocator-api2",
  "equivalent",
  "foldhash",
+ "serde",
+ "serde_core",
 ]
 
 [[package]]
@@ -1390,16 +1392,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "stwo-constraint-framework"
+version = "2.4.0"
+dependencies = [
+ "hashbrown 0.16.1",
+ "itertools 0.12.1",
+ "num-traits",
+ "rand 0.9.5",
+ "rayon",
+ "stwo",
+ "stwo-std-shims",
+ "tracing",
+]
+
+[[package]]
 name = "stwo-gpu-spike"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
  "itertools 0.12.1",
  "naga",
+ "num-traits",
  "pollster",
  "rand 0.9.5",
  "rayon",
  "stwo",
+ "stwo-constraint-framework",
  "wgpu",
 ]
 

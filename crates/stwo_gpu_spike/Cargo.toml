@@ -11,6 +11,8 @@ publish = false
 
 [dependencies]
 stwo = { path = "../stwo", features = ["prover", "parallel"] }
+# The constraint evaluation spike (src/constraint): the traced constraints and the evaluation hook.
+stwo-constraint-framework = { path = "../constraint-framework", features = ["prover", "parallel"] }
 wgpu = "30"
 pollster = "1"
 bytemuck = { version = "1", features = ["derive"] }
@@ -19,5 +21,6 @@ rand = { version = "0.9", features = ["small_rng"] }
 rayon = "1.10"
 
 [dev-dependencies]
+num-traits = "0.2"
 # Translates the kernels to MSL and HLSL in a test, validated without optional capabilities.
 naga = { version = "30", features = ["wgsl-in", "msl-out", "hlsl-out"] }
