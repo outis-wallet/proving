@@ -9,6 +9,7 @@
 //! - [`capture`]: a constraint evaluation hook that observes a proof's components (shapes, checks)
 //!   and writes [`fixture`]s of the SIMD evaluation's inputs and output.
 pub mod capture;
+pub mod composer;
 pub mod fixture;
 pub mod interp;
 pub mod ir;

@@ -152,7 +152,12 @@ impl GpuCommitter {
     /// The committer on the adapter the environment picks (see the crate docs), or why there is
     /// none.
     pub fn new() -> Result<Self, String> {
-        let gpu = GpuContext::try_new()?;
+        // With the optional features constraint evaluation uses if the adapter has them: a
+        // pipeline cache (see `constraint::composer`) and timestamps for its timings.
+        let gpu = pollster::block_on(GpuContext::try_create_async(
+            None,
+            wgpu::Features::PIPELINE_CACHE | wgpu::Features::TIMESTAMP_QUERY,
+        ))?;
         let (kernels, reused) =
             catch_unwind(AssertUnwindSafe(|| (CommitKernels::new(&gpu), Reused::new(&gpu))))
                 .map_err(|panic| format!("kernels: {}", panic_message(&panic)))?;
@@ -391,6 +396,48 @@ impl GpuCommitter {
 
     pub fn parts_mode(&self) -> PartsMode {
         *self.parts_mode.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// The device.
+    pub fn gpu(&self) -> &GpuContext {
+        &self.gpu
+    }
+
+    /// Sets the most GPU memory the commitments may keep for constraint evaluation (see
+    /// [`PartStore::set_budget`]); `None`: no limit.
+    pub fn set_parts_budget(&self, bytes: Option<u64>) {
+        self.parts.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).set_budget(bytes);
+    }
+
+    /// The columns `columns` (each the values a tree holds and its committed domain's log size)
+    /// resident on the GPU with their stripes 0 and 1 (in [`PartsMode::Resident`]), in order;
+    /// `None` if one is not.
+    pub fn resident_columns(
+        &self,
+        columns: &[(&BaseColumn, u32)],
+        log_blowup: u32,
+    ) -> Option<Vec<crate::parts::ResidentColumn>> {
+        let mut parts = self.parts.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        columns
+            .iter()
+            .map(|(values, domain_log_size)| parts.resident(values, *domain_log_size, log_blowup))
+            .collect()
+    }
+
+    /// Reads `src` (from byte 0) back into `dst` through the committer's readback ring; `Err`
+    /// if the GPU failed (the ring is rebuilt by the next user).
+    pub fn read_back(&self, src: &wgpu::Buffer, dst: &mut [u8]) -> Result<RingTimes, String> {
+        let mut state = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let read = catch_unwind(AssertUnwindSafe(|| {
+            let reused = state.get_or_insert_with(|| Reused::new(&self.gpu));
+            reused.readback.take_times();
+            reused.readback.read(&self.gpu, vec![Readback { src, src_offset: 0, dst }]);
+            reused.readback.take_times()
+        }));
+        read.map_err(|panic| {
+            *state = None;
+            panic_message(&panic)
+        })
     }
 
     /// Drops whatever the commitments kept for constraint evaluation (e.g. at a proof's start, or

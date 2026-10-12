@@ -587,8 +587,18 @@ pub fn param_values(
     claimed_sum: QM31,
     trace_log_size: u32,
 ) -> HashMap<String, QM31> {
+    param_values_of(&eval.relation_values, claimed_sum, trace_log_size)
+}
+
+/// [`param_values`] from the relations' elements (`(name, z, alphas)`, e.g. a constraint
+/// fingerprint's).
+pub fn param_values_of(
+    relation_values: &[(String, QM31, Vec<QM31>)],
+    claimed_sum: QM31,
+    trace_log_size: u32,
+) -> HashMap<String, QM31> {
     let mut values = HashMap::new();
-    for (name, z, alphas) in &eval.relation_values {
+    for (name, z, alphas) in relation_values {
         values.insert(format!("{name}_z"), *z);
         for (k, alpha) in alphas.iter().enumerate() {
             values.insert(format!("{name}_alpha{k}"), *alpha);
