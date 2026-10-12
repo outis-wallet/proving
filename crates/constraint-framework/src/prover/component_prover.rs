@@ -138,7 +138,8 @@ fn trace_part<'a>(
         .unwrap_or_else(|_| panic!("a component's columns have the size of its trace domain"));
     let committed_domain = CanonicCoset::new(committed_log_size).circle_domain();
     let domain = part_domain(committed_domain, committed_log_size - trace_domain.log_size(), part);
-    let twiddles = SimdBackend::precompute_twiddles(domain.half_coset);
+    // The evaluation twiddles of the part: part 0 evaluates nothing (every column holds it).
+    let twiddles = (part > 0).then(|| SimdBackend::precompute_twiddles(domain.half_coset));
     // The interpolation twiddles of the first part, from which a column that holds only its first
     // stripe (see `CommitmentTreeProver::new_striped`) is interpolated again.
     let first_part = part_domain(committed_domain, committed_log_size - trace_domain.log_size(), 0);
@@ -157,11 +158,12 @@ fn trace_part<'a>(
             let values = column.values.to_cpu()[part * part_size..(part + 1) * part_size].to_vec();
             return Cow::Owned(CircleEvaluation::new(domain, values.into_iter().collect()));
         }
+        let twiddles = twiddles.as_ref().unwrap();
         let evaluation = match &poly.coeffs {
-            Some(coeffs) => coeffs.evaluate_with_twiddles(domain, &twiddles),
+            Some(coeffs) => coeffs.evaluate_with_twiddles(domain, twiddles),
             None => poly
                 .stripe_coefficients(stripe_twiddles.as_ref().unwrap())
-                .evaluate_with_twiddles(domain, &twiddles),
+                .evaluate_with_twiddles(domain, twiddles),
         };
         Cow::Owned(evaluation)
     };
