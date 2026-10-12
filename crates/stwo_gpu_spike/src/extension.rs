@@ -706,6 +706,17 @@ impl StripeExtension {
             label: Some("extension"),
             timestamp_writes: None,
         });
+        self.record(kernels, &mut pass, stripe);
+    }
+
+    /// Records the evaluation of stripe `stripe` of every column into `out` into `pass` (whose
+    /// pipeline and bind group it changes).
+    pub fn record(
+        &self,
+        kernels: &ExtensionKernels,
+        pass: &mut wgpu::ComputePass<'_>,
+        stripe: usize,
+    ) {
         let mut current = None;
         for dispatch in &self.dispatches {
             if current != Some(dispatch.in_place) {

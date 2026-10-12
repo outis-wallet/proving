@@ -8,15 +8,20 @@
 //! restricts the backends.
 //!
 //! - [`blake2s`]: Blake2s-256 in WGSL, as stwo hashes.
+//! - [`extension`]: the polynomial extension (circle FFT) of a stripe of a tree's columns.
+//! - [`commit`]: the striped commitment of a tree, extension and hashing stripe by stripe on the
+//!   GPU, equal to `CommitmentTreeProver::new_striped`'s.
 //! - [`merkle`]: the lifted Merkle tree of a commitment (leaves of a stripe's columns, its subtree,
 //!   the levels above the stripes), its input and output layouts, on the GPU.
 //! - [`shapes`]: the Cairo leg's trace shapes; [`reference`](mod@reference): stwo's SIMD results to
 //!   compare with.
-//! - `bench_merkle` (`src/bin`): the Merkle hashing of the Cairo base trace, GPU against SIMD.
+//! - `bench_merkle`, `bench_extension`, `bench_commit` (`src/bin`): the Merkle hashing, the
+//!   extension, and the whole striped commitment of the Cairo base trace, GPU against SIMD.
 
 use wgpu::util::DeviceExt;
 
 pub mod blake2s;
+pub mod commit;
 pub mod extension;
 pub mod merkle;
 pub mod reference;
@@ -49,7 +54,19 @@ impl GpuContext {
     }
 
     pub async fn with_limits_async(limits: Option<wgpu::Limits>) -> Self {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+        Self::create_async(limits, wgpu::Features::empty()).await
+    }
+
+    /// The adapter the environment picks, with its own limits, and those of the `optional`
+    /// features it has (e.g. `wgpu::Features::TIMESTAMP_QUERY`, for the benchmarks): see
+    /// `device.features()` for the ones it got.
+    pub fn with_optional_features(optional: wgpu::Features) -> Self {
+        pollster::block_on(Self::create_async(None, optional))
+    }
+
+    async fn create_async(limits: Option<wgpu::Limits>, optional: wgpu::Features) -> Self {
+        let instance =
+            wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
         let adapter = wgpu::util::initialize_adapter_from_env_or_default(&instance, None)
             .await
             .expect("no GPU adapter");
@@ -57,6 +74,7 @@ impl GpuContext {
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("stwo-gpu-spike"),
+                required_features: optional & adapter.features(),
                 required_limits: limits.unwrap_or_else(|| adapter.limits()),
                 ..Default::default()
             })
@@ -103,7 +121,9 @@ impl GpuContext {
         let slice = staging.slice(..);
         slice.map_async(wgpu::MapMode::Read, |result| result.expect("map"));
         self.device.poll(wgpu::PollType::wait_indefinitely()).expect("poll");
-        let words = bytemuck::cast_slice::<u8, u32>(&slice.get_mapped_range().expect("mapped range")[..]).to_vec();
+        let words =
+            bytemuck::cast_slice::<u8, u32>(&slice.get_mapped_range().expect("mapped range")[..])
+                .to_vec();
         staging.unmap();
         words
     }
@@ -158,7 +178,12 @@ impl GpuContext {
 
     /// Runs `pipeline` once over `workgroups` with `buffers` bound in order to group 0, and
     /// waits for it.
-    pub fn run(&self, pipeline: &wgpu::ComputePipeline, buffers: &[&wgpu::Buffer], workgroups: (u32, u32, u32)) {
+    pub fn run(
+        &self,
+        pipeline: &wgpu::ComputePipeline,
+        buffers: &[&wgpu::Buffer],
+        workgroups: (u32, u32, u32),
+    ) {
         let layout = pipeline.get_bind_group_layout(0);
         let entries = buffers
             .iter()

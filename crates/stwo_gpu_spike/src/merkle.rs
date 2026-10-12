@@ -178,6 +178,26 @@ impl TreeLayout {
         self.offsets[level as usize]
     }
 
+    /// Every level of the tree, from the words of its buffer: the hashes of the stored levels, an
+    /// empty vector for the others (as stwo's layers, leaves first).
+    pub fn levels(&self, words: &[u32]) -> Vec<Vec<Blake2sHash>> {
+        assert!(words.len() as u64 >= self.total_words);
+        (0..=self.height())
+            .map(|level| match self.level_offset(level) {
+                None => vec![],
+                Some(offset) => {
+                    let start = offset as usize;
+                    words[start..start + 8 * self.level_len(level)]
+                        .chunks_exact(8)
+                        .map(|hash| {
+                            Blake2sHash(bytemuck::cast_slice::<u32, u8>(hash).try_into().unwrap())
+                        })
+                        .collect()
+                }
+            })
+            .collect()
+    }
+
     /// The word offset of stripe `stripe`'s nodes in `level` (at most the stripe's height).
     fn stripe_level_offset(&self, stripe: u32, level: u32) -> u64 {
         assert!(level <= self.stripe_height);
@@ -592,6 +612,13 @@ pub struct StateBuffers {
     pub words: u64,
 }
 
+impl StateBuffers {
+    /// The bytes of both buffers.
+    pub fn bytes(&self) -> u64 {
+        self.buffers.iter().map(wgpu::Buffer::size).sum()
+    }
+}
+
 /// A recorded sequence of dispatches, with their parameters and bindings, ready to be recorded
 /// into a compute pass any number of times.
 pub struct Plan {
@@ -912,21 +939,7 @@ impl GpuMerkle {
         tree: &wgpu::Buffer,
         layout: &TreeLayout,
     ) -> Vec<Vec<Blake2sHash>> {
-        let words = gpu.read(tree, layout.total_words as usize);
-        (0..=layout.height())
-            .map(|level| match layout.level_offset(level) {
-                None => vec![],
-                Some(offset) => {
-                    let start = offset as usize;
-                    words[start..start + 8 * layout.level_len(level)]
-                        .chunks_exact(8)
-                        .map(|hash| {
-                            Blake2sHash(bytemuck::cast_slice::<u32, u8>(hash).try_into().unwrap())
-                        })
-                        .collect()
-                }
-            })
-            .collect()
+        layout.levels(&gpu.read(tree, layout.total_words as usize))
     }
 
     /// One uniform buffer holding every dispatch's parameters, at aligned offsets.
