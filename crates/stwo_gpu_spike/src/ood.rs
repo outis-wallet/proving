@@ -128,7 +128,20 @@ pub fn eval_jobs(
     kernels: &OodKernels,
     jobs: &[OodJob<'_>],
 ) -> Vec<Vec<SecureField>> {
+    eval_jobs_timed(gpu, kernels, jobs).0
+}
+
+/// [`eval_jobs`], with the time of its phases.
+pub fn eval_jobs_timed(
+    gpu: &GpuContext,
+    kernels: &OodKernels,
+    jobs: &[OodJob<'_>],
+) -> (Vec<Vec<SecureField>>, crate::EvalTimes) {
+    let mut times = crate::EvalTimes::default();
+    let started = std::time::Instant::now();
     let plans = jobs.iter().map(|job| (!job.columns.is_empty()).then(|| plan(job))).collect_vec();
+    times.plan = started.elapsed().as_secs_f64();
+    let mark = std::time::Instant::now();
     let init = |label: &str, words: &[u32], usage: wgpu::BufferUsages| {
         gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some(label),
@@ -148,7 +161,7 @@ pub fn eval_jobs(
         })
         .collect_vec();
     if out_words == 0 {
-        return jobs.iter().map(|_| vec![]).collect();
+        return (jobs.iter().map(|_| vec![]).collect(), times);
     }
     let out = gpu.storage("ood out", out_words);
     let mut keep = vec![];
@@ -242,6 +255,8 @@ pub fn eval_jobs(
             pass.dispatch_workgroups(dispatch.reduce.0, dispatch.reduce.1, 1);
         }
     }
+    times.setup = mark.elapsed().as_secs_f64();
+    let mark = std::time::Instant::now();
     gpu.queue.submit([encoder.finish()]);
     let sums = gpu.read(&out, out_words);
     for buffer in keep {
@@ -249,8 +264,11 @@ pub fn eval_jobs(
     }
     out.destroy();
 
+    times.gpu = mark.elapsed().as_secs_f64();
+    let mark = std::time::Instant::now();
     // Every column: the point's leading mappings' products against its 16 sums.
-    jobs.iter()
+    let values = jobs
+        .iter()
         .zip(&plans)
         .zip(&layout)
         .map(|((job, plan), &at)| {
@@ -274,7 +292,9 @@ pub fn eval_jobs(
                 })
                 .collect()
         })
-        .collect()
+        .collect();
+    times.finish = mark.elapsed().as_secs_f64();
+    (values, times)
 }
 
 /// The values at `point` of the columns of `2^log_size` coefficients at the word offsets

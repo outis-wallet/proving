@@ -22,6 +22,27 @@
 
 use wgpu::util::DeviceExt;
 
+/// The time (wall clock, seconds) of the phases of a batch of evaluations on the GPU from resident
+/// coefficients ([`decommit::eval_jobs_timed`], [`ood::eval_jobs_timed`]): the plan (mappings and
+/// weight tables), the setup (buffers and commands), the GPU (submission to readback, the buffers'
+/// release included), the finish (the last products, on the CPU).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct EvalTimes {
+    pub plan: f64,
+    pub setup: f64,
+    pub gpu: f64,
+    pub finish: f64,
+}
+
+impl std::ops::AddAssign for EvalTimes {
+    fn add_assign(&mut self, other: Self) {
+        self.plan += other.plan;
+        self.setup += other.setup;
+        self.gpu += other.gpu;
+        self.finish += other.finish;
+    }
+}
+
 pub mod blake2s;
 pub mod commit;
 pub mod committer;

@@ -108,8 +108,9 @@ pub struct OodStats {
     pub served: u64,
     pub not_resident: u64,
     pub failed: u64,
-    /// The time in all (wall clock).
+    /// The time in all (wall clock), and the GPU evaluations' phases.
     pub seconds: f64,
+    pub times: crate::EvalTimes,
 }
 
 /// The decommitments served on the GPU (see [`GpuCommitter::decommit_values`]), since the stats
@@ -125,6 +126,8 @@ pub struct DecommitStats {
     pub columns: u64,
     pub positions: u64,
     pub seconds: f64,
+    /// The GPU evaluations' phases.
+    pub times: crate::EvalTimes,
 }
 
 /// A transient buffer's size for `bytes`: rounded up to 16 MiB (so that it serves the next
@@ -905,7 +908,10 @@ impl GpuCommitter {
                             point: *point,
                         })
                         .collect_vec();
-                    crate::ood::eval_jobs(&self.gpu, kernels, &ood_jobs)
+                    let (values, times) =
+                        crate::ood::eval_jobs_timed(&self.gpu, kernels, &ood_jobs);
+                    self.ood_stats.lock().unwrap_or_else(|p| p.into_inner()).times += times;
+                    values
                 }))
                 .ok()
             })
@@ -1000,7 +1006,9 @@ impl GpuCommitter {
                             }
                         })
                         .collect_vec();
-                    let evaluated = crate::decommit::eval_jobs(&self.gpu, kernels, &fold_jobs);
+                    let (evaluated, times) =
+                        crate::decommit::eval_jobs_timed(&self.gpu, kernels, &fold_jobs);
+                    self.decommit_stats.lock().unwrap_or_else(|p| p.into_inner()).times += times;
                     for ((_, members), job_values) in jobs.iter().zip(evaluated) {
                         for (&(c, _), column_values) in members.iter().zip(job_values) {
                             values[c] = column_values;

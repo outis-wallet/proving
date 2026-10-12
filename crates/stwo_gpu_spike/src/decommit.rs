@@ -137,10 +137,23 @@ pub fn eval_jobs(
     kernels: &FoldKernels,
     jobs: &[FoldJob<'_>],
 ) -> Vec<Vec<Vec<BaseField>>> {
+    eval_jobs_timed(gpu, kernels, jobs).0
+}
+
+/// [`eval_jobs`], with the time of its phases.
+pub fn eval_jobs_timed(
+    gpu: &GpuContext,
+    kernels: &FoldKernels,
+    jobs: &[FoldJob<'_>],
+) -> (Vec<Vec<Vec<BaseField>>>, crate::EvalTimes) {
+    let mut times = crate::EvalTimes::default();
+    let started = std::time::Instant::now();
     let plans = jobs
         .iter()
         .map(|job| (!job.indices.is_empty() && !job.columns.is_empty()).then(|| plan(job)))
         .collect_vec();
+    times.plan = started.elapsed().as_secs_f64();
+    let mark = std::time::Instant::now();
     // Every dispatch's buffers: the tables, the columns, the partial sums, the uniform; the sums
     // of all of them in one output buffer.
     let init = |label: &str, words: &[u32], usage: wgpu::BufferUsages| {
@@ -182,7 +195,8 @@ pub fn eval_jobs(
         out_words = out_words.next_multiple_of(64);
     }
     if out_words == 0 {
-        return jobs.iter().map(|job| job.columns.iter().map(|_| vec![]).collect()).collect();
+        let empty = jobs.iter().map(|job| job.columns.iter().map(|_| vec![]).collect()).collect();
+        return (empty, times);
     }
     let out = gpu.storage("fold out", out_words);
     let mut keep = vec![];
@@ -273,6 +287,8 @@ pub fn eval_jobs(
             let _ = dispatch.out_at;
         }
     }
+    times.setup = mark.elapsed().as_secs_f64();
+    let mark = std::time::Instant::now();
     gpu.queue.submit([encoder.finish()]);
     let sums = gpu.read(&out, out_words);
     for buffer in keep {
@@ -280,8 +296,11 @@ pub fn eval_jobs(
     }
     out.destroy();
 
+    times.gpu = mark.elapsed().as_secs_f64();
+    let mark = std::time::Instant::now();
     // Every point: its leading mappings' products against its group's sums.
-    jobs.iter()
+    let values = jobs
+        .iter()
         .zip(&plans)
         .zip(&layout)
         .map(|((job, plan), at)| {
@@ -310,7 +329,9 @@ pub fn eval_jobs(
                 })
                 .collect()
         })
-        .collect()
+        .collect();
+    times.finish = mark.elapsed().as_secs_f64();
+    (values, times)
 }
 
 /// The values at the points of `domain` at the bit-reversed positions `indices` of the columns of
