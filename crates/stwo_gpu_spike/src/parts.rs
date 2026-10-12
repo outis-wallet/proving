@@ -97,7 +97,11 @@ enum Kept {
         resident: Option<u64>,
     },
     /// The column's coefficients, at byte `offset` of `device[set]`'s buffer `buffer`.
-    Coefficients { set: usize, buffer: usize, offset: u64 },
+    Coefficients {
+        set: usize,
+        buffer: usize,
+        offset: u64,
+    },
 }
 
 struct Entry {

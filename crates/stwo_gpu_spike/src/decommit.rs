@@ -132,7 +132,11 @@ fn plan(job: &FoldJob<'_>) -> Plan {
 /// The values of every job's columns at its points (per job, per column): what
 /// `SimdBackend::eval_at_domain_indices` returns for each column. All the jobs in one
 /// submission and one readback.
-pub fn eval_jobs(gpu: &GpuContext, kernels: &FoldKernels, jobs: &[FoldJob<'_>]) -> Vec<Vec<Vec<BaseField>>> {
+pub fn eval_jobs(
+    gpu: &GpuContext,
+    kernels: &FoldKernels,
+    jobs: &[FoldJob<'_>],
+) -> Vec<Vec<Vec<BaseField>>> {
     let plans = jobs
         .iter()
         .map(|job| (!job.indices.is_empty() && !job.columns.is_empty()).then(|| plan(job)))
@@ -164,7 +168,8 @@ pub fn eval_jobs(gpu: &GpuContext, kernels: &FoldKernels, jobs: &[FoldJob<'_>]) 
             continue;
         };
         let per_column_partial = (plan.n_chunks * plan.n_groups * 16 * 4) as u64;
-        let batch = ((MAX_PARTIAL_BYTES / per_column_partial).max(1) as usize).min(job.columns.len());
+        let batch =
+            ((MAX_PARTIAL_BYTES / per_column_partial).max(1) as usize).min(job.columns.len());
         layout.push(Some(out_words));
         for first in (0..job.columns.len()).step_by(batch) {
             let n = batch.min(job.columns.len() - first);
@@ -209,7 +214,8 @@ pub fn eval_jobs(gpu: &GpuContext, kernels: &FoldKernels, jobs: &[FoldJob<'_>]) 
             offset: (out_at * 4) as u64,
             size: wgpu::BufferSize::new((n_columns * plan.n_groups * 16 * 4) as u64),
         };
-        let entries = |pipeline: &wgpu::ComputePipeline, list: Vec<(u32, wgpu::BindingResource<'_>)>| {
+        let entries = |pipeline: &wgpu::ComputePipeline,
+                       list: Vec<(u32, wgpu::BindingResource<'_>)>| {
             let entries = list
                 .into_iter()
                 .map(|(binding, resource)| wgpu::BindGroupEntry { binding, resource })
@@ -278,7 +284,8 @@ pub fn eval_jobs(gpu: &GpuContext, kernels: &FoldKernels, jobs: &[FoldJob<'_>]) 
             let (Some(plan), Some(at)) = (plan, at) else {
                 return job.columns.iter().map(|_| vec![]).collect();
             };
-            let leading = plan.mappings.iter().map(|m| tensor_products(&m[..LOG_GROUP])).collect_vec();
+            let leading =
+                plan.mappings.iter().map(|m| tensor_products(&m[..LOG_GROUP])).collect_vec();
             (0..job.columns.len())
                 .map(|c| {
                     let base = at + c * plan.n_groups * 16;
@@ -290,7 +297,9 @@ pub fn eval_jobs(gpu: &GpuContext, kernels: &FoldKernels, jobs: &[FoldJob<'_>]) 
                             products
                                 .iter()
                                 .zip(sums)
-                                .map(|(&product, &sum)| product * BaseField::from_u32_unchecked(sum))
+                                .map(|(&product, &sum)| {
+                                    product * BaseField::from_u32_unchecked(sum)
+                                })
                                 .sum()
                         })
                         .collect()

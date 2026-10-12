@@ -1055,7 +1055,13 @@ impl DeviceStripes {
     fn encode_coefficient_copies(&self, encoder: &mut wgpu::CommandEncoder, places: &[Place<'_>]) {
         let mut run: Option<(&wgpu::Buffer, u64, usize, u64, u64)> = None;
         let flush = |encoder: &mut wgpu::CommandEncoder,
-                     (src, src_offset, dst, dst_offset, bytes): (&wgpu::Buffer, u64, usize, u64, u64)| {
+                     (src, src_offset, dst, dst_offset, bytes): (
+            &wgpu::Buffer,
+            u64,
+            usize,
+            u64,
+            u64,
+        )| {
             encoder.copy_buffer_to_buffer(src, src_offset, &self.buffers[dst], dst_offset, bytes);
         };
         for &(i, src, src_offset) in places {

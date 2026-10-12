@@ -792,11 +792,17 @@ impl GpuComposer {
                             let (coefficients, evaluations) = match layout.buffer_words.as_slice() {
                                 [words] => (
                                     GpuColumns::with_buffers(
-                                        vec![self.committer.transient(TRANSIENT_COEFFICIENTS, words * 4)],
+                                        vec![
+                                            self.committer
+                                                .transient(TRANSIENT_COEFFICIENTS, words * 4),
+                                        ],
                                         layout.clone(),
                                     ),
                                     GpuColumns::with_buffers(
-                                        vec![self.committer.transient(TRANSIENT_EVALUATIONS, words * 4)],
+                                        vec![
+                                            self.committer
+                                                .transient(TRANSIENT_EVALUATIONS, words * 4),
+                                        ],
                                         layout.clone(),
                                     ),
                                 ),
@@ -805,7 +811,9 @@ impl GpuComposer {
                                     GpuColumns::alloc(gpu, layout.clone()),
                                 ),
                             };
-                            for (q, (_, buffer, byte_offset)) in from_coefficients.iter().enumerate() {
+                            for (q, (_, buffer, byte_offset)) in
+                                from_coefficients.iter().enumerate()
+                            {
                                 let slot = layout.slots[q];
                                 encoder.copy_buffer_to_buffer(
                                     buffer,
@@ -915,7 +923,10 @@ impl GpuComposer {
                     Err(panic) => panic_message(&panic),
                     Ok(Ok(_)) => unreachable!(),
                 };
-                eprintln!("constraint eval {}: the GPU failed: {message}", short_name(job.component));
+                eprintln!(
+                    "constraint eval {}: the GPU failed: {message}",
+                    short_name(job.component)
+                );
                 run.out = None;
                 run.small.clear();
                 drop(run);

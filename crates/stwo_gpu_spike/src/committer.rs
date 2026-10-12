@@ -446,9 +446,7 @@ impl GpuCommitter {
             // sources.
             let max_bytes = match content {
                 StripeContent::Stripe1 => limits.max_buffer_size.min(1 << 30),
-                _ => {
-                    limits.max_buffer_size.min(limits.max_storage_buffer_binding_size) / 256 * 256
-                }
+                _ => limits.max_buffer_size.min(limits.max_storage_buffer_binding_size) / 256 * 256,
             };
             let bytes = DeviceStripes::planned_bytes(log_sizes, log_blowup, max_bytes, content);
             // The process's share of the device, the driver's budget, the cap: the GPU may drive
@@ -463,11 +461,7 @@ impl GpuCommitter {
             match allowed {
                 Ok(()) => {
                     return Some(DeviceStripes::new(
-                        &self.gpu,
-                        log_sizes,
-                        log_blowup,
-                        max_bytes,
-                        content,
+                        &self.gpu, log_sizes, log_blowup, max_bytes, content,
                     ));
                 }
                 Err(reason) => parts.refused(reason),
@@ -834,11 +828,7 @@ impl GpuCommitter {
                 }
                 let log_size = column.values.len().ilog2();
                 let domain_log_size = column.domain.log_size();
-                match parts.placement(
-                    &column.values,
-                    domain_log_size,
-                    domain_log_size - log_size,
-                ) {
+                match parts.placement(&column.values, domain_log_size, domain_log_size - log_size) {
                     Some(Placement::Coefficients { buffer, byte_offset }) => {
                         let key = (buffer, log_size, domain_log_size, wanted.clone());
                         let offset = (byte_offset / 4) as u32;
@@ -858,7 +848,8 @@ impl GpuCommitter {
         let result = resident
             .then(|| {
                 catch_unwind(AssertUnwindSafe(|| {
-                    let mut fold = self.fold.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                    let mut fold =
+                        self.fold.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
                     let kernels =
                         fold.get_or_insert_with(|| crate::decommit::FoldKernels::new(&self.gpu));
                     let mut values: Vec<Vec<BaseField>> = columns.iter().map(|_| vec![]).collect();
@@ -918,8 +909,11 @@ impl GpuCommitter {
         requests
             .iter()
             .map(|&(slot, bytes)| {
-                let held = transient.get(slot).and_then(Option::as_ref).map_or(0, wgpu::Buffer::size);
-                transient_size(bytes, &self.gpu).saturating_sub(held).min(transient_size(bytes, &self.gpu))
+                let held =
+                    transient.get(slot).and_then(Option::as_ref).map_or(0, wgpu::Buffer::size);
+                transient_size(bytes, &self.gpu)
+                    .saturating_sub(held)
+                    .min(transient_size(bytes, &self.gpu))
             })
             .sum()
     }
@@ -983,10 +977,7 @@ impl GpuCommitter {
         let mut state = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let reused = state.as_mut()?;
         let log_sizes = [log_size].into_iter().collect();
-        reused
-            .twiddles
-            .try_get_with(&self.gpu, &log_sizes, log_blowup, root_coset, || Err(()))
-            .ok()
+        reused.twiddles.try_get_with(&self.gpu, &log_sizes, log_blowup, root_coset, || Err(())).ok()
     }
 
     /// Frees the device buffers and the twiddles held between commitments (the next commitment

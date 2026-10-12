@@ -66,6 +66,9 @@ fn folds_are_stwos_evaluations() {
             eval_at_domain_indices(&gpu, &kernels, &buffer, &offsets, log_size, domain, &indices);
         assert_ne!(changed[0], got[0], "log size {log_size}: a changed coefficient unnoticed");
         assert_eq!(changed[1], got[1]);
-        eprintln!("log size {log_size}: {} positions x {n_columns} columns identical", indices.len());
+        eprintln!(
+            "log size {log_size}: {} positions x {n_columns} columns identical",
+            indices.len()
+        );
     }
 }
