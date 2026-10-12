@@ -1,3 +1,4 @@
+use blake2::{Blake2s256, Digest};
 use stwo::core::fields::qm31::QM31;
 use stwo::core::vcs::blake2_hash::Blake2sHash;
 use stwo_cairo_common::preprocessed_columns::blake::BLAKE_SIGMA;
@@ -120,6 +121,32 @@ const G_STATE_INDICES: [(usize, usize, usize, usize); 8] = [
     (2, 7, 8, 13),
     (3, 4, 9, 14),
 ];
+
+/// Computes the Blake2s hash of the first `n_bytes` bytes of `input` outside the circuit.
+///
+/// Each QM31 is serialized as its four M31 coordinates, as little-endian u32 words. The result
+/// holds the eight raw output words.
+pub fn blake_qm31(input: &[QM31], n_bytes: usize) -> HashValue<QM31> {
+    const BYTES_PER_QM31: usize = 16; // 4 coords per QM31, 4 bytes per M31.
+
+    // Sanity check: check the number of bytes is consistent with the number of [QM31] values.
+    assert_eq!(input.len(), n_bytes.div_ceil(BYTES_PER_QM31));
+
+    // Serialize each QM31's four M31 coordinates as little-endian u32 words.
+    let mut input_bytes: Vec<u8> = Vec::with_capacity(BYTES_PER_QM31 * input.len());
+    for x in input {
+        for coord in x.to_m31_array() {
+            input_bytes.extend_from_slice(&coord.0.to_le_bytes());
+        }
+    }
+
+    let mut hasher = Blake2s256::new();
+    hasher.update(&input_bytes[0..n_bytes]);
+    let hash: [u8; 32] = hasher.finalize().into();
+
+    let words: [u32; BLAKE2S_DIGEST_N_WORDS] = le_u32s_from_bytes(hash);
+    HashValue::from(words)
+}
 
 /// Same as [`blake2s_u32s`], but the input is given as QM31s.
 ///

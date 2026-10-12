@@ -81,7 +81,7 @@ impl<Value: IValue> Constant<Value> for M31Wrapper<QM31> {
     type Target = M31Wrapper<Var>;
 
     fn constant(&self, context: &mut Context<Value>) -> Self::Target {
-        M31Wrapper::new_unsafe(context.constant(self.0))
+        M31Wrapper(context.constant(self.0))
     }
 }
 
@@ -106,6 +106,13 @@ impl<T> U16Wrapper<T> {
 
     pub fn new_unsafe(var: T) -> Self {
         Self(var)
+    }
+}
+
+impl<Value: IValue> U16Wrapper<Value> {
+    /// Embeds a `u16` into a wrapped value, as `(value, 0, 0, 0)`.
+    pub fn from_u16(value: u16) -> Self {
+        Self(Value::from_qm31(qm31_from_u32s(value.into(), 0, 0, 0)))
     }
 }
 
@@ -203,10 +210,8 @@ impl<Value: IValue> Guess<Value> for U32Wrapper<Value> {
         // that each is range-constrained to `[0, 2^16)` during finalization, then recombine them as
         // `low + high * i` to rebuild the packed representation.
         let value = Value::unpack_u32(self.get());
-        let low = U16Wrapper::new_unsafe(Value::from_qm31(qm31_from_u32s(value & 0xFFFF, 0, 0, 0)))
-            .guess(context);
-        let high = U16Wrapper::new_unsafe(Value::from_qm31(qm31_from_u32s(value >> 16, 0, 0, 0)))
-            .guess(context);
+        let low = U16Wrapper::<Value>::from_u16(value as u16).guess(context);
+        let high = U16Wrapper::<Value>::from_u16((value >> 16) as u16).guess(context);
         let i = context.constant(qm31_from_u32s(0, 1, 0, 0));
         U32Wrapper(eval!(context, (*low.get()) + ((*high.get()) * (i))))
     }

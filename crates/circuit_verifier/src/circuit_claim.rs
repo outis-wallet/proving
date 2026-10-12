@@ -3,6 +3,7 @@ use std::iter::repeat_n;
 use circuits::blake::BLAKE2S_DIGEST_N_WORDS;
 use circuits::context::{OUTPUT_START, U_VALUE, U_VAR_IDX};
 use circuits::ivalue::{IValue, NoValue};
+use circuits::utils::le_u32s_from_bytes;
 use itertools::Itertools;
 use num_traits::Zero;
 use stwo::core::channel::Channel;
@@ -35,10 +36,7 @@ impl CircuitClaim {
 
 /// Mixes the circuit hash into the channel, committing the transcript to the circuit's identity.
 pub fn mix_circuit_hash(channel: &mut impl Channel, circuit_hash: &Blake2sHash) {
-    let circuit_hash_words: [u32; BLAKE2S_DIGEST_N_WORDS] = std::array::from_fn(|i| {
-        u32::from_le_bytes(circuit_hash.0[i * 4..i * 4 + 4].try_into().unwrap())
-    });
-
+    let circuit_hash_words: [u32; BLAKE2S_DIGEST_N_WORDS] = le_u32s_from_bytes(circuit_hash.0);
     channel.mix_u32s(&circuit_hash_words);
 }
 
