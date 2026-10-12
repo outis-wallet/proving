@@ -212,6 +212,11 @@ pub mod commit {
     /// The time the GPU was busy with any of them, and from the first to the last.
     pub const ST_GPU_BUSY: usize = 24;
     pub const ST_GPU_SPAN: usize = 25;
+    /// Keep-warm when the commitment began (the GPU worker's `keep_warm_ms` option): 0 off, 1
+    /// warming, 2 on but its window had ended (the commitment started on an idle GPU).
+    pub const ST_WARM: usize = 26;
+    /// Keep-warm's dispatches since the previous commitment ended (or the proof attached).
+    pub const ST_WARM_DISPATCHES: usize = 27;
 }
 
 /// Why a call failed.

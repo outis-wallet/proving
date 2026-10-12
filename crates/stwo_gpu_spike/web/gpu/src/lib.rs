@@ -22,6 +22,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use js_sys::{Float64Array, Object, Promise, Reflect, SharedArrayBuffer, Uint8Array};
 
 mod commit;
+mod warm;
 use stwo_gpu_bridge as bridge;
 use stwo_gpu_spike::{GpuContext, M31_WGSL};
 use wasm_bindgen::prelude::*;
@@ -156,6 +157,8 @@ struct Inner {
     /// Elements per dispatch: what one binding and one dimension of workgroups allow.
     chunk_words: u64,
     io: Cell<Io>,
+    /// Keeping the GPU's clocks up between commitments (an option, off by default).
+    warm: warm::Warm,
 }
 
 /// How data moves between the prover's memory and the GPU: the browsers' WebGPU make a
@@ -213,6 +216,7 @@ impl Gpu {
         // Compiled now, so a proof's first commitment doesn't wait for it: the browser compiles
         // the pipelines in order with the queue's work, so the wait below includes them.
         let committer = commit::Committer::new(&gpu);
+        let warm = warm::Warm::new(&gpu);
         queue_done(&gpu.queue).await;
         Ok(Gpu {
             inner: Rc::new(Inner {
@@ -222,6 +226,7 @@ impl Gpu {
                 pool: RefCell::default(),
                 chunk_words,
                 io: Cell::default(),
+                warm,
             }),
         })
     }
@@ -235,7 +240,7 @@ impl Gpu {
              max_buffer_size\":{},\"max_storage_buffer_binding_size\":{},\"\
              max_compute_workgroups_per_dimension\":{},\"max_compute_invocations_per_workgroup\":\
              {},\"chunk_words\":{},\"upload_chunk\":{},\"upload_window\":{},\"readback_chunk\":{},\
-             \"commit\":{}}}",
+             \"commit\":{},\"keep_warm_ms\":{}}}",
             info.name,
             info.vendor,
             info.device,
@@ -250,6 +255,7 @@ impl Gpu {
             self.inner.io.get().upload_window,
             self.inner.io.get().readback_chunk,
             self.inner.committer.options_json(),
+            self.inner.warm.window_ms(),
         )
     }
 
@@ -318,6 +324,9 @@ impl Gpu {
         options.keep = flag("keep").unwrap_or(options.keep);
         options.serial = flag("serial").unwrap_or(options.serial);
         options.timestamps = flag("timestamps").unwrap_or(options.timestamps);
+        // Keep-warm: the window in ms after each commitment (and from a proof's attach); absent
+        // or 0, off (and off now, if it was warming).
+        self.inner.warm.set_window(number("keep_warm_ms").unwrap_or(0.0));
         committer.configure(options);
         Ok(())
     }
@@ -327,6 +336,31 @@ impl Gpu {
     /// again.
     pub fn release_commit(&self) {
         self.inner.committer.release();
+    }
+
+    /// A proof attached: keep-warm (if on) warms for its window from now.
+    pub fn warm_attach(&self) {
+        warm::attach(&self.inner);
+    }
+
+    /// The page says the proof starts proving (its first commitment is coming): keep-warm (if
+    /// on) warms for its window from now.
+    pub fn warm_proof_starts(&self) {
+        warm::proof_starts(&self.inner);
+    }
+
+    /// The proof detached: keep-warm stops now (after its dispatch in flight, if any).
+    pub fn warm_detach(&self) {
+        warm::detach(&self.inner);
+    }
+
+    /// Keep-warm's window (ms; 0: off) and its dispatches so far, as JSON.
+    pub fn keep_warm(&self) -> String {
+        format!(
+            "{{\"window_ms\":{},\"dispatches\":{}}}",
+            self.inner.warm.window_ms(),
+            self.inner.warm.dispatches()
+        )
     }
 
     /// Whether the device was lost.
@@ -339,7 +373,16 @@ impl Gpu {
     pub fn execute(&self, op: u32, args: Vec<u32>, memory: SharedArrayBuffer) -> Promise {
         let inner = self.inner.clone();
         wasm_bindgen_futures::future_to_promise(async move {
-            match inner.execute(op, &args, &memory).await {
+            // Keep-warm pauses during a commitment, and warms for its window after it.
+            let commit = op == bridge::op::COMMIT_STRIPED;
+            if commit {
+                warm::begin(&inner);
+            }
+            let result = inner.execute(op, &args, &memory).await;
+            if commit {
+                warm::end(&inner);
+            }
+            match result {
                 Ok(times) => Ok(Float64Array::from(&times[..]).into()),
                 Err(message) => Err(JsValue::from_str(&message)),
             }

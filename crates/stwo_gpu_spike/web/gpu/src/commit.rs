@@ -503,6 +503,9 @@ pub async fn commit_striped(inner: &Inner, args: &[u32], memory: &SharedArrayBuf
     let tree_layout = desc.check_shapes(&inner.gpu)?;
     let mut stats = Stats::default();
     stats.set(d::ST_SERIAL, options.serial as u32 as f64);
+    let (warm, warm_dispatches) = inner.warm.last();
+    stats.set(d::ST_WARM, warm as u32 as f64);
+    stats.set(d::ST_WARM_DISPATCHES, warm_dispatches as f64);
 
     // Taken for the job (jobs run one at a time), put back after it.
     let mut kept = committer.kept.take();

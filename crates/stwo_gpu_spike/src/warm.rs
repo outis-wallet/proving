@@ -19,9 +19,81 @@
 //! committer also warms for a window from its creation (a prover's process makes its committer,
 //! then proves: in a proof of the Outis prover, the first commitment started 0.7 s after it).
 //!
-//! Natively only: a thread with the device's handles. In wasm it does nothing.
+//! Natively only: a thread with the device's handles. In wasm it does nothing; a browser's GPU
+//! worker (`web/gpu`) runs the same kernel ([`SpinKernel`]) from its own event loop, as an option.
 
 use std::time::Duration;
+
+use crate::GpuContext;
+
+/// The loop of a dispatch: about 3 ms on the RTX 3080 at full clocks (`bench_idle`), 10-25 ms at
+/// its lowest. (The same kernel compiled by a browser runs much faster: see `web/gpu`'s
+/// `warm.rs`, which loops longer.)
+pub const SPIN_ITERATIONS: u32 = 1 << 16;
+
+/// The keep-warm kernel: one workgroup of 64 threads, each in a loop of `ITERATIONS` steps of a
+/// linear congruential generator, its result stored (so that the loop isn't optimized away).
+pub const SPIN_WGSL: &str = r#"
+@group(0) @binding(0) var<storage, read_write> sink: array<u32, 64>;
+
+@compute @workgroup_size(64)
+fn main(@builtin(local_invocation_index) i: u32) {
+    var x = i;
+    for (var k = 0u; k < ITERATIONSu; k++) {
+        x = x * 1664525u + 1013904223u;
+    }
+    sink[i] = x;
+}
+"#;
+
+/// The keep-warm kernel on a device: its pipeline, its sink buffer and their bind group.
+pub struct SpinKernel {
+    pipeline: wgpu::ComputePipeline,
+    bind_group: wgpu::BindGroup,
+    sink: wgpu::Buffer,
+}
+
+impl SpinKernel {
+    /// [`SPIN_WGSL`] of `iterations` ([`SPIN_ITERATIONS`] natively), compiled (checked, as every
+    /// kernel here).
+    pub fn new(gpu: &GpuContext, iterations: u32) -> Self {
+        let source = SPIN_WGSL.replace("ITERATIONS", &iterations.to_string());
+        let pipeline = gpu.pipeline("keep warm", &source, "main");
+        let sink = gpu.storage("keep warm", 64);
+        let bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("keep warm"),
+            layout: &pipeline.get_bind_group_layout(0),
+            entries: &[wgpu::BindGroupEntry { binding: 0, resource: sink.as_entire_binding() }],
+        });
+        Self { pipeline, bind_group, sink }
+    }
+
+    /// Records one dispatch (one workgroup) into `encoder`.
+    pub fn record(&self, encoder: &mut wgpu::CommandEncoder) {
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("keep warm"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, &self.bind_group, &[]);
+        pass.dispatch_workgroups(1, 1, 1);
+    }
+
+    /// Frees its buffer now (a browser would otherwise hold it until its JS object is collected).
+    pub fn destroy(&self) {
+        self.sink.destroy();
+    }
+
+    /// The buffer each dispatch writes: thread `i`'s [`spin_reference`] (for a test).
+    pub fn sink(&self) -> &wgpu::Buffer {
+        &self.sink
+    }
+}
+
+/// What thread `i` of the kernel stores after `iterations` steps.
+pub fn spin_reference(i: u32, iterations: u32) -> u32 {
+    (0..iterations).fold(i, |x, _| x.wrapping_mul(1664525).wrapping_add(1013904223))
+}
 
 /// The window after each commitment during which [`KeepWarm`] keeps the GPU's clocks up, unless
 /// the environment's `STWO_GPU_KEEP_WARM_MS` sets another (0: never).
@@ -47,26 +119,11 @@ mod native {
     use std::thread::JoinHandle;
     use std::time::{Duration, Instant};
 
+    use super::SpinKernel;
     use crate::GpuContext;
 
-    /// The loop of a dispatch: about 3 ms on the RTX 3080 at full clocks (`bench_idle`), 10-25
-    /// ms at its lowest.
-    const SPIN_ITERATIONS: u32 = 1 << 16;
     /// The pause between two dispatches.
     const GAP: Duration = Duration::from_millis(1);
-
-    const SPIN_WGSL: &str = r#"
-@group(0) @binding(0) var<storage, read_write> sink: array<u32, 64>;
-
-@compute @workgroup_size(64)
-fn main(@builtin(local_invocation_index) i: u32) {
-    var x = i;
-    for (var k = 0u; k < ITERATIONSu; k++) {
-        x = x * 1664525u + 1013904223u;
-    }
-    sink[i] = x;
-}
-"#;
 
     struct State {
         /// How long to keep warm after a commitment; `None`: never.
@@ -100,14 +157,7 @@ fn main(@builtin(local_invocation_index) i: u32) {
     impl KeepWarm {
         /// Its kernel compiled, its thread started (idle until the first commitment ends).
         pub fn new(gpu: &GpuContext, window: Option<Duration>) -> Result<Self, String> {
-            let source = SPIN_WGSL.replace("ITERATIONS", &SPIN_ITERATIONS.to_string());
-            let pipeline = gpu.pipeline("keep warm", &source, "main");
-            let sink = gpu.storage("keep warm", 64);
-            let bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("keep warm"),
-                layout: &pipeline.get_bind_group_layout(0),
-                entries: &[wgpu::BindGroupEntry { binding: 0, resource: sink.as_entire_binding() }],
-            });
+            let kernel = SpinKernel::new(gpu, super::SPIN_ITERATIONS);
             let shared = Arc::new(Shared {
                 state: Mutex::new(State {
                     window,
@@ -123,7 +173,6 @@ fn main(@builtin(local_invocation_index) i: u32) {
             let thread = std::thread::Builder::new()
                 .name("gpu keep warm".to_string())
                 .spawn(move || {
-                    let _sink = sink;
                     let shared = thread_shared;
                     loop {
                         {
@@ -148,16 +197,7 @@ fn main(@builtin(local_invocation_index) i: u32) {
                             device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
                                 label: Some("keep warm"),
                             });
-                        {
-                            let mut pass =
-                                encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                                    label: Some("keep warm"),
-                                    timestamp_writes: None,
-                                });
-                            pass.set_pipeline(&pipeline);
-                            pass.set_bind_group(0, &bind_group, &[]);
-                            pass.dispatch_workgroups(1, 1, 1);
-                        }
+                        kernel.record(&mut encoder);
                         // One dispatch in flight at most, waited for (a second at most).
                         let index = queue.submit([encoder.finish()]);
                         let wait = wgpu::PollType::Wait {
@@ -247,7 +287,8 @@ mod wasm {
 
     use crate::GpuContext;
 
-    /// In wasm, nothing: it only keeps its window.
+    /// In wasm, nothing: it only keeps its window (a browser's GPU worker keeps warm from its
+    /// event loop, see `web/gpu`).
     pub struct KeepWarm {
         window: Mutex<Option<Duration>>,
     }

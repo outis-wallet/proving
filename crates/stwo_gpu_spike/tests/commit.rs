@@ -432,6 +432,22 @@ fn committer_reuses_across_shapes() {
     }
 }
 
+/// The keep-warm kernel computes its loop (natively's length, and the browser GPU worker's).
+#[test]
+fn spin_kernel_computes_its_loop() {
+    use stwo_gpu_spike::warm::{SPIN_ITERATIONS, SpinKernel, spin_reference};
+    let gpu = GpuContext::new();
+    for iterations in [SPIN_ITERATIONS, 1 << 20] {
+        let kernel = SpinKernel::new(&gpu, iterations);
+        let mut encoder = gpu.device.create_command_encoder(&Default::default());
+        kernel.record(&mut encoder);
+        gpu.queue.submit([encoder.finish()]);
+        let words = gpu.read(kernel.sink(), 64);
+        let expected = (0..64).map(|i| spin_reference(i, iterations)).collect_vec();
+        assert_eq!(words, expected, "{iterations} iterations");
+    }
+}
+
 /// What a browser's GPU worker keeps between commitments: the twiddles got lazily (the tree only
 /// on a miss) and dropped when replaced, the buffers' generation (plans built on them stay valid
 /// while it holds), commitments' plans freed while the buffers are kept and reused.

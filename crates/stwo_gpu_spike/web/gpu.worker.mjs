@@ -9,11 +9,17 @@
 //   runs them one at a time on the GPU module, marks them DONE or ERROR and Atomics.notify()s.
 // Messages: from the page, { configure: { upload_chunk, upload_window, readback_chunk, kick_ms,
 // and the commitment's: compute_twiddles, upload: "mapped" | "write", commit_chunk, upload_ring,
-// readback_ring, max_gpu_mib, streamed, keep, serial, max_plans } } (each optional; see the
-// module's Gpu.configure_commit), { release: true } (free what the commitments keep between
-// them: buffers, twiddles, rings, plans; the next one makes them again), { connect: port } (a port
-// to a prover's worker); on that port, { attach: { memory, base } } -> { attached, info } or
-// { attached: false, error }, and { detach: true } -> { detached: true }.
+// readback_ring, max_gpu_mib, streamed, keep, serial, max_plans, keep_warm_ms } } (each optional;
+// see the module's Gpu.configure_commit; keep_warm_ms absent or 0: keep-warm off), { release:
+// true } (free what the commitments keep between them: buffers, twiddles, rings, plans; the next
+// one makes them again), { connect: port } (a port to a prover's worker); on that port, { attach: { memory, base } } -> { attached, info } or
+// { attached: false, error }, { warm: true } (the proof starts proving: keep-warm, if on, warms
+// for its window from now), and { detach: true } -> { detached: true, warm: { window_ms,
+// dispatches } }.
+//
+// Keep-warm (keep_warm_ms > 0, off by default): while a proof is attached, one tiny dispatch kept
+// in flight for the window after the attach, the { warm } message and each commitment, paused
+// during a commitment, stopped at the detach (see the module's warm.rs).
 //
 // What the commitments keep (the device buffers of the largest tree so far, every blowup's
 // twiddles, the rings' mappable chunks, the plans of the last trees) stays between proofs: the
@@ -75,6 +81,9 @@ function writeError(session, s, message) {
 /** The device is gone (or this worker failed): fail every job, now and later. */
 function markLost(session, message) {
   const { h } = session;
+  try {
+    gpu.warm_detach();
+  } catch {}
   Atomics.store(h, L.H_SERVER, L.SERVER_LOST);
   Atomics.notify(h, L.H_SERVER);
   for (let s = 0; s < L.NSLOTS; s++) {
@@ -152,8 +161,12 @@ function attach(port, { memory, base }) {
   }
   const session = { memory, base, h, detached: false };
   sessions.add(session);
+  gpu.warm_attach();
   port.onmessage = async ({ data }) => {
+    if (data.warm && !session.detached) gpu.warm_proof_starts();
     if (!data.detach) return;
+    // Keep-warm stops now: the proof's commitments are over.
+    gpu.warm_detach();
     session.detached = true;
     const lost = Atomics.load(h, L.H_SERVER) === L.SERVER_LOST;
     if (!lost) Atomics.store(h, L.H_SERVER, L.SERVER_NONE);
@@ -162,7 +175,7 @@ function attach(port, { memory, base }) {
     if (!lost) await session.done;
     sessions.delete(session);
     if (!lost) gpu.release();
-    port.postMessage({ detached: true, lost, completed: Atomics.load(h, L.H_COMPLETED) });
+    port.postMessage({ detached: true, lost, completed: Atomics.load(h, L.H_COMPLETED), warm: JSON.parse(gpu.keep_warm()) });
     port.close();
   };
   session.done = serve(session).catch((error) => markLost(session, String(error)));
