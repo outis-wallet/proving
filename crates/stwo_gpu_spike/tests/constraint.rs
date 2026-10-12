@@ -20,8 +20,8 @@ use stwo::core::fields::qm31::QM31;
 use stwo::core::poly::circle::CanonicCoset;
 use stwo::prover::backend::simd::SimdBackend;
 use stwo::prover::backend::simd::column::BaseColumn;
-use stwo::prover::poly::circle::CircleEvaluation;
 use stwo::prover::poly::BitReversedOrder;
+use stwo::prover::poly::circle::CircleEvaluation;
 use stwo_constraint_framework::expr::ExprEvaluator;
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 use stwo_constraint_framework::{EvalAtRow, FrameworkEval, RelationEntry, relation};
@@ -70,13 +70,21 @@ impl FrameworkEval for Synthetic {
             pre2.clone(),
         ]));
         eval.add_constraint(ext.clone() * ext - E::EF::from(a.clone()));
-        eval.add_to_relation(RelationEntry::new(&self.relation, E::EF::one(), &[a.clone(), b.clone()]));
+        eval.add_to_relation(RelationEntry::new(
+            &self.relation,
+            E::EF::one(),
+            &[a.clone(), b.clone()],
+        ));
         eval.add_to_relation(RelationEntry::new(
             &self.relation,
             -E::EF::from(c.clone()),
             &[pre.clone(), ab.clone(), c.clone()],
         ));
-        eval.add_to_relation(RelationEntry::new(&self.relation, E::EF::from(b.clone()), &[c.clone()]));
+        eval.add_to_relation(RelationEntry::new(
+            &self.relation,
+            E::EF::from(b.clone()),
+            std::slice::from_ref(&c),
+        ));
         eval.finalize_logup_in_pairs();
         eval
     }
@@ -111,8 +119,13 @@ fn simd_interpolation_reads_p_as_zero() {
         let domain = CanonicCoset::new(log_size).circle_domain();
         let interpolate = |words: &[u32]| {
             let column: BaseColumn = words.iter().map(|w| M31(*w)).collect();
-            assert_eq!(column.as_slice().iter().filter(|v| v.0 == P).count(), words.iter().filter(|w| **w == P).count());
-            let coeffs = CircleEvaluation::<SimdBackend, M31, BitReversedOrder>::new(domain, column).interpolate();
+            assert_eq!(
+                column.as_slice().iter().filter(|v| v.0 == P).count(),
+                words.iter().filter(|w| **w == P).count()
+            );
+            let coeffs =
+                CircleEvaluation::<SimdBackend, M31, BitReversedOrder>::new(domain, column)
+                    .interpolate();
             let extended = coeffs.evaluate(CanonicCoset::new(log_size + 2).circle_domain());
             (
                 coeffs.coeffs.as_slice().iter().map(|v| v.0).collect::<Vec<u32>>(),
@@ -139,7 +152,8 @@ fn lowering_matches_traced_expressions() {
     assert_eq!(program.offsets(), vec![-1]);
     let mut rng = SmallRng::seed_from_u64(2);
     for _ in 0..4 {
-        let coeffs: Vec<QM31> = (0..program.constraints.len()).map(|_| random_qm31(&mut rng)).collect();
+        let coeffs: Vec<QM31> =
+            (0..program.constraints.len()).map(|_| random_qm31(&mut rng)).collect();
         assert!(check_random_assignment(&eval, &program, &coeffs));
     }
     // The text form reads back.
@@ -255,7 +269,7 @@ fn gpu_synthetic_kernel_matches_interpreter() {
     eprintln!(
         "adapter: {:?}; max binding {} MiB, max buffer {} MiB, storage buffers per stage {}",
         gpu.adapter_info,
-        limits.max_storage_buffer_binding_size as u64 >> 20,
+        limits.max_storage_buffer_binding_size >> 20,
         limits.max_buffer_size >> 20,
         limits.max_storage_buffers_per_shader_stage
     );
@@ -276,15 +290,21 @@ fn gpu_synthetic_kernel_matches_interpreter() {
     }
     let coeffs: Vec<QM31> = (0..program.constraints.len()).map(|_| random_qm31(&mut rng)).collect();
     let denom_inv: Vec<u32> = (0..2).map(|_| rng.random_range(1..P)).collect();
-    let before: [Vec<u32>; 4] = std::array::from_fn(|_| (0..n).map(|_| rng.random_range(0..P)).collect());
+    let before: [Vec<u32>; 4] =
+        std::array::from_fn(|_| (0..n).map(|_| rng.random_range(0..P)).collect());
     let uniforms = program.bind(&params).unwrap();
     let inputs = RowInputs { columns: &slices, trace_log_size: trace_log, eval_log_size: eval_log };
-    let expected = accumulate_rows(&program, &uniforms, &coeffs, &denom_inv, &inputs, &before, 0..n);
+    let expected =
+        accumulate_rows(&program, &uniforms, &coeffs, &denom_inv, &inputs, &before, 0..n);
     let expected: [Vec<u32>; 4] = std::array::from_fn(|c| expected.iter().map(|e| e[c]).collect());
     for options in [
         KernelOptions::default(),
         KernelOptions { split: 3, ..Default::default() },
-        KernelOptions { max_binding_bytes: Some(3 * 4 * n as u64), workgroup_size: 64, ..Default::default() },
+        KernelOptions {
+            max_binding_bytes: Some(3 * 4 * n as u64),
+            workgroup_size: 64,
+            ..Default::default()
+        },
         KernelOptions { unchecked: true, ..Default::default() },
     ] {
         let got = run_on_gpu(
@@ -316,22 +336,42 @@ fn gpu_fixtures_bit_identical() {
         let slices = fixture.column_slices();
         let words = (0..4).map(|c| fixture.after[c].len()).sum::<usize>();
         assert_eq!(fixture.program.constraints.len(), fixture.n_constraints, "{name}: constraints");
-        assert!(fixture.after.iter().flatten().all(|w| *w < P), "{name}: SIMD's words are canonical");
+        assert!(
+            fixture.after.iter().flatten().all(|w| *w < P),
+            "{name}: SIMD's words are canonical"
+        );
 
         // The interpreter (first oracle) on every row.
         let uniforms = fixture.program.bind(&fixture.params).unwrap();
-        let inputs = RowInputs { columns: &slices, trace_log_size: trace_log, eval_log_size: eval_log };
+        let inputs =
+            RowInputs { columns: &slices, trace_log_size: trace_log, eval_log_size: eval_log };
         let interpreted = accumulate_rows(
-            &fixture.program, &uniforms, &fixture.coeffs, &fixture.denom_inv, &inputs, &fixture.before, 0..n,
+            &fixture.program,
+            &uniforms,
+            &fixture.coeffs,
+            &fixture.denom_inv,
+            &inputs,
+            &fixture.before,
+            0..n,
         );
-        let interpreted: [Vec<u32>; 4] = std::array::from_fn(|c| interpreted.iter().map(|e| e[c]).collect());
+        let interpreted: [Vec<u32>; 4] =
+            std::array::from_fn(|c| interpreted.iter().map(|e| e[c]).collect());
         assert_eq!(mismatches(&interpreted, &fixture.after), 0, "{name}: interpreter");
 
         let options = KernelOptions { split, ..Default::default() };
         let run = |columns: &[Vec<&[u32]>], coeffs: &[QM31]| {
             run_on_gpu(
-                &gpu, &fixture.program, &fixture.n_columns, trace_log, eval_log, options, columns,
-                &fixture.params, coeffs, &fixture.denom_inv, &fixture.before,
+                &gpu,
+                &fixture.program,
+                &fixture.n_columns,
+                trace_log,
+                eval_log,
+                options,
+                columns,
+                &fixture.params,
+                coeffs,
+                &fixture.denom_inv,
+                &fixture.before,
             )
         };
         let got = run(&slices, &fixture.coeffs);
@@ -360,8 +400,8 @@ fn gpu_fixtures_bit_identical() {
             remap = format!("{bad_remap} words differ");
         }
         eprintln!(
-            "{name}: negative tests: flipped word {bad} words differ, swapped coefficients {bad_coeffs}, \
-             preprocessed slots rotated {remap}"
+            "{name}: negative tests: flipped word {bad} words differ, swapped coefficients \
+             {bad_coeffs}, preprocessed slots rotated {remap}"
         );
     }
 }

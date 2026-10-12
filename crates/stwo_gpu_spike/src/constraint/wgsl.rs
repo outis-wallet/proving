@@ -133,8 +133,12 @@ pub fn emit(
     let term = |i: usize| -> String {
         let id = program.constraints[i];
         match program.nodes[id as usize].ty {
-            Ty::Base => format!("    acc = m31_add4(acc, qm31_mul_m31(coeffs[{i}], {}));\n", operand(id)),
-            Ty::Ext => format!("    acc = m31_add4(acc, qm31_mul(coeffs[{i}], {}));\n", operand(id)),
+            Ty::Base => {
+                format!("    acc = m31_add4(acc, qm31_mul_m31(coeffs[{i}], {}));\n", operand(id))
+            }
+            Ty::Ext => {
+                format!("    acc = m31_add4(acc, qm31_mul(coeffs[{i}], {}));\n", operand(id))
+            }
         }
     };
 
@@ -146,18 +150,24 @@ pub fn emit(
     s += "@group(0) @binding(2) var<storage, read> denom_inv: array<u32>;\n";
     s += "@group(0) @binding(3) var<storage, read_write> accum: array<u32>;\n";
     for g in 0..groups.groups.len() {
-        writeln!(s, "@group(0) @binding({}) var<storage, read> cols_{g}: array<u32>;", 4 + g).unwrap();
+        writeln!(s, "@group(0) @binding({}) var<storage, read> cols_{g}: array<u32>;", 4 + g)
+            .unwrap();
     }
     writeln!(s, "\nconst N: u32 = {}u;", 1u64 << eval_log).unwrap();
     writeln!(s, "const TRACE_LOG: u32 = {trace_log}u;").unwrap();
     writeln!(s, "const EVAL_LOG: u32 = {eval_log}u;").unwrap();
     writeln!(s, "\n@compute @workgroup_size({workgroup_size})").unwrap();
-    s += "fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {\n";
+    s += "fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) nwg: \
+          vec3<u32>) {\n";
     writeln!(s, "    let row = gid.x + gid.y * nwg.x * {workgroup_size}u;").unwrap();
     s += "    if (row >= N) {\n        return;\n    }\n";
     for offset in program.offsets() {
-        writeln!(s, "    let {} = offset_row(row, TRACE_LOG, EVAL_LOG, {offset});", offset_name(offset))
-            .unwrap();
+        writeln!(
+            s,
+            "    let {} = offset_row(row, TRACE_LOG, EVAL_LOG, {offset});",
+            offset_name(offset)
+        )
+        .unwrap();
     }
     s += "    var acc = vec4<u32>(0u);\n";
     for &id in &row_nodes {
@@ -171,7 +181,9 @@ pub fn emit(
                 format!("cols_{g}[{k}u * N + {row}]")
             }
             Op::Const(_) | Op::Param(_) => unreachable!("uniform"),
-            Op::Secure(p) => format!("vec4<u32>({}, {}, {}, {})", o(&p[0]), o(&p[1]), o(&p[2]), o(&p[3])),
+            Op::Secure(p) => {
+                format!("vec4<u32>({}, {}, {}, {})", o(&p[0]), o(&p[1]), o(&p[2]), o(&p[3]))
+            }
             Op::Add(a, b) => match (ty(a), ty(b)) {
                 (Ty::Base, Ty::Base) => format!("m31_add({}, {})", o(a), o(b)),
                 (Ty::Ext, Ty::Ext) => format!("m31_add4({}, {})", o(a), o(b)),

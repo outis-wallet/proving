@@ -152,7 +152,9 @@ fn capture(
     let extend_time = start.elapsed();
     let columns: Vec<Vec<Vec<u32>>> = columns
         .iter()
-        .map(|cs| cs.iter().map(|c| bytemuck::cast_slice::<M31, u32>(c.as_slice()).to_vec()).collect())
+        .map(|cs| {
+            cs.iter().map(|c| bytemuck::cast_slice::<M31, u32>(c.as_slice()).to_vec()).collect()
+        })
         .collect();
     let input_p_words: usize =
         columns.iter().flatten().map(|c| c.iter().filter(|w| **w == P).count()).sum();
@@ -173,8 +175,8 @@ fn capture(
         fs::write(
             fixture_dir.join("meta.txt"),
             format!(
-                "component {}\ntrace_log_size {trace_log_size}\neval_log_size {eval_log_size}\n\
-                 n_constraints {}\nn_columns {}\npreprocessed_column_indices {}\n",
+                "component {}\ntrace_log_size {trace_log_size}\neval_log_size \
+                 {eval_log_size}\nn_constraints {}\nn_columns {}\npreprocessed_column_indices {}\n",
                 job.component,
                 job.n_constraints,
                 n_columns.join(" "),
@@ -236,8 +238,8 @@ fn capture(
             &log,
             format!(
                 "CHECK {name} rows={n_rows} canonical_mismatches={canonical_mismatches} \
-                 raw_mismatches={raw_mismatches} accum_p_words={p_words} input_p_words={input_p_words} \
-                 extend_ms={:.1} interp_ms={:.1}{}",
+                 raw_mismatches={raw_mismatches} accum_p_words={p_words} \
+                 input_p_words={input_p_words} extend_ms={:.1} interp_ms={:.1}{}",
                 extend_time.as_secs_f64() * 1e3,
                 start.elapsed().as_secs_f64() * 1e3,
                 if dump { " dumped" } else { "" }

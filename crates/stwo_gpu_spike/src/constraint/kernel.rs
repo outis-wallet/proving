@@ -87,8 +87,7 @@ impl ConstraintKernels {
         options: KernelOptions,
     ) -> Self {
         let limits = gpu.device.limits();
-        let device_max =
-            (limits.max_storage_buffer_binding_size as u64).min(limits.max_buffer_size);
+        let device_max = limits.max_storage_buffer_binding_size.min(limits.max_buffer_size);
         let max_binding = options.max_binding_bytes.unwrap_or(device_max).min(device_max);
         let column_bytes = 4u64 << eval_log;
         let max_columns = (max_binding / column_bytes).max(1) as usize;
@@ -222,7 +221,11 @@ impl ConstraintKernels {
                 for (k, (i, j)) in group.iter().enumerate() {
                     let column = columns[*i as usize][*j as usize];
                     assert_eq!(column.len(), n, "a column on the evaluation domain");
-                    gpu.queue.write_buffer(&buffer, (k * n * 4) as u64, bytemuck::cast_slice(column));
+                    gpu.queue.write_buffer(
+                        &buffer,
+                        (k * n * 4) as u64,
+                        bytemuck::cast_slice(column),
+                    );
                 }
                 buffer
             })
@@ -245,18 +248,32 @@ impl ConstraintKernels {
         });
         let accum_buffer = create("accum", 4 * n);
         for (c, coordinate) in accum.iter().enumerate() {
-            gpu.queue.write_buffer(&accum_buffer, (c * n * 4) as u64, bytemuck::cast_slice(coordinate));
+            gpu.queue.write_buffer(
+                &accum_buffer,
+                (c * n * 4) as u64,
+                bytemuck::cast_slice(coordinate),
+            );
         }
         gpu.queue.submit([]);
         gpu.device.poll(wgpu::PollType::wait_indefinitely()).expect("poll");
-        GpuInputs { columns: column_buffers, uniforms, coeffs, denom_inv: denom, accum: accum_buffer }
+        GpuInputs {
+            columns: column_buffers,
+            uniforms,
+            coeffs,
+            denom_inv: denom,
+            accum: accum_buffer,
+        }
     }
 
     /// Writes `accum` (`[coordinate][row]`) into the accumulator buffer again.
     pub fn reset_accum(&self, gpu: &GpuContext, inputs: &GpuInputs, accum: &[&[u32]; 4]) {
         let n = 1usize << self.eval_log;
         for (c, coordinate) in accum.iter().enumerate() {
-            gpu.queue.write_buffer(&inputs.accum, (c * n * 4) as u64, bytemuck::cast_slice(coordinate));
+            gpu.queue.write_buffer(
+                &inputs.accum,
+                (c * n * 4) as u64,
+                bytemuck::cast_slice(coordinate),
+            );
         }
         gpu.queue.submit([]);
         gpu.device.poll(wgpu::PollType::wait_indefinitely()).expect("poll");
@@ -288,38 +305,42 @@ impl ConstraintKernels {
 
     /// Runs the kernels once on resident inputs and waits: the GPU time of the passes (from
     /// timestamps, if the device has them) and the wall-clock time of submit-to-idle.
-    pub fn run(&self, gpu: &GpuContext, bind_group: &wgpu::BindGroup) -> (Option<Duration>, Duration) {
-        let timestamps = gpu.device.features().contains(wgpu::Features::TIMESTAMP_QUERY).then(|| {
-            let count = 2 * self.pipelines.len() as u32;
-            let query_set = gpu.device.create_query_set(&wgpu::QuerySetDescriptor {
-                label: Some("constraint eval timestamps"),
-                ty: wgpu::QueryType::Timestamp,
-                count,
+    pub fn run(
+        &self,
+        gpu: &GpuContext,
+        bind_group: &wgpu::BindGroup,
+    ) -> (Option<Duration>, Duration) {
+        let timestamps =
+            gpu.device.features().contains(wgpu::Features::TIMESTAMP_QUERY).then(|| {
+                let count = 2 * self.pipelines.len() as u32;
+                let query_set = gpu.device.create_query_set(&wgpu::QuerySetDescriptor {
+                    label: Some("constraint eval timestamps"),
+                    ty: wgpu::QueryType::Timestamp,
+                    count,
+                });
+                let resolve = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: None,
+                    size: 8 * count as u64,
+                    usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
+                    mapped_at_creation: false,
+                });
+                let readback = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: None,
+                    size: 8 * count as u64,
+                    usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+                (query_set, resolve, readback, count)
             });
-            let resolve = gpu.device.create_buffer(&wgpu::BufferDescriptor {
-                label: None,
-                size: 8 * count as u64,
-                usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
-                mapped_at_creation: false,
-            });
-            let readback = gpu.device.create_buffer(&wgpu::BufferDescriptor {
-                label: None,
-                size: 8 * count as u64,
-                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-            (query_set, resolve, readback, count)
-        });
         let (x, y) = self.workgroups();
         let mut encoder = gpu.device.create_command_encoder(&Default::default());
         for (k, pipeline) in self.pipelines.iter().enumerate() {
-            let timestamp_writes = timestamps.as_ref().map(|(query_set, ..)| {
-                wgpu::ComputePassTimestampWrites {
+            let timestamp_writes =
+                timestamps.as_ref().map(|(query_set, ..)| wgpu::ComputePassTimestampWrites {
                     query_set,
                     beginning_of_pass_write_index: Some(2 * k as u32),
                     end_of_pass_write_index: Some(2 * k as u32 + 1),
-                }
-            });
+                });
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("constraint eval"),
                 timestamp_writes,

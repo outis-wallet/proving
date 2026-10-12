@@ -85,8 +85,10 @@ impl Fixture {
             }
         }
         let field = |key: &str| fields.get(key).cloned().unwrap_or_default();
-        let nums = |key: &str| -> Vec<usize> { field(key).iter().map(|w| w.parse().unwrap()).collect() };
-        let program = Program::from_text(&fs::read_to_string(dir.join("program.txt")).map_err(err)?)?;
+        let nums =
+            |key: &str| -> Vec<usize> { field(key).iter().map(|w| w.parse().unwrap()).collect() };
+        let program =
+            Program::from_text(&fs::read_to_string(dir.join("program.txt")).map_err(err)?)?;
         let mut params = HashMap::new();
         for line in fs::read_to_string(dir.join("params.txt")).map_err(err)?.lines() {
             let w: Vec<&str> = line.split_whitespace().collect();

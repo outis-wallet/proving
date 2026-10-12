@@ -7,8 +7,8 @@
 //!   evaluator's `column_slots`, and a preprocessed column (`BaseExpr::Param(id)`) to its slot in
 //!   interaction 0 through `preprocessed_columns` (first slot of an id): the order the SIMD
 //!   evaluator reads them in;
-//! - recovers base-field values from the extension embedding (`SecureCol([e, 0, 0, 0])` is `e`),
-//!   so that an extension times a base value costs 4 multiplications, not 16;
+//! - recovers base-field values from the extension embedding (`SecureCol([e, 0, 0, 0])` is `e`), so
+//!   that an extension times a base value costs 4 multiplications, not 16;
 //! - folds constants and applies exact field identities (`x + 0`, `x * 1`, `x * 0`, `--x`), and
 //!   orders the operands of `+` and `*` so that equal expressions share one node.
 //!
@@ -36,7 +36,11 @@ pub enum Ty {
 pub enum Op {
     /// Column `index` of interaction `interaction` (interaction 0: the component's preprocessed
     /// columns, remapped), at `offset` rows of the trace domain from the row.
-    Col { interaction: u32, index: u32, offset: i32 },
+    Col {
+        interaction: u32,
+        index: u32,
+        offset: i32,
+    },
     /// A constant `(a, b, c, d)`, canonical; a base constant when `b = c = d = 0`.
     Const([u32; 4]),
     /// Formal parameter `Program::params[i]`.
@@ -211,7 +215,7 @@ impl Lowering<'_> {
         assert_eq!(self.nodes[a as usize].ty, Ty::Base, "only base values are inverted");
         if let Some(x) = self.constant_of(a) {
             let x = x.to_m31_array()[0];
-            let inverse = if x.0 % P == 0 { M31(0) } else { x.inverse() };
+            let inverse = if x.0.is_multiple_of(P) { M31(0) } else { x.inverse() };
             return self.constant(inverse.into());
         }
         self.node(Op::Inv(a))
@@ -376,8 +380,9 @@ impl Program {
                 Op::Const(c) => qm31(*c),
                 Op::Param(i) => {
                     let (name, ty) = &self.params[*i as usize];
-                    let value =
-                        *values.get(name).ok_or_else(|| format!("no value for parameter {name}"))?;
+                    let value = *values
+                        .get(name)
+                        .ok_or_else(|| format!("no value for parameter {name}"))?;
                     if *ty == Ty::Base && const_ty(&words(value)) != Ty::Base {
                         return Err(format!("parameter {name} is not a base value"));
                     }
@@ -393,7 +398,11 @@ impl Program {
                 Op::Neg(a) => -v(a),
                 Op::Inv(a) => {
                     let x = v(a).to_m31_array()[0];
-                    if x.0 % P == 0 { QM31::from_u32_unchecked(0, 0, 0, 0) } else { x.inverse().into() }
+                    if x.0.is_multiple_of(P) {
+                        QM31::from_u32_unchecked(0, 0, 0, 0)
+                    } else {
+                        x.inverse().into()
+                    }
                 }
             };
             out.push(Some(value));
@@ -516,12 +525,17 @@ impl Program {
             };
             let op = match kind {
                 "param" => {
-                    params.push((rest[0].to_owned(), if rest[1] == "b" { Ty::Base } else { Ty::Ext }));
+                    params.push((
+                        rest[0].to_owned(),
+                        if rest[1] == "b" { Ty::Base } else { Ty::Ext },
+                    ));
                     continue;
                 }
                 "constraints" => {
-                    constraints =
-                        rest.iter().map(|w| w.parse::<u32>().map_err(|e| e.to_string())).collect::<Result<_, _>>()?;
+                    constraints = rest
+                        .iter()
+                        .map(|w| w.parse::<u32>().map_err(|e| e.to_string()))
+                        .collect::<Result<_, _>>()?;
                     continue;
                 }
                 "col" => Op::Col {

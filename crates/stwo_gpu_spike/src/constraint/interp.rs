@@ -63,7 +63,7 @@ impl<'a> Interpreter<'a> {
                 Op::Neg(a) => -self.value(*a),
                 Op::Inv(a) => {
                     let x = base(self.value(*a));
-                    if x.0 % P == 0 { QM31::default() } else { x.inverse().into() }
+                    if x.0.is_multiple_of(P) { QM31::default() } else { x.inverse().into() }
                 }
             };
             self.values[id as usize] = value;
