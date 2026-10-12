@@ -99,6 +99,8 @@ pub mod op {
     /// phases are pipelined (one submit, no waits between them) and only the total is timed.
     pub const M31_MUL: u32 = 16;
     // Reserved: 32.. for the polynomial extension (FFT), 48.. for the Merkle hashing.
+    /// Panics in the GPU module: exercises the failure path (the bridge is lost after it).
+    pub const TEST_TRAP: u32 = 255;
 }
 
 /// Why a call failed.

@@ -200,6 +200,30 @@ pub fn demo_errors() -> String {
     )
 }
 
+/// The failure path: a job that traps the GPU module (the bridge is lost: run it last), then a
+/// good job, which must fail too rather than hang.
+#[wasm_bindgen]
+pub fn demo_trap() -> String {
+    let (results, _) = on_rayon(|| {
+        let trap = bridge::call(op::TEST_TRAP, &[], now);
+        let (a, b) = (random_m31(4096, 23, true), random_m31(4096, 24, false));
+        let after = gpu_m31_mul(&a, &b).map(|out| mismatches(&a, &b, &out));
+        (trap, after, bridge::ready())
+    });
+    format!(
+        "{{\"phase\":\"trap\",\"trap\":{},\"job_after\":{},\"ready_after\":{}}}",
+        match &results.0 {
+            Ok(_) => "\"ok (unexpected)\"".to_string(),
+            Err(e) => format!("{:?}", e.to_string()),
+        },
+        match &results.1 {
+            Ok(bad) => format!("{{\"ok_unexpected_mismatches\":{bad}}}"),
+            Err(e) => error_json(e),
+        },
+        results.2
+    )
+}
+
 /// Latency: `iters` sequential jobs of each kind from one rayon thread, then pings from all
 /// threads at once.
 #[wasm_bindgen]

@@ -165,7 +165,9 @@ struct Io {
 
 impl Default for Io {
     fn default() -> Self {
-        Io { upload_chunk: 16 << 20, upload_window: 64 << 20, readback_chunk: 16 << 20 }
+        // 8 MiB: clear of Safari's 16 MiB copy threshold. In Chrome it costs 14 % of the upload
+        // rate and 4 % of the readback's against 16 MiB (3.8 and 3.6 GiB/s on SwiftShader).
+        Io { upload_chunk: 8 << 20, upload_window: 64 << 20, readback_chunk: 8 << 20 }
     }
 }
 
@@ -411,6 +413,7 @@ impl Inner {
         // process (~0.1 ms on Chrome), which would hide what they measure.
         match op {
             bridge::op::PING => return Ok([0.0; 3]),
+            bridge::op::TEST_TRAP => panic!("test trap (bridge::op::TEST_TRAP)"),
             bridge::op::SUBMIT => {
                 let start = perf_now();
                 self.gpu.queue.submit([]);

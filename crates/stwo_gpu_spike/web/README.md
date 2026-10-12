@@ -52,8 +52,13 @@ The demo function is `gpu_m31_mul(a: &[u32], b: &[u32]) -> Result<Vec<u32>, Brid
   job fail.
 - A lost device, or a trap in the GPU module (caught by the worker's `error` and
   `unhandledrejection` handlers), sets the server state to LOST. Every waiting and future call
-  then gets `Err`.
+  then gets `Err`, and detaching doesn't wait for a job the trap left unsettled.
+- With no GPU worker attached (no WebGPU, no adapter), every call returns `Err` at once.
 - On `Err`, the caller uses the CPU, whose outputs are the same.
+
+The last three were run, not just written: `phases=trap` sends `op::TEST_TRAP`, which panics in
+the GPU module, and Firefox without its WebGPU prefs has no WebGPU. In both cases the calls
+returned errors and the run ended cleanly. A recovered page would need a new GPU worker.
 
 **Why this shape:**
 
@@ -101,7 +106,7 @@ The demo function is `gpu_m31_mul(a: &[u32], b: &[u32]) -> Result<Vec<u32>, Brid
 - **Caveats:**
   - A view larger than 2 GB throws in Firefox
     ([bug 2022805](https://bugzilla.mozilla.org/show_bug.cgi?id=2022805)), so keep views
-    chunk-sized. The bridge's views are 16 MiB or less.
+    chunk-sized. The bridge's views are 8 MiB by default.
   - WebKit rejects growable SABs, so don't use `memory.toResizableBuffer()` views.
 - **The browsers still copy**, on their side:
   - Chrome makes a shared-memory region per write of 4 MiB or more.
@@ -110,8 +115,8 @@ The demo function is `gpu_m31_mul(a: &[u32], b: &[u32]) -> Result<Vec<u32>, Brid
     ([bug 1968102](https://bugzilla.mozilla.org/show_bug.cgi?id=1968102)), and here it uploads at
     a fifth of Chrome's rate.
 - **What the bridge does about it:**
-  - Uploads go in 16 MiB `writeBuffer`s, with a queue wait after each 64 MiB.
-  - Readbacks go through two 16 MiB mappable buffers: chunk k + 1 is copied on the GPU and mapped
+  - Uploads go in 8 MiB `writeBuffer`s, with a queue wait after each 64 MiB.
+  - Readbacks go through two 8 MiB mappable buffers: chunk k + 1 is copied on the GPU and mapped
     while chunk k is copied out.
 
   The sizes are configurable with `upload_chunk_mib`, `upload_window_mib` and
@@ -161,7 +166,8 @@ every 2 ms (`kick_ms`, on by default in Firefox only), which takes a sync to abo
 correctness jobs took 77 s without it and 1.8 s with it.
 
 **Throughput** at 512 MiB per buffer. Warm reps are the best of 2–3; the first rep also creates
-the GPU buffers.
+the GPU buffers. These runs used 16 MiB transfer chunks. The default is now 8 MiB (see
+**Transfer sizes**).
 
 | | Chrome / SwiftShader | Firefox |
 |---|---|---|
@@ -178,6 +184,7 @@ coefficients of one Cairo trace upload in about 0.12 s.
 - upload, by `writeBuffer` size:
   - 1 MiB: 1.5
   - 4 MiB: 3.8
+  - 8 MiB (the default): 3.8
   - 16 MiB: 4.3
   - 64 MiB: 4.4
   - 512 MiB: 4.4
@@ -185,9 +192,14 @@ coefficients of one Cairo trace upload in about 0.12 s.
 - readback, by staging-buffer size:
   - 1 MiB: 3.1
   - 4 MiB: 3.3
+  - 8 MiB (the default): 3.6
   - 16 MiB: 3.8
   - 64 MiB: 3.7
   - one 512 MiB buffer: 2.4. Its first readback also took 0.7 s rather than 0.2 s.
+- the product, pipelined: 1.04 s with 8 MiB chunks, 1.00 s with 16 MiB.
+
+The default is 8 MiB to stay clear of Safari's 16 MiB copy threshold. In Chrome that costs 14 %
+of the upload rate and 4 % of the product's time.
 
 **Memory.** Peak RSS of Chrome's processes in the 512 MiB run. The wasm memory was 1.57 GiB, and
 the renderer's baseline with a tiny run was 0.6 GiB.
@@ -195,6 +207,7 @@ the renderer's baseline with a tiny run was 0.6 GiB.
 | transfers | renderer (the tab) | GPU process |
 |---|---|---|
 | bounded: 16 MiB writes, a wait every 64 MiB, 2 × 16 MiB staging | 2.50 GiB | 1.83 GiB |
+| bounded: 8 MiB writes, a wait every 64 MiB, 2 × 8 MiB staging (the default) | 2.49 GiB | 1.80 GiB |
 | bounded: 4 MiB / 16 MiB / 2 × 4 MiB | 2.38 GiB | 1.69 GiB |
 | unbounded: 512 MiB writes, one 512 MiB staging buffer | **3.88 GiB** | **3.69 GiB** |
 
@@ -210,6 +223,10 @@ This is based on their branches: `gpu-fft` at 85dfe57e (`GpuColumns`,
 1. **The encoding code compiles into the GPU module unchanged.** `gpu/` depends on
    `stwo_gpu_spike` by path, and the pipelines, plans, records, submits and splits at binding
    limits are the same as natively.
+   - The crate's library must therefore keep building for `wasm32-unknown-unknown`. Native-only
+     dependencies belong in bins and tests, or behind `cfg(not(target_arch = "wasm32"))`.
+     Examples are a benchmark harness, threads, `std::time::Instant` and `pollster` used outside
+     `new()`.
 2. **Only the I/O edges need web versions.** On the web, `device.poll(wait)` returns
    immediately, and a map's callback runs only from the event loop. So:
    - **Waits become awaits.** Split the "encode and submit" steps (already separate in both
@@ -271,8 +288,8 @@ This is based on their branches: `gpu-fft` at 85dfe57e (`GpuColumns`,
      the extension and the tree more. On an iPhone, the GPU path pays only with a residency
      design that frees the CPU copies, and it won't fit as a drop-in.
    - **Transfers add their own copies there too.** Safari copies each write over 16 MiB into
-     WebContent, and `getMappedRange` returns a copy into WebContent. Use chunks of 16 MiB or
-     less (8 MiB to be safe) and the ring readback.
+     WebContent, and `getMappedRange` returns a copy into WebContent. The bridge's defaults stay
+     clear of that: 8 MiB writes and an 8 MiB ring readback.
    - **Keep buffers at 256 MiB or less on iOS.** Safari's `maxBufferSize` is
      max(256 MiB, min(1 GiB, maxBufferLength / 3)), and an Apple engineer wrote "iOS is too likely
      to jetsam at 1GB" ([bug 275958](https://bugs.webkit.org/show_bug.cgi?id=275958)).

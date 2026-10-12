@@ -51,6 +51,8 @@ async function main() {
     ...(phases.includes("errors") ? [{ fn: "demo_errors", args: [] }] : []),
     ...(phases.includes("latency") ? [{ fn: "demo_latency", args: [iters] }] : []),
     ...(phases.includes("throughput") ? sizes.map((mib) => ({ fn: "demo_throughput", args: [mib, reps] })) : []),
+    // Not by default: it ends the GPU worker's usefulness for the page's life.
+    ...(phases.includes("trap") ? [{ fn: "demo_trap", args: [] }] : []),
   ];
   const prover = new Worker("./prover.worker.mjs", { type: "module" });
   const channel = new MessageChannel();

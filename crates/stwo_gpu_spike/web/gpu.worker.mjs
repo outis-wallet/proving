@@ -94,6 +94,8 @@ async function runSlot(session, s) {
   } catch (error) {
     state = L.ERROR;
     writeError(session, s, error && error.message ? error.message : error);
+    // A trap leaves the module unusable: every job fails from now on.
+    if (error instanceof WebAssembly.RuntimeError) fail(error.message);
   } finally {
     if (kicks !== null) clearInterval(kicks);
   }
@@ -134,12 +136,14 @@ function attach(port, { memory, base }) {
   port.onmessage = async ({ data }) => {
     if (!data.detach) return;
     session.detached = true;
-    Atomics.store(h, L.H_SERVER, L.SERVER_NONE);
+    const lost = Atomics.load(h, L.H_SERVER) === L.SERVER_LOST;
+    if (!lost) Atomics.store(h, L.H_SERVER, L.SERVER_NONE);
     Atomics.notify(h, L.H_DOORBELL); // wakes serve()'s waitAsync
-    await session.done;
+    // After a trap, serve() may be stuck on a job whose promise never settles: don't wait then.
+    if (!lost) await session.done;
     sessions.delete(session);
-    gpu.release();
-    port.postMessage({ detached: true, completed: Atomics.load(h, L.H_COMPLETED) });
+    if (!lost) gpu.release();
+    port.postMessage({ detached: true, lost, completed: Atomics.load(h, L.H_COMPLETED) });
     port.close();
   };
   session.done = serve(session).catch((error) => markLost(session, String(error)));
@@ -166,7 +170,9 @@ self.onmessage = async ({ data: { connect, configure } }) => {
   }
   if (!connect) return;
   const ok = await started;
+  // Until an attach succeeds (attach() then takes the port over), a detach has nothing to end.
   connect.onmessage = ({ data }) => {
+    if (data.detach) connect.postMessage({ detached: true, attached: false });
     if (!data.attach) return;
     if (!ok) connect.postMessage({ attached: false, error: "no GPU" });
     else attach(connect, data.attach);
