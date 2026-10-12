@@ -37,6 +37,7 @@ use crate::commit::{
     CommitBuffers, CommitKernels, CommitOptions, StripedCommitment, TwiddleCache,
     takes_striped_path,
 };
+use crate::memory::VramPolicy;
 use crate::parts::{Found, PartStats, PartStore, PartsMode};
 use crate::recompute::Recomputer;
 use crate::stream::{DeviceStripes, KeepStripe1, StreamedCommitment, group_words};
@@ -78,7 +79,13 @@ pub struct GpuCommitter {
     /// The root coset of the twiddle tree of the last commitment at each blowup, whose stripe
     /// twiddles the commitments' cache keeps (A2 reuses them).
     root_cosets: Mutex<HashMap<u32, Coset>>,
+    /// The bound on the video memory kept for constraint evaluation.
+    vram_policy: Mutex<VramPolicy>,
 }
+
+/// Kept free besides a tree's resident columns when checking the policy: the composer's buffers
+/// (its output of the largest evaluation domain, 64 MiB at 2^22 rows).
+const RESIDENT_MARGIN: u64 = 128 << 20;
 
 /// Where a commitment's time went (wall clock).
 #[derive(Clone, Copy, Debug, Default)]
@@ -180,6 +187,7 @@ impl GpuCommitter {
             parts_mode: Mutex::new(PartsMode::from_env()),
             recomputer: Mutex::new(None),
             root_cosets: Mutex::new(HashMap::new()),
+            vram_policy: Mutex::new(VramPolicy::from_env()),
         })
     }
 
@@ -241,7 +249,7 @@ impl GpuCommitter {
         }
         let mut state = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let mut parts = self.parts.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        parts.commitment_starts();
+        let after_lookup = parts.commitment_starts();
         let parts_mode = *self.parts_mode.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Some(warm) = &self.warm {
             warm.begin();
@@ -282,40 +290,13 @@ impl GpuCommitter {
                         group_words,
                     );
                     // Stripe 1 kept for constraint evaluation, as the mode says.
-                    let with_stripe0 = parts_mode == PartsMode::Resident;
-                    let device_stripes =
-                        matches!(parts_mode, PartsMode::Device | PartsMode::Resident)
-                            .then(|| {
-                                let limits = self.gpu.device.limits();
-                                // Resident: one storage binding per buffer (a tree in one, if it
-                                // fits, for the constraint kernels to bind).
-                                let max_bytes = match with_stripe0 {
-                                    true => {
-                                        limits
-                                            .max_buffer_size
-                                            .min(limits.max_storage_buffer_binding_size)
-                                            / 256
-                                            * 256
-                                    }
-                                    false => limits.max_buffer_size.min(1 << 30),
-                                };
-                                let bytes = DeviceStripes::planned_bytes(
-                                    &log_sizes,
-                                    log_blowup_factor,
-                                    max_bytes,
-                                    with_stripe0,
-                                );
-                                parts.fits(bytes).then(|| {
-                                    DeviceStripes::new(
-                                        &self.gpu,
-                                        &log_sizes,
-                                        log_blowup_factor,
-                                        max_bytes,
-                                        with_stripe0,
-                                    )
-                                })
-                            })
-                            .flatten();
+                    let device_stripes = self.stripes_to_keep(
+                        &mut parts,
+                        parts_mode,
+                        after_lookup,
+                        &log_sizes,
+                        log_blowup_factor,
+                    );
                     let keep = match (parts_mode, &device_stripes) {
                         (PartsMode::Host, _) => KeepStripe1::Host,
                         (_, Some(stripes)) => KeepStripe1::Device(stripes),
@@ -391,6 +372,63 @@ impl GpuCommitter {
         }
     }
 
+    /// What to keep of a tree being committed for constraint evaluation, as `mode` says, within
+    /// the video memory policy: A3 (`Device`) its stripe 1; `Resident` both its stripes if they
+    /// fit, else its stripe 1 only (the composer uploads stripe 0 for its components), else
+    /// nothing; nothing of the commitment that follows constraint evaluation's lookups (the
+    /// composition's, which it never reads).
+    fn stripes_to_keep(
+        &self,
+        parts: &mut PartStore,
+        mode: PartsMode,
+        after_lookup: bool,
+        log_sizes: &[u32],
+        log_blowup: u32,
+    ) -> Option<DeviceStripes> {
+        let ways: &[bool] = match mode {
+            PartsMode::Device => &[false],
+            PartsMode::Resident if !after_lookup => &[true, false],
+            _ => return None,
+        };
+        let limits = self.gpu.device.limits();
+        let memory = crate::memory::DeviceMemory::query(&self.gpu);
+        let reserved = crate::memory::process_reserved(&self.gpu);
+        for &with_stripe0 in ways {
+            // Both stripes: storage buffers the constraint kernels bind (a tree in one, if it
+            // fits); stripe 1 only: copy sources.
+            let max_bytes = match with_stripe0 {
+                true => {
+                    limits.max_buffer_size.min(limits.max_storage_buffer_binding_size) / 256 * 256
+                }
+                false => limits.max_buffer_size.min(1 << 30),
+            };
+            let bytes =
+                DeviceStripes::planned_bytes(log_sizes, log_blowup, max_bytes, with_stripe0);
+            // The process's share of the device, the driver's budget, the cap: the GPU may drive
+            // a display.
+            let allowed = self.vram_policy().allows(
+                bytes + RESIDENT_MARGIN,
+                parts.held_bytes(),
+                reserved,
+                memory.as_ref(),
+            );
+            parts.offered(bytes, with_stripe0, allowed.is_ok(), reserved.unwrap_or(0));
+            match allowed {
+                Ok(()) => {
+                    return Some(DeviceStripes::new(
+                        &self.gpu,
+                        log_sizes,
+                        log_blowup,
+                        max_bytes,
+                        with_stripe0,
+                    ));
+                }
+                Err(reason) => parts.refused(reason),
+            }
+        }
+        None
+    }
+
     /// Where stripe 1 of the columns committed from now on comes from, for constraint evaluation
     /// (see [`crate::parts`]); `STWO_GPU_PARTS` sets it at the committer's creation.
     pub fn set_parts_mode(&self, mode: PartsMode) {
@@ -406,10 +444,33 @@ impl GpuCommitter {
         &self.gpu
     }
 
-    /// Sets the most GPU memory the commitments may keep for constraint evaluation (see
-    /// [`PartStore::set_budget`]); `None`: no limit.
+    /// Sets the video memory policy for what the commitments keep for constraint evaluation
+    /// (see [`crate::memory::VramPolicy`]); by default [`VramPolicy::from_env`].
+    pub fn set_vram_policy(&self, policy: VramPolicy) {
+        *self.vram_policy.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = policy;
+    }
+
+    pub fn vram_policy(&self) -> VramPolicy {
+        *self.vram_policy.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Sets the policy's explicit cap on what the commitments keep (`None`: none).
     pub fn set_parts_budget(&self, bytes: Option<u64>) {
-        self.parts.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).set_budget(bytes);
+        let mut policy = self.vram_policy.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        policy.cap = bytes;
+    }
+
+    /// The GPU memory the commitments keep for constraint evaluation now.
+    pub fn parts_held_bytes(&self) -> u64 {
+        self.parts.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).held_bytes()
+    }
+
+    /// The device's memory and this process's share now: `(memory, reserved, the process's
+    /// bound)`, for reports.
+    pub fn vram_report(&self) -> (Option<crate::memory::DeviceMemory>, Option<u64>, u64) {
+        let memory = crate::memory::DeviceMemory::query(&self.gpu);
+        let bound = self.vram_policy().process_bound(memory.as_ref());
+        (memory, crate::memory::process_reserved(&self.gpu), bound)
     }
 
     /// The columns `columns` (each the values a tree holds and its committed domain's log size)
@@ -425,6 +486,34 @@ impl GpuCommitter {
             .iter()
             .map(|(values, domain_log_size)| parts.resident(values, *domain_log_size, log_blowup))
             .collect()
+    }
+
+    /// Where the columns `columns` (each the values a tree holds and its committed domain's log
+    /// size) are on the GPU, in order (see [`crate::parts::PartStore::placement`]).
+    pub fn placements(
+        &self,
+        columns: &[(&BaseColumn, u32)],
+        log_blowup: u32,
+    ) -> Vec<Option<crate::parts::Placement>> {
+        let mut parts = self.parts.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        columns
+            .iter()
+            .map(|(values, domain_log_size)| parts.placement(values, *domain_log_size, log_blowup))
+            .collect()
+    }
+
+    /// Whether `bytes` more video memory may be taken now (the policy, with what is kept and
+    /// the process's reserved memory).
+    pub fn vram_allows(&self, bytes: u64) -> bool {
+        let held = self.parts_held_bytes();
+        self.vram_policy()
+            .allows(
+                bytes,
+                held,
+                crate::memory::process_reserved(&self.gpu),
+                crate::memory::DeviceMemory::query(&self.gpu).as_ref(),
+            )
+            .is_ok()
     }
 
     /// Reads `src` (from byte 0) back into `dst` through the committer's readback ring; `Err`

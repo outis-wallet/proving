@@ -1409,6 +1409,7 @@ dependencies = [
 name = "stwo-gpu-spike"
 version = "0.1.0"
 dependencies = [
+ "ash",
  "bytemuck",
  "itertools 0.12.1",
  "naga",

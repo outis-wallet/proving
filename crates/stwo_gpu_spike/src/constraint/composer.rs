@@ -41,6 +41,7 @@ use super::ir::{Program, lower, param_values_of, words};
 use super::kernel::{ConstraintKernels, KernelOptions, meta_words, read_timestamps};
 use crate::GpuContext;
 use crate::committer::GpuCommitter;
+use crate::parts::Placement;
 
 /// What identifies a component's kernels.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -148,12 +149,25 @@ pub struct ComposerStats {
     pub wait_time: Duration,
     pub readback_time: Duration,
     pub add_time: Duration,
+    /// Components whose columns were assembled (not all resident with both stripes), the bytes
+    /// uploaded for them, and the times the commitment buffers were released to make room.
+    pub assembled: u64,
+    pub uploaded_bytes: u64,
+    pub releases: u64,
     /// Shadow mode: components compared, and words that differ (canonically, and as stored).
     pub shadow_compared: u64,
     pub shadow_different: u64,
     pub shadow_raw_different: u64,
     /// Per component short name: (count, hook seconds).
     pub per_component: HashMap<String, (u64, f64)>,
+}
+
+/// Where a component's columns of one interaction are read from.
+enum Source {
+    /// All in `buffer`, both stripes, at these byte offsets.
+    Resident { buffer: wgpu::Buffer, byte_offsets: Vec<u64> },
+    /// Assembled into a scratch buffer: the `k` columns from the `first` of the component's.
+    Assembled { first: usize, k: usize },
 }
 
 /// Buffers reused by the runs.
@@ -487,27 +501,61 @@ impl GpuComposer {
         };
         let log_blowup = domain_log_size - job.trace_log_size;
         let lookup_start = Instant::now();
-        let Some(resident) = self.committer.resident_columns(&columns, log_blowup) else {
-            return self.decline("not resident");
-        };
+        let placements = self.committer.placements(&columns, log_blowup);
         let lookup_time = lookup_start.elapsed();
-        // One buffer per interaction.
-        let mut trees: Vec<wgpu::Buffer> = vec![];
+        // Per interaction: its columns' buffer, if they all hold both stripes in one; otherwise
+        // they are assembled into a scratch buffer (stripe 0 from the host, stripe 1 or both from
+        // the GPU, the whole evaluation from the host for a column the tree keeps whole).
+        let column_bytes = 8u64 << job.trace_log_size;
+        let mut sources: Vec<Source> = vec![];
+        let mut scratch_bytes = 0u64;
         let mut at = 0;
         for &i in &table.interactions {
             let k = table.n_columns[i as usize];
-            let buffer = &resident[at].buffer;
-            if resident[at..at + k].iter().any(|c| &c.buffer != buffer) {
-                return self.decline("tree split over buffers");
+            let mut whole = None;
+            let mut offsets = vec![];
+            for (j, placement) in placements[at..at + k].iter().enumerate() {
+                match placement {
+                    Some(Placement::Both { buffer, byte_offset })
+                        if j == 0 || whole.as_ref() == Some(buffer) =>
+                    {
+                        whole = Some(buffer.clone());
+                        offsets.push(*byte_offset);
+                    }
+                    _ => {
+                        whole = None;
+                        break;
+                    }
+                }
             }
-            trees.push(buffer.clone());
+            match whole {
+                Some(buffer) if offsets.len() == k => {
+                    sources.push(Source::Resident { buffer, byte_offsets: offsets })
+                }
+                _ => {
+                    for (j, placement) in placements[at..at + k].iter().enumerate() {
+                        let held = columns[at + j].0.length as u64 * 4;
+                        if placement.is_none() && held < column_bytes {
+                            return self.decline("not resident");
+                        }
+                    }
+                    sources.push(Source::Assembled { first: at, k });
+                    scratch_bytes += k as u64 * column_bytes;
+                }
+            }
             at += k;
         }
-        let Some(offsets) =
-            resident.iter().map(|c| u32::try_from(c.word_offset).ok()).collect::<Option<Vec<_>>>()
-        else {
-            return self.decline("offsets");
-        };
+        if scratch_bytes > 0 {
+            // Within the video memory policy; the commitment buffers are idle until the next
+            // commitment (the composition's): released if that makes room.
+            if !self.committer.vram_allows(scratch_bytes) {
+                self.committer.release_buffers();
+                lock(&self.stats).releases += 1;
+                if !self.committer.vram_allows(scratch_bytes) {
+                    return self.decline("video memory");
+                }
+            }
+        }
 
         let params =
             param_values_of(&fingerprint.relation_values, job.claimed_sum, job.trace_log_size);
@@ -538,6 +586,73 @@ impl GpuComposer {
             let uniforms = run.small(gpu, 0, &kernel.kernels.uniform_words(&uniform_values));
             let coeffs = run.small(gpu, 1, &coeffs);
             let denom = run.small(gpu, 2, &denom_inv);
+            // The columns' buffers and word offsets, assembling those not resident whole.
+            let mut encoder = gpu.device.create_command_encoder(&Default::default());
+            let mut trees: Vec<wgpu::Buffer> = vec![];
+            let mut offsets: Vec<u32> = vec![];
+            let mut uploaded = 0u64;
+            for source in &sources {
+                match source {
+                    Source::Resident { buffer, byte_offsets } => {
+                        trees.push(buffer.clone());
+                        for offset in byte_offsets {
+                            offsets.push(u32::try_from(offset / 4).expect("an offset in words"));
+                        }
+                    }
+                    Source::Assembled { first, k } => {
+                        let scratch = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                            label: Some("constraint eval assembled columns"),
+                            size: *k as u64 * column_bytes,
+                            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                            mapped_at_creation: false,
+                        });
+                        let half = column_bytes / 2;
+                        for j in 0..*k {
+                            let dst = j as u64 * column_bytes;
+                            let host = columns[first + j].0.as_slice();
+                            match &placements[first + j] {
+                                Some(Placement::Both { buffer, byte_offset }) => {
+                                    encoder.copy_buffer_to_buffer(
+                                        buffer,
+                                        *byte_offset,
+                                        &scratch,
+                                        dst,
+                                        column_bytes,
+                                    );
+                                }
+                                Some(Placement::Stripe1 { buffer, byte_offset }) => {
+                                    let stripe0 = &host[..(half / 4) as usize];
+                                    gpu.queue.write_buffer(
+                                        &scratch,
+                                        dst,
+                                        bytemuck::cast_slice(stripe0),
+                                    );
+                                    uploaded += half;
+                                    encoder.copy_buffer_to_buffer(
+                                        buffer,
+                                        *byte_offset,
+                                        &scratch,
+                                        dst + half,
+                                        half,
+                                    );
+                                }
+                                None => {
+                                    // A column the tree keeps whole: stripes 0 and 1 from the host.
+                                    let both = &host[..(column_bytes / 4) as usize];
+                                    gpu.queue.write_buffer(
+                                        &scratch,
+                                        dst,
+                                        bytemuck::cast_slice(both),
+                                    );
+                                    uploaded += column_bytes;
+                                }
+                            }
+                            offsets.push((j as u64 * column_bytes / 4) as u32);
+                        }
+                        trees.push(scratch);
+                    }
+                }
+            }
             let info = run.small(gpu, 3, &meta_words(job.trace_log_size, eval_log, &offsets));
             let tree_refs: Vec<&wgpu::Buffer> = trees.iter().collect();
             let bind_group = kernel.kernels.bind_group(
@@ -557,7 +672,6 @@ impl GpuComposer {
             let timestamps = (self.timestamps
                 && gpu.device.features().contains(wgpu::Features::TIMESTAMP_QUERY))
             .then(|| run.timestamps(gpu, count).clone());
-            let mut encoder = gpu.device.create_command_encoder(&Default::default());
             encoder.clear_buffer(&out, 0, Some(out_bytes));
             kernel.kernels.encode(
                 &mut encoder,
@@ -586,9 +700,16 @@ impl GpuComposer {
             }
             let host = &mut run.host[..4 * n];
             self.committer.read_back(&out, bytemuck::cast_slice_mut(host))?;
-            Ok::<_, String>((gpu_time, wait, read_start.elapsed(), setup, timestamps_time))
+            Ok::<_, String>((
+                gpu_time,
+                wait,
+                read_start.elapsed(),
+                setup,
+                timestamps_time,
+                uploaded,
+            ))
         }));
-        let (gpu_time, wait, readback, setup, timestamps_time) = match result {
+        let (gpu_time, wait, readback, setup, timestamps_time, uploaded) = match result {
             Ok(Ok(times)) => times,
             Ok(Err(_)) | Err(_) => {
                 drop(run);
@@ -653,6 +774,10 @@ impl GpuComposer {
         stats.hook_time += hook_time;
         stats.fingerprint_time += fingerprint_time;
         stats.lookup_time += lookup_time;
+        if scratch_bytes > 0 {
+            stats.assembled += 1;
+            stats.uploaded_bytes += uploaded;
+        }
         stats.setup_time += setup;
         stats.timestamps_time += timestamps_time;
         stats.gpu_time += gpu_time;
@@ -743,7 +868,8 @@ pub fn describe(stats: &ComposerStats) -> String {
         "constraint eval on the GPU: {} components ({} rows), declined [{declined}]; traced {} \
          ({:.3} s), compiled {} ({:.2} s, {} failed); hook {:.3} s: fingerprints {:.3}, lookups \
          {:.3}, setup {:.3}, GPU {:.3} (wait {:.3}, timestamps {:.3}), readback {:.3}, add {:.3}; \
-         shadow {} compared, {} words differ ({} as stored)",
+         assembled {} ({} MiB uploaded, {} releases); shadow {} compared, {} words differ ({} as \
+         stored)",
         stats.evaluated,
         stats.rows,
         stats.traced,
@@ -760,6 +886,9 @@ pub fn describe(stats: &ComposerStats) -> String {
         stats.timestamps_time.as_secs_f64(),
         stats.readback_time.as_secs_f64(),
         stats.add_time.as_secs_f64(),
+        stats.assembled,
+        stats.uploaded_bytes >> 20,
+        stats.releases,
         stats.shadow_compared,
         stats.shadow_different,
         stats.shadow_raw_different,

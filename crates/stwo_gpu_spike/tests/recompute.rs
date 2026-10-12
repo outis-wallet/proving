@@ -275,7 +275,8 @@ fn resident_stripes_are_the_cpus() {
             .resident_columns(&[(&evals.values, evals.domain.log_size())], log_blowup)
             .is_none()
     );
-    assert_eq!(committer.take_part_stats().over_budget, 1);
+    // Both ways (both stripes, stripe 1 only) refused.
+    assert_eq!(committer.take_part_stats().over_budget, 2);
     committer.set_parts_budget(None);
     committer.set_parts_mode(PartsMode::Off);
 }

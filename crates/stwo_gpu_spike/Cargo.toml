@@ -20,6 +20,11 @@ itertools = "0.12"
 rand = { version = "0.9", features = ["small_rng"] }
 rayon = "1.10"
 
+# The device's memory heaps and budget (src/memory.rs), through wgpu's Vulkan hal: the version
+# wgpu-hal 30 uses.
+[target.'cfg(not(any(target_arch = "wasm32", target_vendor = "apple")))'.dependencies]
+ash = "0.38"
+
 [dev-dependencies]
 num-traits = "0.2"
 # Translates the kernels to MSL and HLSL in a test, validated without optional capabilities.

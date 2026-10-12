@@ -27,6 +27,7 @@ pub mod commit;
 pub mod committer;
 pub mod constraint;
 pub mod extension;
+pub mod memory;
 pub mod merkle;
 pub mod parts;
 pub mod recompute;

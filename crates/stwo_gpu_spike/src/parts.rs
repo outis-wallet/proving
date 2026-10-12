@@ -109,7 +109,7 @@ pub enum Found {
 }
 
 /// Counts of the store's work, since they were last taken.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct PartStats {
     /// Requests (one per component and part), and their columns.
     pub requests: u64,
@@ -141,12 +141,29 @@ pub struct PartStats {
     pub recompute_bytes: u64,
     /// Clears with something kept.
     pub clears: u64,
-    /// Trees not kept, as they would have exceeded the budget (see
-    /// [`PartStore::set_budget`]).
+    /// Trees not kept, as they would have exceeded the video memory policy (see
+    /// [`crate::memory::VramPolicy`]): its explicit cap, the process's share of the device, the
+    /// driver's budget.
     pub over_budget: u64,
+    pub refused_cap: u64,
+    pub refused_share: u64,
+    pub refused_driver_budget: u64,
+    /// Per tree the commitments offered to keep (in order), each way tried: its bytes, whether
+    /// with stripe 0 (both stripes) or stripe 1 only, whether kept, and the process's reserved
+    /// bytes at the time.
+    pub trees: Vec<(u64, bool, bool, u64)>,
     /// Resident columns found for constraint evaluation on the GPU, and not found.
     pub resident_hits: u64,
     pub resident_misses: u64,
+}
+
+/// Where a kept column is on the GPU (see [`PartStore::placement`]).
+#[derive(Clone, Debug)]
+pub enum Placement {
+    /// Its stripes 0 and 1, from byte `byte_offset` of `buffer`.
+    Both { buffer: wgpu::Buffer, byte_offset: u64 },
+    /// Its stripe 1 only, from byte `byte_offset` of `buffer`.
+    Stripe1 { buffer: wgpu::Buffer, byte_offset: u64 },
 }
 
 /// A column resident on the GPU: its stripes 0 and 1, `2^(log_size + 1)` words from word
@@ -165,8 +182,6 @@ pub struct PartStore {
     /// A lookup was made since the last commitment.
     looked_up: bool,
     stats: PartStats,
-    /// The most GPU memory the kept stripes may take (`None`: no limit).
-    budget: Option<u64>,
 }
 
 impl PartStore {
@@ -174,11 +189,15 @@ impl PartStore {
         Self::default()
     }
 
-    /// Called at the start of every commitment: the first after a lookup clears the store.
-    pub fn commitment_starts(&mut self) {
-        if self.looked_up {
+    /// Called at the start of every commitment: the first after a lookup clears the store (and
+    /// returns true: in a proof, the composition's commitment, whose columns constraint
+    /// evaluation never reads).
+    pub fn commitment_starts(&mut self) -> bool {
+        let after_lookup = self.looked_up;
+        if after_lookup {
             self.clear();
         }
+        after_lookup
     }
 
     /// Drops everything kept (and frees the GPU buffers).
@@ -225,19 +244,25 @@ impl PartStore {
         }
     }
 
-    /// Sets the most GPU memory the kept stripes may take (`None`: no limit): a tree that would
-    /// take more is not kept ([`Self::fits`]).
-    pub fn set_budget(&mut self, bytes: Option<u64>) {
-        self.budget = bytes;
+    /// The GPU memory the kept stripes hold.
+    pub fn held_bytes(&self) -> u64 {
+        self.stats.held_bytes
     }
 
-    /// Whether `bytes` more GPU memory fit in the budget; counts a tree that doesn't.
-    pub fn fits(&mut self, bytes: u64) -> bool {
-        let fits = self.budget.is_none_or(|budget| self.stats.held_bytes + bytes <= budget);
-        if !fits {
-            self.stats.over_budget += 1;
+    /// Notes a tree offered to keep.
+    pub fn offered(&mut self, bytes: u64, with_stripe0: bool, kept: bool, reserved: u64) {
+        self.stats.trees.push((bytes, with_stripe0, kept, reserved));
+    }
+
+    /// Counts a tree not kept, for `reason`.
+    pub fn refused(&mut self, reason: crate::memory::VramRefusal) {
+        use crate::memory::VramRefusal;
+        self.stats.over_budget += 1;
+        match reason {
+            VramRefusal::Cap => self.stats.refused_cap += 1,
+            VramRefusal::ProcessShare => self.stats.refused_share += 1,
+            VramRefusal::DriverBudget => self.stats.refused_driver_budget += 1,
         }
-        fits
     }
 
     /// Keeps `stripes` (GPU memory), stripe 1 of the columns the tree holds as `stripe0`.
@@ -354,6 +379,30 @@ impl PartStore {
             None => self.stats.resident_misses += 1,
         }
         found
+    }
+
+    /// Where the column the tree holds as `stripe0` is on the GPU, without taking it: both its
+    /// stripes (see [`Self::resident`]), or its stripe 1 only; `None` if not kept.
+    pub fn placement(
+        &mut self,
+        stripe0: &BaseColumn,
+        domain_log_size: u32,
+        log_blowup: u32,
+    ) -> Option<Placement> {
+        self.looked_up = true;
+        let entry = self.entries.get(&key(stripe0))?;
+        let Kept::Device { set, buffer, offset, resident } = entry.kept else { return None };
+        if entry.domain_log_size != domain_log_size
+            || entry.log_blowup != log_blowup
+            || entry.fingerprint != fingerprint(stripe0.as_slice())
+        {
+            return None;
+        }
+        let buffer = self.device[set].as_ref().expect("a kept set").buffers[buffer].clone();
+        Some(match resident {
+            Some(resident) => Placement::Both { buffer, byte_offset: resident },
+            None => Placement::Stripe1 { buffer, byte_offset: offset },
+        })
     }
 
     /// Buffer `buffer` of the kept set `set` (see [`Found::Device`]).
