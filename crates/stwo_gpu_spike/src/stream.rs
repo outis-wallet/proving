@@ -48,6 +48,7 @@
 use std::collections::VecDeque;
 use std::iter::repeat_n;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use itertools::Itertools;
 use stwo::core::fields::m31::BaseField;
@@ -450,6 +451,26 @@ impl StreamedCommitment {
         readback: &mut ReadbackRing,
         polys: &[CircleCoefficients<SimdBackend>],
     ) -> CommitOutput {
+        self.commit_timed(gpu, kernels, upload, readback, polys).0
+    }
+
+    /// [`Self::commit`], and the time of its phases: the groups, the columns of the largest
+    /// size, the copies out of the chunks still being read back (while the GPU hashes the
+    /// levels), the readback of the columns kept whole and the layers.
+    pub fn commit_timed(
+        &self,
+        gpu: &GpuContext,
+        kernels: &CommitKernels,
+        upload: &mut UploadRing,
+        readback: &mut ReadbackRing,
+        polys: &[CircleCoefficients<SimdBackend>],
+    ) -> (CommitOutput, [Duration; 4]) {
+        let mut phases = [Duration::ZERO; 4];
+        let mut start = Instant::now();
+        let mut lap = |phase: usize| {
+            phases[phase] = start.elapsed();
+            start = Instant::now();
+        };
         assert_eq!(polys.len(), self.log_sizes.len());
         for (poly, &log_size) in polys.iter().zip(&self.log_sizes) {
             assert_eq!(poly.log_size(), log_size);
@@ -493,6 +514,7 @@ impl StreamedCommitment {
                 .collect_vec();
             reads.read(gpu, readback, &self.log_sizes, &columns);
         }
+        lap(0);
 
         if let Some(top) = &self.top {
             // The largest size's coefficients, while the GPU works on the last groups.
@@ -539,6 +561,8 @@ impl StreamedCommitment {
             }
         }
 
+        lap(1);
+
         // Every stripe's last dispatches and levels, the levels above: submitted before the last
         // chunks are copied out, so that the GPU computes while the CPU copies.
         let mut encoder = gpu
@@ -547,6 +571,7 @@ impl StreamedCommitment {
         self.encode_levels(&mut encoder);
         gpu.queue.submit([encoder.finish()]);
         let mut evaluations = reads.drain(gpu, readback);
+        lap(2);
 
         // The columns kept whole and the tree's levels, read back.
         let mut whole_columns = self
@@ -591,6 +616,7 @@ impl StreamedCommitment {
         for (i, column) in whole_columns {
             evaluations[i] = Some(column);
         }
+        lap(3);
 
         levels.reverse();
         let evaluations = evaluations
@@ -598,7 +624,7 @@ impl StreamedCommitment {
             .enumerate()
             .map(|(i, column)| column.unwrap_or_else(|| panic!("column {i} not read back")))
             .collect();
-        CommitOutput { layers: levels, evaluations }
+        (CommitOutput { layers: levels, evaluations }, phases)
     }
 
     /// [`CommitOutput`] as `new_striped` returns it (see [`tree_prover`]).

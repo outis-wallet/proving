@@ -9,7 +9,9 @@
 //! when a tree needs more ([`CommitBuffers`]); every blowup's twiddles, computed once
 //! ([`TwiddleCache`]); and two staging rings, through which the coefficients go up and the
 //! result comes back, by all the CPU's threads ([`crate::transfer`]). Only the plans (uniforms
-//! and bind groups) are built per commitment.
+//! and bind groups) are built per commitment. Natively, a thread keeps the GPU's clocks up for a
+//! few seconds after each commitment, as the next one of a proof usually follows within them
+//! ([`crate::warm`]: [`GpuCommitter::set_keep_warm`]).
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Mutex;
@@ -29,7 +31,8 @@ use crate::commit::{
     takes_striped_path,
 };
 use crate::stream::{StreamedCommitment, group_words};
-use crate::transfer::{ReadbackRing, UploadRing};
+use crate::transfer::{ReadbackRing, RingTimes, UploadRing};
+use crate::warm::{KeepWarm, window_from_env};
 
 /// The tree `new_striped` returns.
 pub type StripedTree = CommitmentTreeProver<SimdBackend, Blake2sM31MerkleChannel>;
@@ -48,6 +51,8 @@ pub type DeclinedCommit = (ColumnVec<CircleCoefficients<SimdBackend>>, Declined)
 
 /// A device and its compiled kernels, for a process's commitments, one at a time.
 pub struct GpuCommitter {
+    /// `None` if its thread could not start (the commitments go on without it).
+    warm: Option<KeepWarm>,
     gpu: GpuContext,
     kernels: CommitKernels,
     /// What commitments reuse; one commitment at a time. `None` after a failure (rebuilt by the
@@ -71,6 +76,18 @@ pub struct CommitTimes {
     /// works on later ones); stripe by stripe, the upload, then the compute (while the CPU
     /// allocates the result), then the readback.
     pub commit: Duration,
+    /// Of `commit`: the upload ring's (the CPU's writes into its chunks, and its waits for a free
+    /// one).
+    pub upload: RingTimes,
+    /// Of `commit`: the readback ring's (its waits for the GPU's copies, and the CPU's copies out
+    /// into stwo's columns and layers).
+    pub readback: RingTimes,
+    /// Of `commit`, streamed: the groups (their uploads and submissions, the copies out of the
+    /// chunks read back meanwhile), the columns of the largest size (their upload, every stripe's
+    /// submission, stripe 0's readback started), the copies out of the chunks still being read
+    /// back (while the GPU hashes the levels), the readback of the columns kept whole and the
+    /// layers.
+    pub phases: [Duration; 4],
     /// The tree's assembly.
     pub assembly: Duration,
     /// The drop of the polynomials (kept until then, to give them back on a failure): natively,
@@ -121,7 +138,39 @@ impl GpuCommitter {
         let (kernels, reused) =
             catch_unwind(AssertUnwindSafe(|| (CommitKernels::new(&gpu), Reused::new(&gpu))))
                 .map_err(|panic| format!("kernels: {}", panic_message(&panic)))?;
-        Ok(Self { gpu, kernels, state: Mutex::new(Some(reused)), times: Mutex::new(None) })
+        let warm = catch_unwind(AssertUnwindSafe(|| KeepWarm::new(&gpu, window_from_env())))
+            .ok()
+            .and_then(Result::ok);
+        Ok(Self { warm, gpu, kernels, state: Mutex::new(Some(reused)), times: Mutex::new(None) })
+    }
+
+    /// How long the GPU's clocks are kept up after each commitment (see [`crate::warm`]):
+    /// `STWO_GPU_KEEP_WARM_MS` (0: never), or [`crate::warm::DEFAULT_WINDOW`]. Natively only;
+    /// `None` in wasm too if set so.
+    pub fn keep_warm(&self) -> Option<Duration> {
+        self.warm.as_ref().and_then(KeepWarm::window)
+    }
+
+    /// Sets how long the GPU's clocks are kept up after each commitment (`None`: never; it stops
+    /// at once).
+    pub fn set_keep_warm(&self, window: Option<Duration>) {
+        if let Some(warm) = &self.warm {
+            warm.set_window(window);
+        }
+    }
+
+    /// Keeps the GPU's clocks up from now, for the window (see [`Self::set_keep_warm`]): for a
+    /// caller that knows a commitment is coming (e.g. at the start of a proof, whose first
+    /// commitment would otherwise start on an idle GPU).
+    pub fn warm_up(&self) {
+        if let Some(warm) = &self.warm {
+            warm.warm_up();
+        }
+    }
+
+    /// The keep-warm dispatches so far.
+    pub fn keep_warm_dispatches(&self) -> u64 {
+        self.warm.as_ref().map_or(0, KeepWarm::dispatches)
     }
 
     pub fn adapter_info(&self) -> &wgpu::AdapterInfo {
@@ -143,12 +192,17 @@ impl GpuCommitter {
             return Err((polynomials, Declined::NotStriped));
         }
         let mut state = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(warm) = &self.warm {
+            warm.begin();
+        }
         let start = Instant::now();
         let mut times = CommitTimes::default();
         // The polynomials are kept until the tree is read back, so that a failure can still
         // give them back.
         let tree = catch_unwind(AssertUnwindSafe(|| {
             let reused = state.get_or_insert_with(|| Reused::new(&self.gpu));
+            reused.upload.take_times();
+            reused.readback.take_times();
             let distinct = log_sizes.iter().copied().collect();
             let twiddles = reused.twiddles.get(&self.gpu, &distinct, log_blowup_factor, twiddles);
             let group_words = group_words(
@@ -173,7 +227,7 @@ impl GpuCommitter {
                         group_words,
                     );
                     times.setup = start.elapsed();
-                    let output = commitment.commit(
+                    let (output, phases) = commitment.commit_timed(
                         &self.gpu,
                         &self.kernels,
                         &mut reused.upload,
@@ -181,6 +235,7 @@ impl GpuCommitter {
                         &polynomials,
                     );
                     times.commit = start.elapsed() - times.setup;
+                    times.phases = phases;
                     commitment.tree_prover(output)
                 }
                 None => {
@@ -205,9 +260,14 @@ impl GpuCommitter {
                     commitment.tree_prover(output)
                 }
             };
+            times.upload = reused.upload.take_times();
+            times.readback = reused.readback.take_times();
             times.assembly = start.elapsed() - times.setup - times.commit;
             tree
         }));
+        if let Some(warm) = &self.warm {
+            warm.end();
+        }
         match tree {
             Ok(tree) => {
                 let before = start.elapsed();

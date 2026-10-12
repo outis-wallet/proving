@@ -570,3 +570,57 @@ fn streamed_full_shapes() {
         921,
     );
 }
+
+/// The committer's keep-warm thread: idle until a commitment ends, dispatching for its window
+/// after it (the commitments still `new_striped`'s), stopping when its window passes or is unset.
+#[test]
+fn committer_keeps_warm_after_commitments() {
+    use std::time::{Duration, Instant};
+    let committer = GpuCommitter::new().expect("a GPU adapter");
+    committer.set_keep_warm(Some(Duration::from_millis(300)));
+    assert_eq!(committer.keep_warm(), Some(Duration::from_millis(300)));
+    std::thread::sleep(Duration::from_millis(50));
+    assert_eq!(committer.keep_warm_dispatches(), 0, "dispatches before any commitment");
+
+    let scale = 6;
+    let log_sizes = base_trace_log_sizes(&cairo_pay_components(), scale, 4);
+    let lifting_log_size = CAIRO_LIFTING_LOG_SIZE - scale;
+    let twiddles = twiddles(lifting_log_size);
+    let commit = |seed: u64| {
+        let polys = random_polys(&log_sizes, seed);
+        let cpu = cpu_commit(&polys, CAIRO_LOG_BLOWUP, &twiddles, lifting_log_size);
+        let gpu = committer
+            .commit_striped(polys, CAIRO_LOG_BLOWUP, &twiddles, lifting_log_size)
+            .unwrap_or_else(|(_, declined)| panic!("declined: {declined:?}"));
+        assert_trees_eq(&gpu, &cpu, &format!("keep-warm, seed {seed}"));
+    };
+    commit(21);
+    // Dispatches while warm (one in flight at most, so a few even on lavapipe).
+    let start = Instant::now();
+    while committer.keep_warm_dispatches() == 0 && start.elapsed() < Duration::from_secs(5) {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(committer.keep_warm_dispatches() > 0, "no dispatch after a commitment");
+    // Commitments while warm.
+    commit(22);
+    // The window passes: no more dispatches (the last one in flight done well within 2 s).
+    std::thread::sleep(Duration::from_millis(300 + 2000));
+    let after_window = committer.keep_warm_dispatches();
+    std::thread::sleep(Duration::from_millis(200));
+    assert_eq!(committer.keep_warm_dispatches(), after_window, "dispatches after the window");
+    // Unset: none after a commitment either.
+    committer.set_keep_warm(None);
+    commit(23);
+    std::thread::sleep(Duration::from_millis(200));
+    assert_eq!(committer.keep_warm_dispatches(), after_window, "dispatches while unset");
+    // A warm-up without a commitment, once set again.
+    committer.set_keep_warm(Some(Duration::from_millis(200)));
+    committer.warm_up();
+    let start = Instant::now();
+    while committer.keep_warm_dispatches() == after_window
+        && start.elapsed() < Duration::from_secs(5)
+    {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(committer.keep_warm_dispatches() > after_window, "no dispatch after a warm-up");
+}

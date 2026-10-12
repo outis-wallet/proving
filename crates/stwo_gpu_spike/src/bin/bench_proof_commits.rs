@@ -7,8 +7,20 @@
 //! assembly, the polynomials' drop (handed to a thread).
 //!
 //! ```text
-//! bench_proof_commits [--proofs N] [--threads T] [--check-all] [--no-cpu]
+//! bench_proof_commits [--proofs N] [--threads T] [--check-all] [--no-cpu] [--no-gpu]
+//!     [--idle-ms MS] [--keep-warm-ms MS]
 //! ```
+//!
+//! The split of the GPU's `commit` (`CommitTimes`): the upload ring's CPU copies into its chunks
+//! and waits for a free one, the readback ring's waits for the GPU and CPU copies out; streamed,
+//! the phases (groups, the largest size's columns, the copies out of the last chunks, the
+//! readback of the columns kept whole and the layers). Memory: the process's resident set
+//! (`VmRSS`) after each proof, and per commitment the peak resident set above the one before it
+//! (`VmHWM`, reset through `/proc/self/clear_refs`), the input polynomials (cloned before) not
+//! counted. `--idle-ms MS` sleeps before each GPU commitment (the GPU idle, as while the prover
+//! computes on the CPU), without the CPU's work in between that `--no-cpu` leaves out.
+//! `--keep-warm-ms MS` sets the committer's keep-warm window (`GpuCommitter::set_keep_warm`, 0:
+//! off; default: the committer's, `STWO_GPU_KEEP_WARM_MS` or 3 s).
 //!
 //! A proof's trees, as the prover commits them (random coefficients):
 //! - the Cairo leg, blowup 3, lifting log size 23: the base trace and the interaction trace of
@@ -56,10 +68,21 @@ struct Args {
     threads: usize,
     check_all: bool,
     cpu: bool,
+    gpu: bool,
+    idle: Duration,
+    keep_warm: Option<Option<Duration>>,
 }
 
 fn parse_args() -> Args {
-    let mut args = Args { proofs: 3, threads: 18, check_all: false, cpu: true };
+    let mut args = Args {
+        proofs: 3,
+        threads: 18,
+        check_all: false,
+        cpu: true,
+        gpu: true,
+        idle: Duration::ZERO,
+        keep_warm: None,
+    };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         let mut value = |name: &str| it.next().unwrap_or_else(|| panic!("{name} needs a value"));
@@ -68,8 +91,19 @@ fn parse_args() -> Args {
             "--threads" => args.threads = value("--threads").parse().expect("--threads T"),
             "--check-all" => args.check_all = true,
             "--no-cpu" => args.cpu = false,
+            "--no-gpu" => args.gpu = false,
+            "--keep-warm-ms" => {
+                let ms: u64 = value("--keep-warm-ms").parse().expect("--keep-warm-ms MS");
+                args.keep_warm = Some((ms > 0).then(|| Duration::from_millis(ms)));
+            }
+            "--idle-ms" => {
+                args.idle = Duration::from_millis(value("--idle-ms").parse().expect("--idle-ms MS"))
+            }
             "-h" | "--help" => {
-                println!("bench_proof_commits [--proofs N] [--threads T] [--check-all] [--no-cpu]");
+                println!(
+                    "bench_proof_commits [--proofs N] [--threads T] [--check-all] [--no-cpu] \
+                     [--no-gpu] [--idle-ms MS] [--keep-warm-ms MS]"
+                );
                 std::process::exit(0);
             }
             other => panic!("unknown argument {other}"),
@@ -170,6 +204,33 @@ fn random_polys(log_sizes: &[u32], seed: u64) -> Vec<CircleCoefficients<SimdBack
         .collect()
 }
 
+/// The process's resident set and its peak (`VmRSS`, `VmHWM`), in bytes.
+fn rss() -> (u64, u64) {
+    let status = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
+    let field = |name: &str| {
+        status
+            .lines()
+            .find_map(|line| line.strip_prefix(name))
+            .and_then(|rest| rest.trim().trim_end_matches("kB").trim().parse::<u64>().ok())
+            .map_or(0, |kb| kb << 10)
+    };
+    (field("VmRSS:"), field("VmHWM:"))
+}
+
+/// Resets the peak resident set (`VmHWM`) to the current one.
+fn reset_peak() {
+    let _ = std::fs::write("/proc/self/clear_refs", "5");
+}
+
+/// The peak resident set above the current one while `f` runs.
+fn peak_above<T>(f: impl FnOnce() -> T) -> (T, u64) {
+    reset_peak();
+    let (before, _) = rss();
+    let result = f();
+    let (_, peak) = rss();
+    (result, peak.saturating_sub(before))
+}
+
 fn ms(d: Duration) -> String {
     format!("{:8.1}", d.as_secs_f64() * 1e3)
 }
@@ -194,18 +255,27 @@ fn assert_trees_eq(gpu: &TreeProver, cpu: &TreeProver, what: &str) {
 fn main() {
     let args = parse_args();
     let pool = rayon::ThreadPoolBuilder::new().num_threads(args.threads).build().unwrap();
+    let (rss_before, _) = rss();
     let start = Instant::now();
-    let committer = GpuCommitter::new().expect("a GPU adapter");
-    let info = committer.adapter_info();
-    println!(
-        "GPU: {} ({:?}, driver {} {}); committer ready in {} ms; {} threads",
-        info.name,
-        info.backend,
-        info.driver,
-        info.driver_info,
-        ms(start.elapsed()).trim(),
-        args.threads
-    );
+    let committer = args.gpu.then(|| GpuCommitter::new().expect("a GPU adapter"));
+    if let Some(committer) = &committer {
+        if let Some(window) = args.keep_warm {
+            committer.set_keep_warm(window);
+        }
+        let info = committer.adapter_info();
+        println!(
+            "GPU: {} ({:?}, driver {} {}); committer ready in {} ms, resident set +{}; keep-warm \
+             {:?}; {} threads",
+            info.name,
+            info.backend,
+            info.driver,
+            info.driver_info,
+            ms(start.elapsed()).trim(),
+            mib(rss().0.saturating_sub(rss_before)),
+            committer.keep_warm(),
+            args.threads
+        );
+    }
     let twiddles = |lifting_log_size: u32| -> TwiddleTree<SimdBackend> {
         SimdBackend::precompute_twiddles(
             CanonicCoset::new(lifting_log_size).circle_domain().half_coset,
@@ -236,7 +306,8 @@ fn main() {
             if proof == 0 { ", cold: buffers grow, twiddles computed" } else { "" }
         );
         println!(
-            "  {:<25} {:>5} {:>10}  {:>8} {:>8}  {:>8} | {:>6} {:>8} {:>6} {:>6} | root",
+            "  {:<25} {:>5} {:>10}  {:>8} {:>8}  {:>8} | {:>6} {:>8} {:>6} | {:>13} {:>13} | \
+             {:>23} | {:>7} {:>7} | root",
             "tree",
             "cols",
             "coeffs",
@@ -246,7 +317,11 @@ fn main() {
             "setup",
             "commit",
             "assem",
-            "drop"
+            "up cpy/wait",
+            "rb wait/cpy",
+            "groups/top/drain/tail",
+            "CPU pk",
+            "GPU pk",
         );
         let (mut cpu_total, mut gpu_total) = (Duration::ZERO, Duration::ZERO);
         for (tree, polys) in &transactions[tx] {
@@ -257,66 +332,116 @@ fn main() {
             };
             let bytes: u64 = tree.log_sizes.iter().map(|&l| 4u64 << l).sum();
 
+            let mut cpu_peak = 0;
             let cpu_tree = args.cpu.then(|| {
                 let input = polys.clone();
-                pool.install(|| {
-                    let memory = BaseColumnPool::<SimdBackend>::new();
-                    let start = Instant::now();
-                    let tree = TreeProver::new_striped(
-                        input,
-                        tree.log_blowup,
-                        tw,
-                        tree.lifting_log_size,
-                        &memory,
-                    );
-                    (start.elapsed(), tree)
-                })
+                let (result, peak) = peak_above(|| {
+                    pool.install(|| {
+                        let memory = BaseColumnPool::<SimdBackend>::new();
+                        let start = Instant::now();
+                        let tree = TreeProver::new_striped(
+                            input,
+                            tree.log_blowup,
+                            tw,
+                            tree.lifting_log_size,
+                            &memory,
+                        );
+                        (start.elapsed(), tree)
+                    })
+                });
+                cpu_peak = peak;
+                result
             });
 
-            let input = polys.clone();
-            let (gpu_time, gpu_tree) = pool.install(|| {
-                let start = Instant::now();
-                let result =
-                    committer.commit_striped(input, tree.log_blowup, tw, tree.lifting_log_size);
-                let elapsed = start.elapsed();
-                (elapsed, result.unwrap_or_else(|(_, declined)| panic!("declined: {declined:?}")))
+            let mut gpu_peak = 0;
+            let gpu_tree = committer.as_ref().map(|committer| {
+                let input = polys.clone();
+                std::thread::sleep(args.idle);
+                let (result, peak) = peak_above(|| {
+                    pool.install(|| {
+                        let start = Instant::now();
+                        let result = committer.commit_striped(
+                            input,
+                            tree.log_blowup,
+                            tw,
+                            tree.lifting_log_size,
+                        );
+                        let elapsed = start.elapsed();
+                        (
+                            elapsed,
+                            result.unwrap_or_else(|(_, declined)| panic!("declined: {declined:?}")),
+                        )
+                    })
+                });
+                gpu_peak = peak;
+                (result.0, result.1, committer.last_times().unwrap())
             });
-            let times = committer.last_times().unwrap();
 
-            let root = gpu_tree.commitment.root();
-            let (cpu_ms, speedup) = match &cpu_tree {
-                Some((cpu_time, cpu)) => {
+            let root = gpu_tree
+                .as_ref()
+                .map(|(_, tree, _)| tree.commitment.root())
+                .or_else(|| cpu_tree.as_ref().map(|(_, tree)| tree.commitment.root()))
+                .unwrap();
+            let (cpu_ms, speedup) = match (&cpu_tree, &gpu_tree) {
+                (Some((cpu_time, cpu)), Some((gpu_time, gpu_tree, _))) => {
                     assert_eq!(cpu.commitment.root(), root, "{}: roots differ", tree.name);
                     if args.check_all {
-                        assert_trees_eq(&gpu_tree, cpu, &tree.name);
+                        assert_trees_eq(gpu_tree, cpu, &tree.name);
                     }
-                    cpu_total += *cpu_time;
                     (
                         ms(*cpu_time),
                         format!("{:7.1}x", cpu_time.as_secs_f64() / gpu_time.as_secs_f64()),
                     )
                 }
-                None => ("       -".to_string(), "       -".to_string()),
+                (Some((cpu_time, _)), None) => (ms(*cpu_time), "       -".to_string()),
+                _ => ("       -".to_string(), "       -".to_string()),
             };
-            gpu_total += gpu_time;
+            if let Some((cpu_time, _)) = &cpu_tree {
+                cpu_total += *cpu_time;
+            }
+            let f = |d: Duration| d.as_secs_f64() * 1e3;
+            let (gpu_ms, split) = match &gpu_tree {
+                Some((gpu_time, _, times)) => {
+                    gpu_total += *gpu_time;
+                    let split = format!(
+                        "{:>6.1} {:>7.1}{} {:>6.1} | {:>6.1}/{:<6.1} {:>6.1}/{:<6.1} | \
+                         {:>5.1}/{:>5.1}/{:>5.1}/{:>5.1}",
+                        f(times.setup),
+                        f(times.commit),
+                        if times.streamed { "s" } else { " " },
+                        f(times.assembly),
+                        f(times.upload.copy),
+                        f(times.upload.wait),
+                        f(times.readback.wait),
+                        f(times.readback.copy),
+                        f(times.phases[0]),
+                        f(times.phases[1]),
+                        f(times.phases[2]),
+                        f(times.phases[3]),
+                    );
+                    (ms(*gpu_time), split)
+                }
+                None => (
+                    "       -".to_string(),
+                    format!("{:>23} | {:>13} {:>13} | {:>23}", "", "", "", ""),
+                ),
+            };
             println!(
-                "  {:<25} {:>5} {:>10}  {} {}  {} | {:>6.1} {:>7.1}{} {:>6.1} {:>6.1} | {}{}",
+                "  {:<25} {:>5} {:>10}  {} {}  {} | {} | {:>7} {:>7} | {}{}",
                 tree.name,
                 tree.log_sizes.len(),
                 mib(bytes),
                 cpu_ms,
-                ms(gpu_time),
+                gpu_ms,
                 speedup,
-                times.setup.as_secs_f64() * 1e3,
-                times.commit.as_secs_f64() * 1e3,
-                if times.streamed { "s" } else { " " },
-                times.assembly.as_secs_f64() * 1e3,
-                times.drop_polynomials.as_secs_f64() * 1e3,
+                split,
+                if args.cpu { mib_short(cpu_peak) } else { "-".to_string() },
+                if args.gpu { mib_short(gpu_peak) } else { "-".to_string() },
                 &root.to_string()[..16],
-                match (&cpu_tree, args.check_all) {
-                    (Some(_), true) => " equal (all)",
-                    (Some(_), false) => " equal",
-                    (None, _) => "",
+                match (&cpu_tree, &gpu_tree, args.check_all) {
+                    (Some(_), Some(_), true) => " equal (all)",
+                    (Some(_), Some(_), false) => " equal",
+                    _ => "",
                 },
             );
             drop(gpu_tree);
@@ -328,26 +453,44 @@ fn main() {
             "",
             "",
             if args.cpu { ms(cpu_total) } else { "       -".to_string() },
-            ms(gpu_total),
-            if args.cpu {
+            if args.gpu { ms(gpu_total) } else { "       -".to_string() },
+            if args.cpu && args.gpu {
                 format!("{:7.1}x", cpu_total.as_secs_f64() / gpu_total.as_secs_f64())
             } else {
                 "       -".to_string()
             },
         );
-        totals.push((cpu_total, gpu_total));
+        totals.push((cpu_total, gpu_total, rss().0));
     }
-    let held = committer.held_bytes();
+    if let Some(committer) = &committer {
+        let held = committer.held_bytes();
+        println!(
+            "held between commitments: device buffers {}, twiddles {} (device), upload ring {} \
+             (host-visible), readback ring {} (host)",
+            mib(held.buffers),
+            mib(held.twiddles),
+            mib(held.upload),
+            mib(held.readback)
+        );
+        println!("keep-warm dispatches: {}", committer.keep_warm_dispatches());
+    }
     println!(
-        "held between commitments: device buffers {}, twiddles {} (device), upload ring {} \
-         (host-visible), readback ring {} (host)",
-        mib(held.buffers),
-        mib(held.twiddles),
-        mib(held.upload),
-        mib(held.readback)
+        "summary, per proof (CPU new_striped total, GPU end-to-end total, the process's resident \
+         set after it):"
     );
-    println!("summary, per proof (CPU new_striped total, GPU end-to-end total):");
-    for (proof, (cpu, gpu)) in totals.iter().enumerate() {
-        println!("  proof {proof}: CPU {} ms, GPU {} ms", ms(*cpu).trim(), ms(*gpu).trim());
+    for (proof, (cpu, gpu, rss)) in totals.iter().enumerate() {
+        println!(
+            "  proof {proof}: CPU {} ms, GPU {} ms, resident {}",
+            ms(*cpu).trim(),
+            ms(*gpu).trim(),
+            mib(*rss)
+        );
     }
+    let (rss, peak) = rss();
+    println!("resident set at the end {}, peak {}", mib(rss), mib(peak));
+}
+
+/// Bytes in MiB, short.
+fn mib_short(bytes: u64) -> String {
+    format!("{:.0}M", bytes as f64 / (1 << 20) as f64)
 }

@@ -20,6 +20,7 @@
 //! chunk do, as does the CPU's copying out of one.
 
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use rayon::prelude::*;
 
@@ -33,6 +34,21 @@ pub const DEFAULT_UPLOAD_DEPTH: usize = 2;
 pub const DEFAULT_READBACK_DEPTH: usize = 3;
 /// The largest copy of one rayon task, in bytes.
 const MAX_PART_BYTES: usize = 1 << 18;
+
+/// Where a ring's time went since its times were last taken ([`UploadRing::take_times`],
+/// [`ReadbackRing::take_times`]): wall clock on the calling thread.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RingTimes {
+    /// Blocked on a chunk: its previous copy by the GPU (upload), or its copy from the GPU
+    /// (readback), behind the work submitted before it.
+    pub wait: Duration,
+    /// The CPU's copies into the chunks (upload) or out of them (readback), by all its threads.
+    pub copy: Duration,
+    /// The bytes moved.
+    pub bytes: u64,
+    /// The chunks moved.
+    pub chunks: u64,
+}
 
 /// Bytes of the host to write at `dst_offset` of `dst`.
 #[derive(Clone, Copy, Debug)]
@@ -195,6 +211,7 @@ pub struct UploadRing {
     slots: Vec<Slot>,
     chunk: u64,
     next: usize,
+    times: RingTimes,
 }
 
 impl UploadRing {
@@ -203,7 +220,7 @@ impl UploadRing {
         assert!(depth > 0 && chunk > 0 && chunk.is_multiple_of(wgpu::COPY_BUFFER_ALIGNMENT));
         let usage = wgpu::BufferUsages::MAP_WRITE | wgpu::BufferUsages::COPY_SRC;
         let slots = (0..depth).map(|_| Slot::new(gpu, "upload chunk", chunk, usage)).collect();
-        Self { slots, chunk, next: 0 }
+        Self { slots, chunk, next: 0, times: RingTimes::default() }
     }
 
     /// With [`DEFAULT_CHUNK_BYTES`] and [`DEFAULT_UPLOAD_DEPTH`].
@@ -219,6 +236,11 @@ impl UploadRing {
     /// The bytes of a chunk.
     pub fn chunk_bytes(&self) -> u64 {
         self.chunk
+    }
+
+    /// Where its time went since the last call (or its creation).
+    pub fn take_times(&mut self) -> RingTimes {
+        std::mem::take(&mut self.times)
     }
 
     /// Writes every piece into its buffer: chunk by chunk, each filled by all the CPU's threads
@@ -237,7 +259,10 @@ impl UploadRing {
             let depth = self.slots.len();
             let slot = &mut self.slots[self.next];
             self.next = (self.next + 1) % depth;
+            let start = Instant::now();
             slot.wait(gpu);
+            self.times.wait += start.elapsed();
+            let start = Instant::now();
             {
                 let mut view = slot.buffer.slice(..bytes).get_mapped_range_mut().expect("mapped");
                 let mut whole = view.slice(..);
@@ -263,6 +288,9 @@ impl UploadRing {
                 });
             }
             slot.buffer.unmap();
+            self.times.copy += start.elapsed();
+            self.times.bytes += bytes;
+            self.times.chunks += 1;
             let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("upload chunk"),
             });
@@ -288,6 +316,7 @@ pub struct ReadbackRing {
     /// Per slot: whether a readback holds it (started, not finished).
     taken: Vec<bool>,
     chunk: u64,
+    times: RingTimes,
 }
 
 /// A chunk being read back (see [`ReadbackRing::start`]).
@@ -306,7 +335,7 @@ impl ReadbackRing {
         assert!(depth > 0 && chunk > 0 && chunk.is_multiple_of(wgpu::COPY_BUFFER_ALIGNMENT));
         let usage = wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST;
         let slots = (0..depth).map(|_| Slot::new(gpu, "readback chunk", chunk, usage)).collect();
-        Self { slots, taken: vec![false; depth], chunk }
+        Self { slots, taken: vec![false; depth], chunk, times: RingTimes::default() }
     }
 
     /// With [`DEFAULT_CHUNK_BYTES`] and [`DEFAULT_READBACK_DEPTH`].
@@ -322,6 +351,11 @@ impl ReadbackRing {
     /// The bytes of a chunk.
     pub fn chunk_bytes(&self) -> u64 {
         self.chunk
+    }
+
+    /// Where its time went since the last call (or its creation).
+    pub fn take_times(&mut self) -> RingTimes {
+        std::mem::take(&mut self.times)
     }
 
     /// Whether a chunk is free (see [`Self::start`]).
@@ -387,7 +421,10 @@ impl ReadbackRing {
     ) {
         assert!(self.taken[k], "chunk {k} is not being read back");
         let slot = &mut self.slots[k];
+        let start = Instant::now();
         slot.wait(gpu);
+        self.times.wait += start.elapsed();
+        let start = Instant::now();
         {
             let view = slot
                 .buffer
@@ -408,6 +445,9 @@ impl ReadbackRing {
             });
         }
         slot.buffer.unmap();
+        self.times.copy += start.elapsed();
+        self.times.bytes += bytes;
+        self.times.chunks += 1;
         self.taken[k] = false;
     }
 
