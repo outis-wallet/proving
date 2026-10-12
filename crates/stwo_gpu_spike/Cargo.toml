@@ -1,0 +1,19 @@
+# A spike: stwo's commitment (polynomial extension and Merkle hashing) on the GPU through wgpu
+# (Vulkan, Metal, DX12 natively; WebGPU in browsers), checked bit for bit against stwo's SIMD
+# backend. Its own workspace, so wgpu stays out of the proving workspace's lockfile.
+[package]
+name = "stwo-gpu-spike"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+stwo = { path = "../stwo", features = ["prover", "parallel"] }
+wgpu = "30"
+pollster = "1"
+bytemuck = { version = "1", features = ["derive"] }
+itertools = "0.12"
+rand = { version = "0.9", features = ["small_rng"] }
+rayon = "1.10"
