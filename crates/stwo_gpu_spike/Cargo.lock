@@ -1395,6 +1395,7 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "itertools 0.12.1",
+ "naga",
  "pollster",
  "rand 0.9.5",
  "rayon",

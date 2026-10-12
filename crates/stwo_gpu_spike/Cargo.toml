@@ -17,3 +17,7 @@ bytemuck = { version = "1", features = ["derive"] }
 itertools = "0.12"
 rand = { version = "0.9", features = ["small_rng"] }
 rayon = "1.10"
+
+[dev-dependencies]
+# Translates the kernels to MSL and HLSL in a test, validated without optional capabilities.
+naga = { version = "30", features = ["wgsl-in", "msl-out", "hlsl-out"] }

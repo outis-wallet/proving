@@ -232,6 +232,16 @@ struct NodeParams {
     out_base: [[u32; 4]; 4],
 }
 
+/// The WGSL of the leaves' kernels, `absorb` and `absorb_final`, Blake2s included.
+pub fn absorb_shader() -> String {
+    format!("{}\n{}", blake2s_wgsl(), absorb_wgsl())
+}
+
+/// The WGSL of the `nodes` kernel, Blake2s included.
+pub fn nodes_shader() -> String {
+    format!("{}\n{}", blake2s_wgsl(), nodes_wgsl())
+}
+
 fn absorb_wgsl() -> String {
     let unrolled = |line: &dyn Fn(usize) -> String, n: usize| -> String {
         (0..n).map(line).collect::<Vec<_>>().join("\n    ")
@@ -619,9 +629,7 @@ impl GpuMerkle {
     }
 
     fn build(gpu: &GpuContext, checked: bool) -> Self {
-        let blake2s = blake2s_wgsl();
-        let absorb_source = format!("{blake2s}\n{}", absorb_wgsl());
-        let nodes_source = format!("{blake2s}\n{}", nodes_wgsl());
+        let (absorb_source, nodes_source) = (absorb_shader(), nodes_shader());
         let limits = gpu.device.limits();
         let pipeline = |label: &str, source: &str| {
             if checked {
