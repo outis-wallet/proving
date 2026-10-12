@@ -22,7 +22,7 @@ pub struct OodsSamples<'a> {
 pub struct EvaluateArgs<'a> {
     pub oods_samples: OodsSamples<'a>,
     pub pt: CirclePoint<Var>,
-    pub log_domain_size: usize,
+    pub log_domain_size: u32,
     pub composition_polynomial_coeff: Var,
     pub interaction_elements: [Var; 2],
     pub claimed_sums: &'a [Var],

@@ -47,11 +47,12 @@ impl<T> AuthPaths<T> {
 
     /// Validates that the structure of the authentication paths is consistent with the tree heights
     /// and the number of queries.
-    pub fn validate_structure(&self, tree_heights: &[usize], n_queries: usize) {
+    pub fn validate_structure(&self, tree_heights: &[u32], n_queries: usize) {
         for (tree_data, height) in zip_eq(&self.data, tree_heights) {
             assert_eq!(tree_data.len(), n_queries);
+            let height: usize = (*height).try_into().unwrap();
             for path in tree_data {
-                assert_eq!(path.0.len(), *height);
+                assert_eq!(path.0.len(), height);
             }
         }
     }

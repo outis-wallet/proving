@@ -77,8 +77,7 @@ pub fn verify<Value: IValue>(
 
     // Check that the component sizes are at most 2^config.log_trace_size().
     // Note that we need k + 1 bits to represent 2^k.
-    let component_sizes_bits =
-        extract_bits(context, &component_sizes, config.log_trace_size() as u32 + 1);
+    let component_sizes_bits = extract_bits(context, &component_sizes, config.log_trace_size() + 1);
 
     for claim_to_mix in statement.claims_to_mix(context) {
         channel.mix_u32s(context, claim_to_mix.into_iter());
@@ -164,7 +163,7 @@ pub fn verify<Value: IValue>(
         context,
         &proof.composition_eval_at_oods,
         oods_point,
-        config.log_trace_size() + COMPOSITION_LOG_SPLIT as usize,
+        config.log_trace_size() + COMPOSITION_LOG_SPLIT,
     );
     eq(context, composition_eval, expected_composition_eval);
 
@@ -329,7 +328,7 @@ fn get_opt_column_log_sizes_by_trace(
 fn validate_and_compute_component_sizes(
     context: &mut Context<impl IValue>,
     component_log_sizes: &Simd,
-    log_trace_size: usize,
+    log_trace_size: u32,
 ) -> Simd {
     const _: () = assert!(
         LOG_SIZE_BITS == 5,

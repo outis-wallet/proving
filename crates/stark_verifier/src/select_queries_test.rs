@@ -15,10 +15,10 @@ use crate::select_queries::{get_query_bits_from_channel, select_queries};
 fn test_select_queries() {
     let mut context = TraceContext::default();
 
-    const LOG_DOMAIN_SIZE: usize = 5;
+    const LOG_DOMAIN_SIZE: u32 = 5;
 
     let input = simd_from_u32s(&mut context, vec![24, 25]);
-    let bits = extract_bits(&mut context, &input, LOG_DOMAIN_SIZE as u32);
+    let bits = extract_bits(&mut context, &input, LOG_DOMAIN_SIZE);
     let queries = select_queries(&mut context, bits);
 
     // Check that the first point is on the circle and in the relevant coset
@@ -27,7 +27,7 @@ fn test_select_queries() {
     let y = packed_values(&context, &queries.points.y)[0].0.0;
     assert_eq!(x * x + y * y, 1.into());
     assert_eq!(
-        CirclePoint { x, y }.repeated_double(LOG_DOMAIN_SIZE as u32),
+        CirclePoint { x, y }.repeated_double(LOG_DOMAIN_SIZE),
         CirclePoint { x: -M31::one(), y: M31::zero() }
     );
 
@@ -59,11 +59,11 @@ fn test_full_select_queries_regression() {
     let mut channel = Channel::from_digest(&mut context, init_digest);
 
     const N_QUERIES: usize = 3;
-    const LOG_DOMAIN_SIZE: usize = 5;
+    const LOG_DOMAIN_SIZE: u32 = 5;
 
     let bits = get_query_bits_from_channel(&mut context, &mut channel, N_QUERIES, LOG_DOMAIN_SIZE);
 
-    assert_eq!(bits.len(), LOG_DOMAIN_SIZE);
+    assert_eq!(Ok(bits.len()), LOG_DOMAIN_SIZE.try_into());
     assert_eq!(bits[0].len(), N_QUERIES);
 
     let queries = select_queries(&mut context, bits);

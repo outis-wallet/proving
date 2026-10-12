@@ -37,7 +37,7 @@ use stwo::prover::poly::circle::{PolyOps, SecureEvaluation};
 fn test_fri_decommit_with_jumps(
     #[case] trace_log_size: u32,
     #[case] log_blowup_factor: u32,
-    #[case] fold_step: usize,
+    #[case] fold_step: u32,
     #[case] n_queries: usize,
 ) {
     let log_evaluation_domain_size = trace_log_size + log_blowup_factor;
@@ -55,7 +55,7 @@ fn test_fri_decommit_with_jumps(
         component_shapes: vec![],
         cumulative_sum_columns: vec![],
         fri: FriConfig {
-            params: FriParams::new(0, 0, log_blowup_factor, n_queries, fold_step as u32),
+            params: FriParams::new(0, 0, log_blowup_factor, n_queries, fold_step),
             trace_log_size,
         },
     };
@@ -72,7 +72,7 @@ fn test_fri_decommit_with_jumps(
         queries.bits.iter().map(|simd| Simd::unpack(&mut context, simd)).collect();
 
     // Compute the circuit FriProof.
-    let all_fold_steps = compute_all_fold_steps(config.log_trace_size(), fold_step);
+    let all_fold_steps = compute_all_fold_steps(trace_log_size, fold_step);
     let witness = test_construct_fri_witness(&fri_proof, &all_fold_steps, &query_indices);
     let auth_paths =
         test_construct_fri_auth_paths(&fri_proof, &config, &query_indices, &all_fold_steps);
@@ -129,11 +129,11 @@ fn polynomial_evaluation(
 fn create_fri_proof(
     trace_log_size: u32,
     log_blowup_factor: u32,
-    fold_step: usize,
+    fold_step: u32,
     n_queries: usize,
     query_indices: &[usize],
 ) -> ExtendedFriProof<Blake2sMerkleHasher> {
-    let config = FriParams::new(0, 0, log_blowup_factor, n_queries, fold_step as u32);
+    let config = FriParams::new(0, 0, log_blowup_factor, n_queries, fold_step);
     let column = polynomial_evaluation(trace_log_size, log_blowup_factor);
     let twiddles = CpuBackend::precompute_twiddles(column.domain.half_coset);
     let prover = FriProver::<CpuBackend, Blake2sMerkleChannel>::commit(
@@ -156,7 +156,7 @@ fn generate_query_indices(n_queries: usize, log_evaluation_domain_size: u32) -> 
 /// ([ExtendedFriProof]).
 fn test_construct_fri_witness(
     proof: &ExtendedFriProof<Blake2sMerkleHasher>,
-    all_fold_steps: &[usize],
+    all_fold_steps: &[u32],
     query_locations: &[usize],
 ) -> FriWitness<QM31> {
     let all_layers = [
@@ -184,7 +184,7 @@ fn test_construct_fri_auth_paths(
     proof: &ExtendedFriProof<Blake2sMerkleHasher>,
     config: &ProofConfig,
     query_locations: &[usize],
-    all_fold_steps: &[usize],
+    all_fold_steps: &[u32],
 ) -> AuthPaths<QM31> {
     let unsorted_query_locations = &query_locations;
     let layers = chain!([&proof.aux.first_layer], &proof.aux.inner_layers);
@@ -193,18 +193,22 @@ fn test_construct_fri_auth_paths(
     let mut res = vec![];
 
     for (layer_proof, step) in zip_eq(layers, all_fold_steps) {
+        let pack_leaves = log_layer_size >= LOG_PACKED_LEAF_SIZE && *step > 1;
+        let pack_shift = if pack_leaves { LOG_PACKED_LEAF_SIZE } else { 0 };
+        // The auth path covers the tree layers from `step` up to `log_layer_size`; packed leaves
+        // shift the layer indices down by `pack_shift`.
+        let first_layer: usize = (step - pack_shift).try_into().unwrap();
+        let last_layer: usize = (log_layer_size - pack_shift).try_into().unwrap();
         res.push(
             unsorted_query_locations
                 .iter()
                 .map(|query| {
-                    let mut pos = *query;
-                    let pack_leaves = log_layer_size >= LOG_PACKED_LEAF_SIZE as usize && *step > 1;
-                    let pack_shift = if pack_leaves { LOG_PACKED_LEAF_SIZE as usize } else { 0 };
-                    pos >>= fold_sum + step;
+                    let mut pos = *query >> (fold_sum + step);
                     let mut auth_path: AuthPath<QM31> = AuthPath(vec![]);
-                    for j in *step..log_layer_size {
-                        let hash =
-                            layer_proof.decommitment.all_node_values[j - pack_shift][&(pos ^ 1)];
+                    for node_values in
+                        &layer_proof.decommitment.all_node_values[first_layer..last_layer]
+                    {
+                        let hash = node_values[&(pos ^ 1)];
                         auth_path.0.push(hash.into());
                         pos >>= 1;
                     }

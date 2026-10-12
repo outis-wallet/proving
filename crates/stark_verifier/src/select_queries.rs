@@ -20,7 +20,7 @@ pub fn get_query_bits_from_channel(
     context: &mut Context<impl IValue>,
     channel: &mut Channel,
     n_queries: usize,
-    log_domain_size: usize,
+    log_domain_size: u32,
 ) -> Vec<Simd> {
     let n_hashes = n_queries.div_ceil(BLAKE2S_DIGEST_N_WORDS);
     let mut queries_simd_vec = Vec::with_capacity(n_queries);
@@ -44,7 +44,7 @@ pub fn get_query_bits_from_channel(
     if log_domain_size > 16 {
         bits.extend(extract_limb_bits(context, &queries_simd_vec, 1));
     }
-    bits.truncate(log_domain_size);
+    bits.truncate(log_domain_size.try_into().unwrap());
 
     bits
 }
@@ -81,7 +81,7 @@ pub struct Queries {
 /// Takes the data obtained from [get_query_bits_from_channel], and returns [Queries].
 pub fn select_queries(context: &mut Context<impl IValue>, bits: Vec<Simd>) -> Queries {
     let n_queries = bits[0].len();
-    let log_domain_size = bits.len();
+    let log_domain_size: u32 = bits.len().try_into().unwrap();
 
     // Construct the circle point for each query.
     // Start with the generator of the subgroup of size `2 * domain_size` which is added to all
@@ -89,7 +89,7 @@ pub fn select_queries(context: &mut Context<impl IValue>, bits: Vec<Simd>) -> Qu
     // See [stwo::core::poly::circle::CanonicCoset].
     let mut point = generator_point_simd(context, log_domain_size + 1, n_queries);
 
-    for (i, bit) in bits.iter().enumerate().skip(1) {
+    for (i, bit) in (1..).zip(bits.iter().skip(1)) {
         // If the i-th bit (for i > 0) is 1, we need to add the generator of the subgroup
         // of size `2^i` to the current sum.
         let cur_gen_pt = generator_point_simd(context, i, n_queries);
