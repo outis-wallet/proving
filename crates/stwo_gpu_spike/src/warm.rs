@@ -15,7 +15,9 @@
 //! commitment takes 124 ms after 3 s of idle (`bench_idle`; a dispatch every 5 ms: 130 ms, the
 //! clocks at 1605-1680 MHz; every 20 ms: 190-210 ms, the memory down to 5001 MHz). The cost is
 //! the power of a GPU at full clocks, mostly idle: about 104 W on the RTX 3080 against 2.5 W at
-//! P8 (`nvidia-smi`), for the window after each commitment. It pauses during a commitment.
+//! P8 (`nvidia-smi`), for the window after each commitment. It pauses during a commitment. The
+//! committer also warms for a window from its creation (a prover's process makes its committer,
+//! then proves: in a proof of the Outis prover, the first commitment started 0.7 s after it).
 //!
 //! Natively only: a thread with the device's handles. In wasm it does nothing.
 

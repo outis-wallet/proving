@@ -10,8 +10,9 @@
 //! ([`TwiddleCache`]); and two staging rings, through which the coefficients go up and the
 //! result comes back, by all the CPU's threads ([`crate::transfer`]). Only the plans (uniforms
 //! and bind groups) are built per commitment. Natively, a thread keeps the GPU's clocks up for a
-//! few seconds after each commitment, as the next one of a proof usually follows within them
-//! ([`crate::warm`]: [`GpuCommitter::set_keep_warm`]).
+//! few seconds after each commitment, as the next one of a proof usually follows within them,
+//! and after the committer's creation, for the first ([`crate::warm`]:
+//! [`GpuCommitter::set_keep_warm`]).
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Mutex;
@@ -141,6 +142,11 @@ impl GpuCommitter {
         let warm = catch_unwind(AssertUnwindSafe(|| KeepWarm::new(&gpu, window_from_env())))
             .ok()
             .and_then(Result::ok);
+        // A committer is made for proving: the first commitment usually follows within the
+        // window (a prover's process makes its committer, then proves).
+        if let Some(warm) = &warm {
+            warm.warm_up();
+        }
         Ok(Self { warm, gpu, kernels, state: Mutex::new(Some(reused)), times: Mutex::new(None) })
     }
 
