@@ -426,10 +426,27 @@ pub fn trace_part(
     }
     let log_size = length.ilog2();
     let values = columns.iter().map(|(_, column)| &column.values).collect_vec();
-    match committer.recompute_stripe1(&values, log_size, log_parts) {
-        Some(stripes) => stripes.into_iter().map(Some).collect(),
-        None => none(),
+    // In chunks of at most `chunk_bytes()` (one column at least), so that the GPU holds two
+    // chunks' worth of working buffers rather than two of the largest request.
+    let per_chunk = (chunk_bytes() / (4 << log_size)).max(1) as usize;
+    let mut answers = Vec::with_capacity(columns.len());
+    for chunk in values.chunks(per_chunk) {
+        match committer.recompute_stripe1(chunk, log_size, log_parts) {
+            Some(stripes) => answers.extend(stripes.into_iter().map(Some)),
+            None => answers.extend(chunk.iter().map(|_| None)),
+        }
     }
+    answers
+}
+
+/// The most stripe-0 bytes A2 sends up at once: `STWO_GPU_PARTS_CHUNK_MIB` (default 128 MiB,
+/// WebGPU's default binding size); 0 for no limit.
+fn chunk_bytes() -> u64 {
+    let mib = std::env::var("STWO_GPU_PARTS_CHUNK_MIB")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(128);
+    if mib == 0 { u64::MAX } else { mib << 20 }
 }
 
 /// Runs `f`, catching a panic (a GPU failure) as `None`.
