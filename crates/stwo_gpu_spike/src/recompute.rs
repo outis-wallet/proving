@@ -79,13 +79,13 @@ impl IfftKernels {
 /// The twiddles of columns of `2^log_size` coefficients committed at blowup `log_blowup`: the
 /// inverse line twiddles of stripe 0's domain (as `trace_part` interpolates with), and every
 /// stripe's for the extension (made only if the commitments' are not at hand).
-struct Tables {
-    itw: wgpu::Buffer,
+pub(crate) struct Tables {
+    pub(crate) itw: wgpu::Buffer,
     extension: Option<Arc<StripeTwiddles>>,
 }
 
 impl Tables {
-    fn new(gpu: &GpuContext, log_size: u32, log_blowup: u32) -> Self {
+    pub(crate) fn new(gpu: &GpuContext, log_size: u32, log_blowup: u32) -> Self {
         let domain = CanonicCoset::new(log_size + log_blowup).circle_domain();
         // As trace_part: the twiddles of the first part's half coset, their inverses.
         let first_part = part_domain(domain, log_blowup, 0);
@@ -247,77 +247,7 @@ impl Recomputer {
             extension_twiddles,
             Merge::Off,
         );
-        // The passes of every batch: (pipeline, buffer, params, workgroups).
-        let inv = BaseField::from(1u32 << log_size).inverse().0;
-        let transposed = u32::from(log_size > CACHED_FFT_LOG_SIZE);
-        let grid = |threads: u64| {
-            let workgroups = threads.div_ceil(256).max(1) as u32;
-            let x = workgroups.min(MAX_WG_X);
-            (x, workgroups.div_ceil(x))
-        };
-        let mut passes = vec![];
-        for batch in &layout.batches {
-            let total = batch.n_words();
-            let params = |k: u32, n_wg_x: u32| Params {
-                log_n: log_size,
-                k,
-                total: total as u32,
-                base: batch.offset as u32,
-                dst_base: batch.offset as u32,
-                inv,
-                transposed,
-                n_wg_x,
-            };
-            let tiles = total.div_ceil(1 << TILE_LOG) * 256;
-            let (x, y) = grid(tiles);
-            passes.push((&self.kernels.low, batch.buffer, params(0, x), (x, y)));
-            for k in TILE_LOG..log_size {
-                let (x, y) = grid(total / 2);
-                passes.push((&self.kernels.layer, batch.buffer, params(k, x), (x, y)));
-            }
-            let (x, y) = grid(total);
-            passes.push((&self.kernels.scale, batch.buffer, params(0, x), (x, y)));
-        }
-        let uniforms = passes
-            .iter()
-            .map(|(_, _, params, _)| {
-                gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("ifft params"),
-                    contents: bytemuck::bytes_of(params),
-                    usage: wgpu::BufferUsages::UNIFORM,
-                })
-            })
-            .collect_vec();
-        let groups = passes
-            .iter()
-            .zip(&uniforms)
-            .map(|((pipeline, buffer, ..), uniform)| {
-                let scale = std::ptr::eq(*pipeline, &self.kernels.scale);
-                let mut entries = vec![
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: work.buffers[*buffer].as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry { binding: 2, resource: uniform.as_entire_binding() },
-                ];
-                if scale {
-                    entries.push(wgpu::BindGroupEntry {
-                        binding: 3,
-                        resource: coeffs.buffers[*buffer].as_entire_binding(),
-                    });
-                } else {
-                    entries.push(wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: tables.itw.as_entire_binding(),
-                    });
-                }
-                gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: None,
-                    layout: &pipeline.get_bind_group_layout(0),
-                    entries: &entries,
-                })
-            })
-            .collect_vec();
+        let ifft = IfftPlan::new(gpu, &self.kernels, &tables.itw, &work, &coeffs, log_size);
         times.setup = start.elapsed();
 
         // Stripe 0 up, into the working buffers.
@@ -338,17 +268,7 @@ impl Recomputer {
         // The inverse FFT into the coefficients, then stripe 1 into the working buffers.
         let start = Instant::now();
         let mut encoder = gpu.device.create_command_encoder(&Default::default());
-        {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("ifft"),
-                timestamp_writes: None,
-            });
-            for ((pipeline, _, _, (x, y)), group) in passes.iter().zip(&groups) {
-                pass.set_pipeline(pipeline);
-                pass.set_bind_group(0, group, &[]);
-                pass.dispatch_workgroups(*x, *y, 1);
-            }
-        }
+        ifft.encode(&self.kernels, &mut encoder);
         // The coefficients, for a test, before the extension.
         let coefficient_columns = coefficients.then(|| {
             let mut columns = (0..columns.len())
@@ -395,10 +315,135 @@ impl Recomputer {
         times.readback = start.elapsed();
 
         extension.destroy();
-        for uniform in uniforms {
+        ifft.destroy();
+        (out, coefficient_columns, times)
+    }
+}
+
+/// The inverse FFT of every column of `work` (each holding stripe 0, `2^log_size` values, of its
+/// domain), in place, the coefficients (as stwo stores them) written into `coeffs` (the same
+/// layout): the dispatches, ready to be recorded.
+pub(crate) struct IfftPlan {
+    /// Per dispatch: whether it is the scaling, its workgroups, its uniform and bind group.
+    passes: Vec<(bool, bool, (u32, u32))>,
+    uniforms: Vec<wgpu::Buffer>,
+    groups: Vec<wgpu::BindGroup>,
+}
+
+impl IfftPlan {
+    /// With `itw` the inverse twiddles of the columns' stripe-0 domain ([`Tables`]).
+    pub(crate) fn new(
+        gpu: &GpuContext,
+        kernels: &IfftKernels,
+        itw: &wgpu::Buffer,
+        work: &GpuColumns,
+        coeffs: &GpuColumns,
+        log_size: u32,
+    ) -> Self {
+        let layout = &work.layout;
+        // The passes of every batch: (low, scale, buffer, params, workgroups).
+        let inv = BaseField::from(1u32 << log_size).inverse().0;
+        let transposed = u32::from(log_size > CACHED_FFT_LOG_SIZE);
+        let grid = |threads: u64| {
+            let workgroups = threads.div_ceil(256).max(1) as u32;
+            let x = workgroups.min(MAX_WG_X);
+            (x, workgroups.div_ceil(x))
+        };
+        let mut passes = vec![];
+        for batch in &layout.batches {
+            assert_eq!(batch.log_size, log_size, "the columns of one log size");
+            let total = batch.n_words();
+            let params = |k: u32, n_wg_x: u32| Params {
+                log_n: log_size,
+                k,
+                total: total as u32,
+                base: batch.offset as u32,
+                dst_base: batch.offset as u32,
+                inv,
+                transposed,
+                n_wg_x,
+            };
+            let tiles = total.div_ceil(1 << TILE_LOG) * 256;
+            let (x, y) = grid(tiles);
+            passes.push((true, false, batch.buffer, params(0, x), (x, y)));
+            for k in TILE_LOG..log_size {
+                let (x, y) = grid(total / 2);
+                passes.push((false, false, batch.buffer, params(k, x), (x, y)));
+            }
+            let (x, y) = grid(total);
+            passes.push((false, true, batch.buffer, params(0, x), (x, y)));
+        }
+        let pipeline = |low: bool, scale: bool| match (low, scale) {
+            (true, _) => &kernels.low,
+            (_, true) => &kernels.scale,
+            _ => &kernels.layer,
+        };
+        let uniforms = passes
+            .iter()
+            .map(|(_, _, _, params, _)| {
+                gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("ifft params"),
+                    contents: bytemuck::bytes_of(params),
+                    usage: wgpu::BufferUsages::UNIFORM,
+                })
+            })
+            .collect_vec();
+        let groups = passes
+            .iter()
+            .zip(&uniforms)
+            .map(|(&(low, scale, buffer, ..), uniform)| {
+                let mut entries = vec![
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: work.buffers[buffer].as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry { binding: 2, resource: uniform.as_entire_binding() },
+                ];
+                if scale {
+                    entries.push(wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: coeffs.buffers[buffer].as_entire_binding(),
+                    });
+                } else {
+                    entries.push(wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: itw.as_entire_binding(),
+                    });
+                }
+                gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: None,
+                    layout: &pipeline(low, scale).get_bind_group_layout(0),
+                    entries: &entries,
+                })
+            })
+            .collect_vec();
+        let passes = passes.into_iter().map(|(low, scale, _, _, wg)| (low, scale, wg)).collect();
+        Self { passes, uniforms, groups }
+    }
+
+    /// Records the dispatches, in one compute pass.
+    pub(crate) fn encode(&self, kernels: &IfftKernels, encoder: &mut wgpu::CommandEncoder) {
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("ifft"),
+            timestamp_writes: None,
+        });
+        for (&(low, scale, (x, y)), group) in self.passes.iter().zip(&self.groups) {
+            let pipeline = match (low, scale) {
+                (true, _) => &kernels.low,
+                (_, true) => &kernels.scale,
+                _ => &kernels.layer,
+            };
+            pass.set_pipeline(pipeline);
+            pass.set_bind_group(0, group, &[]);
+            pass.dispatch_workgroups(x, y, 1);
+        }
+    }
+
+    /// Frees the uniforms now.
+    pub(crate) fn destroy(&self) {
+        for uniform in &self.uniforms {
             uniform.destroy();
         }
-        (out, coefficient_columns, times)
     }
 }
 

@@ -49,6 +49,7 @@ pub mod committer;
 pub mod constraint;
 pub mod decommit;
 pub mod extension;
+pub mod fri;
 pub mod memory;
 pub mod merkle;
 pub mod ood;
