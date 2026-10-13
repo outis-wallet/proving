@@ -2,6 +2,7 @@ use std::array;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use cairo_air::air::{PublicData, PublicMemory};
 use cairo_air::components::memory_address_to_id::MEMORY_ADDRESS_TO_ID_SPLIT;
 use cairo_air::flat_claims::FlatClaim;
 use cairo_air::relations::{
@@ -24,6 +25,7 @@ use indexmap::IndexMap;
 use itertools::{Itertools, chain, zip_eq};
 use stwo::core::fields::m31::{M31, P as M31_P};
 use stwo::core::fields::qm31::QM31;
+use stwo::core::utils::SliceExt;
 use stwo_cairo_common::builtins::{
     ADD_MOD_BUILTIN_MEMORY_CELLS, BITWISE_BUILTIN_MEMORY_CELLS, EC_OP_BUILTIN_MEMORY_CELLS,
     ECDSA_MEMORY_CELLS, KECCAK_MEMORY_CELLS, MUL_MOD_BUILTIN_MEMORY_CELLS,
@@ -149,8 +151,9 @@ impl AuxData {
         let safe_call_ids = [iter.next().unwrap(), iter.next().unwrap()];
         let output_ids = iter.by_ref().take(N_OUTPUTS).collect_vec();
         let program_ids = iter.by_ref().take(program_len).collect_vec();
-        let component_log_sizes = iter.collect_vec();
+        let component_log_sizes = iter.by_ref().take(n_components).collect_vec();
         assert_eq!(component_log_sizes.len(), n_components);
+        assert!(iter.next().is_none(), "Didn't consume all vars");
 
         Self {
             initial_state,
@@ -168,25 +171,28 @@ impl AuxData {
 pub fn serialize_aux_data(claim: &FlatClaim) -> Vec<M31> {
     let mut result = vec![];
 
-    for state in [&claim.public_data.initial_state, &claim.public_data.final_state] {
+    let FlatClaim { component_enable_bits: _, component_log_sizes, public_data } = claim;
+    let PublicData { public_memory, initial_state, final_state } = public_data;
+
+    for state in [initial_state, final_state] {
         result.push(state.pc);
         result.push(state.ap);
         result.push(state.fp);
     }
 
-    let public_memory = &claim.public_data.public_memory;
+    let PublicMemory { program, public_segments, output, safe_call_ids } = public_memory;
 
-    for segment in public_memory.public_segments.present_segments().iter() {
+    for segment in public_segments.present_segments().iter() {
         result.push(segment.start_ptr.id.into());
         result.push(segment.start_ptr.value.into());
         result.push(segment.stop_ptr.id.into());
         result.push(segment.stop_ptr.value.into());
     }
 
-    result.extend(public_memory.safe_call_ids.iter().map(|id| M31::from(*id)));
-    result.extend(public_memory.output.iter().map(|(id, _value)| M31::from(*id)));
-    result.extend(public_memory.program.iter().map(|(id, _value)| M31::from(*id)));
-    result.extend(claim.component_log_sizes.iter().map(|size| M31::from(*size)));
+    result.extend(safe_call_ids.iter().map(|id| M31::from(*id)));
+    result.extend(output.iter().map(|(id, _value)| M31::from(*id)));
+    result.extend(program.iter().map(|(id, _value)| M31::from(*id)));
+    result.extend(component_log_sizes.iter().map(|size| M31::from(*size)));
 
     result
 }
@@ -351,7 +357,7 @@ fn output_limbs_from_hash<Value: IValue>(
 ) -> [[M31Wrapper<Var>; MEMORY_VALUES_LIMBS]; N_OUTPUTS] {
     let zero = M31Wrapper::const_from_u32(context, 0);
     let mut outputs = Vec::with_capacity(N_OUTPUTS);
-    for half in hash.as_array().chunks(N_WORDS_PER_OUTPUT_CELL) {
+    for half in hash.as_array().checked_as_chunks::<N_WORDS_PER_OUTPUT_CELL>() {
         // Little-endian bit stream of the cell's 128-bit value (LSB first).
         let mut bits = Vec::with_capacity(N_WORDS_PER_OUTPUT_CELL * 32);
         for word in half {
@@ -359,16 +365,15 @@ fn output_limbs_from_hash<Value: IValue>(
         }
         // Regroup the bits into nine-bit limbs: the 128 bits fill the low div_ceil(128, 9) = 15
         // limbs (the last only partially), and the high limbs stay zero.
-        let cell: [M31Wrapper<Var>; MEMORY_VALUES_LIMBS] = array::from_fn(|i| {
-            let start = i * LIMB_BITS;
-            if start >= bits.len() {
-                return zero.clone();
-            }
+        let mut cell_vec = Vec::with_capacity(MEMORY_VALUES_LIMBS);
+        for limb_bits in bits.chunks(LIMB_BITS) {
+            let limb = Simd::combine_bits(context, limb_bits);
+            cell_vec.push(M31Wrapper::new_unsafe(Simd::unpack_idx(context, &limb, 0)));
+        }
 
-            let chunk = &bits[start..(start + LIMB_BITS).min(bits.len())];
-            let limb = Simd::combine_bits(context, chunk);
-            M31Wrapper::new_unsafe(Simd::unpack_idx(context, &limb, 0))
-        });
+        assert!(cell_vec.len() <= MEMORY_VALUES_LIMBS); // Otherwise .resize() would crop it
+        cell_vec.resize(MEMORY_VALUES_LIMBS, zero.clone());
+        let cell: [M31Wrapper<Var>; MEMORY_VALUES_LIMBS] = cell_vec.try_into().unwrap();
         outputs.push(cell);
     }
     outputs.try_into().unwrap()
