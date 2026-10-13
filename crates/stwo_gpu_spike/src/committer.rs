@@ -96,6 +96,13 @@ pub struct GpuCommitter {
     fri: Mutex<Option<crate::fri::FriState>>,
     fri_stats: Mutex<FriStats>,
     ood_stats: Mutex<OodStats>,
+    /// EXPERIMENT (lean): commit with nothing held between commitments and the coefficients
+    /// moved to the GPU, not copied (see [`Self::commit_lean`]). `STWO_GPU_LEAN=1`, or
+    /// [`Self::set_lean`].
+    lean: std::sync::atomic::AtomicBool,
+    /// EXPERIMENT: the streamed path's buffers, twiddles and rings dropped after every
+    /// commitment (`STWO_GPU_RELEASE=1`).
+    release_after: bool,
 }
 
 /// The out-of-domain samples served on the GPU (see [`GpuCommitter::ood_values`]), since the
@@ -289,7 +296,7 @@ impl GpuCommitter {
             warm,
             gpu,
             kernels,
-            state: Mutex::new(Some(reused)),
+            state: Mutex::new((!lean_from_env()).then_some(reused)),
             times: Mutex::new(None),
             parts: Mutex::new(PartStore::new()),
             parts_mode: Mutex::new(PartsMode::from_env()),
@@ -304,6 +311,8 @@ impl GpuCommitter {
             fri: Mutex::new(None),
             fri_stats: Mutex::new(FriStats::default()),
             ood_stats: Mutex::new(OodStats::default()),
+            lean: std::sync::atomic::AtomicBool::new(lean_from_env()),
+            release_after: std::env::var("STWO_GPU_RELEASE").is_ok_and(|v| v == "1"),
         })
     }
 
@@ -362,6 +371,13 @@ impl GpuCommitter {
         let log_sizes = polynomials.iter().map(|poly| poly.log_size()).collect_vec();
         if !takes_striped_path(&log_sizes, log_blowup_factor, lifting_log_size) {
             return Err((polynomials, Declined::NotStriped));
+        }
+        if self.lean()
+            && *self.parts_mode.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+                == PartsMode::Off
+            && !self.decommit_enabled()
+        {
+            return self.commit_lean(polynomials, log_blowup_factor, twiddles, lifting_log_size);
         }
         let mut state = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let mut parts = self.parts.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -482,6 +498,9 @@ impl GpuCommitter {
                 times.drop_polynomials = start.elapsed() - before;
                 times.total = start.elapsed();
                 *self.times.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(times);
+                if self.release_after {
+                    *state = None;
+                }
                 Ok(tree)
             }
             Err(panic) => {
@@ -490,6 +509,147 @@ impl GpuCommitter {
                 parts.clear();
                 Err((polynomials, Declined::Gpu(panic_message(&panic))))
             }
+        }
+    }
+
+    /// Whether commitments are lean (see [`Self::commit_lean`]).
+    pub fn lean(&self) -> bool {
+        self.lean.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Turns lean commitments on or off for the commitments from now on.
+    pub fn set_lean(&self, lean: bool) {
+        self.lean.store(lean, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// EXPERIMENT (lean): the commitment for a unified-memory device, within the memory
+    /// `new_striped` itself uses. Stripe by stripe ([`StripedCommitment`]: one stripe's
+    /// evaluations and Merkle states, not every stripe's), on buffers of its own, freed when it
+    /// returns: nothing is held between commitments. The coefficients are moved to the GPU, not
+    /// copied: the host's go once uploaded (as `new_striped`'s go after stripe 0), and the GPU's
+    /// once the work is done; stripe 0 is then read back buffer by buffer, each buffer freed once
+    /// read. Only plain commitments (no parts kept for constraint evaluation, no decommitment from
+    /// coefficients). A failure once the host's coefficients are gone cannot give them back: it
+    /// panics.
+    fn commit_lean(
+        &self,
+        polynomials: ColumnVec<CircleCoefficients<SimdBackend>>,
+        log_blowup: u32,
+        twiddles: &TwiddleTree<SimdBackend>,
+        lifting_log_size: u32,
+    ) -> Result<StripedTree, DeclinedCommit> {
+        let log_sizes = polynomials.iter().map(|poly| poly.log_size()).collect_vec();
+        let mut state = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        *state = None;
+        self.release_transient();
+        if let Some(warm) = &self.warm {
+            warm.begin();
+        }
+        let start = Instant::now();
+        let verbose = std::env::var("STWO_GPU_LEAN_VERBOSE").is_ok_and(|v| v == "1");
+        if verbose {
+            eprintln!("lean enter: footprint {} MiB", footprint_mib());
+        }
+        let mut times = CommitTimes::default();
+        let chunk = lean_env_mib("STWO_GPU_LEAN_CHUNK_MIB", 8) << 20;
+        // 0: the device's largest binding (the default layout): the largest size's columns then
+        // go in one dispatch, the leaves' last absorption, and the Merkle states stay at the
+        // sizes below it. Split, they carry states at the stripe's full height.
+        let buffer_mib = lean_env_mib("STWO_GPU_LEAN_BUFFER_MIB", 0);
+        let buffer_words = (buffer_mib > 0).then_some((buffer_mib << 20) / 4);
+        let prepared = catch_unwind(AssertUnwindSafe(|| {
+            self.root_cosets
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .insert(log_blowup, twiddles.root_coset);
+            let distinct = log_sizes.iter().copied().collect();
+            let stripe_twiddles = std::sync::Arc::new(crate::extension::StripeTwiddles::new(
+                &self.gpu, &distinct, log_blowup, twiddles,
+            ));
+            let mut buffers = CommitBuffers::new();
+            let commitment = StripedCommitment::with_buffers(
+                &self.gpu,
+                &self.kernels,
+                &mut buffers,
+                stripe_twiddles,
+                &log_sizes,
+                log_blowup,
+                lifting_log_size,
+                CommitOptions { max_buffer_words: buffer_words, ..Default::default() },
+            );
+            let mut upload = UploadRing::new(&self.gpu, chunk, 2);
+            commitment.upload_through(&self.gpu, &mut upload, &polynomials);
+            if std::env::var("STWO_GPU_LEAN_VERBOSE").is_ok_and(|v| v == "1") {
+                eprintln!("lean commitment of {} columns up to 2^{}: {:?}", log_sizes.len(), log_sizes.iter().max().unwrap_or(&0), commitment.gpu_bytes());
+            }
+            commitment
+        }));
+        let commitment = match prepared {
+            Ok(commitment) => commitment,
+            Err(panic) => {
+                if let Some(warm) = &self.warm {
+                    warm.end();
+                }
+                return Err((polynomials, Declined::Gpu(panic_message(&panic))));
+            }
+        };
+        times.setup = start.elapsed();
+        if verbose {
+            eprintln!("lean uploaded: footprint {} MiB at {:.3} s", footprint_mib(), start.elapsed().as_secs_f64());
+        }
+        // The coefficients are on the GPU (in the ring's chunks or copied on): the host's go,
+        // here (not on a thread), so that their pages are gone before the GPU's work touches the
+        // evaluations' and the states'.
+        drop(polynomials);
+        if verbose {
+            eprintln!("lean host coefficients dropped: footprint {} MiB at {:.3} s", footprint_mib(), start.elapsed().as_secs_f64());
+        }
+        let tree = catch_unwind(AssertUnwindSafe(|| {
+            commitment.submit(&self.gpu, &self.kernels);
+            self.gpu.device.poll(wgpu::PollType::wait_indefinitely()).expect("poll");
+            times.commit = start.elapsed() - times.setup;
+            if verbose {
+                eprintln!("lean computed: footprint {} MiB at {:.3} s", footprint_mib(), start.elapsed().as_secs_f64());
+            }
+            commitment.release_inputs();
+            let _ = self.gpu.device.poll(wgpu::PollType::wait_indefinitely());
+            if verbose {
+                eprintln!("lean inputs released: footprint {} MiB at {:.3} s", footprint_mib(), start.elapsed().as_secs_f64());
+            }
+            let mut readback = ReadbackRing::new(&self.gpu, chunk, 2);
+            let output = commitment.read_through_releasing(&self.gpu, &mut readback);
+            if verbose {
+                eprintln!("lean read back: footprint {} MiB at {:.3} s", footprint_mib(), start.elapsed().as_secs_f64());
+            }
+            drop(readback);
+            commitment.tree_prover(output)
+        }));
+        commitment.destroy();
+        // wgpu frees destroyed buffers (and the staging of queued writes) at its next
+        // maintenance: now, not at the next commitment.
+        let _ = self.gpu.device.poll(wgpu::PollType::wait_indefinitely());
+        // EXPERIMENT: Metal frees a released buffer's memory a while after (not at the release):
+        // STWO_GPU_LEAN_SETTLE_MS waits for it, to see what prompt frees would give.
+        if let Some(ms) = std::env::var("STWO_GPU_LEAN_SETTLE_MS").ok().and_then(|v| v.parse().ok()) {
+            std::thread::sleep(Duration::from_millis(ms));
+        }
+        if verbose {
+            eprintln!("lean destroyed: footprint {} MiB at {:.3} s", footprint_mib(), start.elapsed().as_secs_f64());
+        }
+        if let Some(warm) = &self.warm {
+            warm.end();
+        }
+        match tree {
+            Ok(tree) => {
+                times.assembly = start.elapsed() - times.setup - times.commit;
+                times.total = start.elapsed();
+                *self.times.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(times);
+                Ok(tree)
+            }
+            Err(panic) => panic!(
+                "lean GPU commitment failed after its coefficients left the host: {}",
+                panic_message(&panic)
+            ),
         }
     }
 
@@ -1403,6 +1563,34 @@ fn free(polynomials: ColumnVec<CircleCoefficients<SimdBackend>>) {
     }
     #[cfg(target_family = "wasm")]
     drop(polynomials);
+}
+
+/// EXPERIMENT: the process's physical footprint in MiB (Apple: `proc_pid_rusage`), for the lean
+/// commitment's verbose trace; 0 elsewhere.
+fn footprint_mib() -> u64 {
+    #[cfg(target_vendor = "apple")]
+    {
+        unsafe extern "C" {
+            fn proc_pid_rusage(pid: i32, flavor: i32, buffer: *mut u8) -> i32;
+            fn getpid() -> i32;
+        }
+        let mut buffer = [0u8; 512];
+        // Safety: RUSAGE_INFO_V4 (4) fills fewer than 512 bytes.
+        if unsafe { proc_pid_rusage(getpid(), 4, buffer.as_mut_ptr()) } == 0 {
+            return u64::from_le_bytes(buffer[72..80].try_into().unwrap()) >> 20;
+        }
+    }
+    0
+}
+
+/// `STWO_GPU_LEAN=1`: lean commitments (see [`GpuCommitter::commit_lean`]).
+fn lean_from_env() -> bool {
+    std::env::var("STWO_GPU_LEAN").is_ok_and(|v| v == "1")
+}
+
+/// A MiB count from the environment, else `default`.
+fn lean_env_mib(name: &str, default: u64) -> u64 {
+    std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
 }
 
 fn panic_message(panic: &Box<dyn std::any::Any + Send>) -> String {

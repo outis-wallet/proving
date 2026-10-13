@@ -1080,6 +1080,103 @@ impl StripedCommitment {
         CommitOutput { layers: levels, evaluations }
     }
 
+    /// Frees the commitment's inputs once its work is done: the coefficients, the Merkle states
+    /// and the twiddles (for a lean commitment, before stripe 0 is read back). Nothing may be
+    /// recorded after this.
+    pub fn release_inputs(&self) {
+        self.coeffs.destroy();
+        self.states.destroy();
+        self.extension.twiddles().destroy();
+    }
+
+    /// [`Self::read_through`] for a lean commitment, after the work is done and
+    /// [`Self::release_inputs`]: stwo's columns are allocated buffer by buffer as they are read,
+    /// and each output buffer is destroyed once read, so that stripe 0 is held twice for at most
+    /// one buffer, not the whole tree.
+    pub fn read_through_releasing(&self, gpu: &GpuContext, ring: &mut ReadbackRing) -> CommitOutput {
+        let n_stripes = self.n_stripes();
+        let n = self.log_sizes.len();
+        let mut evaluations: Vec<Option<BaseColumn>> = (0..n).map(|_| None).collect();
+        // The columns kept whole (small), every stripe from its slice of `whole`.
+        let mut whole_columns = self
+            .whole_slots
+            .iter()
+            .enumerate()
+            .filter_map(|(i, slot)| {
+                slot.map(|_| {
+                    // Safety: every value is read back below.
+                    (i, unsafe { BaseColumn::uninitialized(n_stripes << self.log_sizes[i]) })
+                })
+            })
+            .collect_vec();
+        if let Some(whole) = &self.whole {
+            let mut pieces = vec![];
+            for (i, column) in whole_columns.iter_mut() {
+                let offset = self.whole_slots[*i].unwrap();
+                let words = bytemuck::cast_slice_mut::<BaseField, u8>(column.as_mut_slice());
+                let len = words.len() / n_stripes;
+                for (stripe, words) in words.chunks_exact_mut(len).enumerate() {
+                    let src_offset = (stripe as u64 * self.whole_words + offset) * 4;
+                    pieces.push(Readback { src: whole, src_offset, dst: words });
+                }
+            }
+            pieces.sort_by_key(|piece| piece.src_offset);
+            ring.read(gpu, pieces);
+            whole.destroy();
+        }
+        for (i, column) in whole_columns {
+            evaluations[i] = Some(column);
+        }
+        // Stripe 0 of the other columns, buffer by buffer.
+        for (b, buffer) in self.out.buffers.iter().enumerate() {
+            let mut columns = self
+                .layout
+                .slots
+                .iter()
+                .enumerate()
+                .filter(|(i, slot)| slot.buffer == b && self.whole_slots[*i].is_none())
+                // Safety: every value is read back below.
+                .map(|(i, _)| (i, unsafe { BaseColumn::uninitialized(1 << self.log_sizes[i]) }))
+                .collect_vec();
+            if !columns.is_empty() {
+                let mut pieces = columns
+                    .iter_mut()
+                    .map(|(i, column)| Readback {
+                        src: buffer,
+                        src_offset: self.layout.slots[*i].offset * 4,
+                        dst: bytemuck::cast_slice_mut::<BaseField, u8>(column.as_mut_slice()),
+                    })
+                    .collect_vec();
+                pieces.sort_by_key(|piece| piece.src_offset);
+                ring.read(gpu, pieces);
+            }
+            buffer.destroy();
+            for (i, column) in columns {
+                evaluations[i] = Some(column);
+            }
+        }
+        let mut levels = (0..=self.tree_layout.height())
+            .map(|level| match self.tree_layout.level_offset(level) {
+                Some(_) => vec![Blake2sHash::default(); self.tree_layout.level_len(level)],
+                None => vec![],
+            })
+            .collect_vec();
+        let mut pieces = vec![];
+        for (level, hashes) in levels.iter_mut().enumerate() {
+            if let Some(offset) = self.tree_layout.level_offset(level as u32) {
+                let bytes = bytemuck::cast_slice_mut::<Blake2sHash, u8>(hashes);
+                pieces.push(Readback { src: &self.tree, src_offset: offset * 4, dst: bytes });
+            }
+        }
+        pieces.sort_by_key(|piece| piece.src_offset);
+        ring.read(gpu, pieces);
+        levels.reverse();
+        CommitOutput {
+            layers: levels,
+            evaluations: evaluations.into_iter().map(|column| column.expect("every column read")).collect(),
+        }
+    }
+
     /// [`CommitOutput`] as `new_striped` returns it: every column's kept evaluations on its
     /// stripe 0's domain, with the column's whole domain (or its whole evaluation), no
     /// coefficients; the layers as the commitment's.
