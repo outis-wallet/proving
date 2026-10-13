@@ -887,18 +887,25 @@ impl VeryPackedSecureColumnByCoords {
 /// kernel instead (a lower mmap threshold, one arena, `malloc_trim`) frees that memory but costs
 /// 3.5% to 16% of the run in system calls and page faults.
 ///
-/// Blocks of 1 MiB and up are mapped here instead, rounded up to a quarter of a power of two, which
-/// is exact for the power-of-two sizes of most columns and layers. A freed block waits in its class
-/// for the next request of that class, from any thread, which takes it without a system call. Idle
-/// blocks stay bounded: past [`LARGE_IDLE_CAP`] a freed block is unmapped, and a request that finds
-/// its class empty first unmaps idle blocks of other classes, down to [`LARGE_LOW_WATER`], so that
-/// a new phase's blocks replace the idle ones instead of adding to them. Smaller blocks, and blocks
-/// aligned past a page, go to the system allocator as before. Proof bytes do not depend on where
-/// buffers come from.
+/// Blocks of 1 MiB and up (64 KiB on Apple, see `LARGE_MIN_LOG`) are mapped here instead, rounded
+/// up to a quarter of a power of two, which is exact for the power-of-two sizes of most columns and
+/// layers. A freed block waits in its class for the next request of that class, from any thread,
+/// which takes it without a system call. Idle blocks stay bounded: past [`LARGE_IDLE_CAP`] a freed
+/// block is unmapped, and a request that finds its class empty first unmaps idle blocks of other
+/// classes, down to [`LARGE_LOW_WATER`], so that a new phase's blocks replace the idle ones instead
+/// of adding to them. Smaller blocks, and blocks aligned past a page, go to the system allocator as
+/// before. Proof bytes do not depend on where buffers come from.
 #[cfg(unix)]
 pub struct LargeBlockCache;
 
+/// The smallest block mapped here, log2 bytes: 1 MiB, and 64 KiB on Apple, where the system
+/// allocator keeps freed blocks between 64 KiB and 1 MiB instead of returning them (on an M5 Pro,
+/// the CPU path's peak footprint 2576 -> 2358 MiB; on Android, whose allocator returns them, no
+/// gain and a few percent of time).
+#[cfg(target_vendor = "apple")]
 const LARGE_MIN_LOG: u32 = 16;
+#[cfg(not(target_vendor = "apple"))]
+const LARGE_MIN_LOG: u32 = 20;
 const LARGE_MAX_LOG: u32 = 40;
 const LARGE_CLASSES: usize = ((LARGE_MAX_LOG - LARGE_MIN_LOG) * 4) as usize + 1;
 /// Idle blocks a class can hold.
