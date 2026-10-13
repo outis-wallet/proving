@@ -88,6 +88,11 @@ impl GroupedCommitment {
         let stripe_height = lifting_log_size - log_blowup;
         let top = log_sizes.iter().copied().max().unwrap_or(0);
         let top_words = log_sizes.iter().filter(|&&s| s == top).count() as u64 * (1u64 << top);
+        // The scratch is one buffer: at most the device's largest (256 MiB on some), so the
+        // largest size is kept whole only if it fits.
+        let max_words = crate::extension::max_buffer_words(gpu);
+        let group_words = group_words.min(max_words);
+        let top_whole = if top_words > max_words { Some(false) } else { top_whole };
         let layout_of = |whole: bool| {
             let words = if whole { group_words.max(top_words) } else { group_words };
             ColumnsLayout::grouped(log_sizes, words, whole)
