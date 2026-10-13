@@ -385,6 +385,16 @@ impl GpuCommitter {
             if lean_moves() {
                 return self.commit_lean(polynomials, log_blowup_factor, twiddles, lifting_log_size);
             }
+            if lean_env_mib("STWO_GPU_LEAN_GROUP_MIB", 64) > 0
+                && self.gpu.device.features().contains(wgpu::Features::MAPPABLE_PRIMARY_BUFFERS)
+            {
+                return self.commit_lean_grouped(
+                    polynomials,
+                    log_blowup_factor,
+                    twiddles,
+                    lifting_log_size,
+                );
+            }
             return self.commit_lean_in_place(
                 polynomials,
                 log_blowup_factor,
@@ -666,6 +676,163 @@ impl GpuCommitter {
         }
     }
 
+    /// EXPERIMENT (lean, grouped): [`Self::commit_lean_in_place`] group by group through a
+    /// small scratch buffer, stripe 0 copied into the coefficients' own columns as it comes (see
+    /// [`crate::lean`]); `STWO_GPU_LEAN_GROUP_MIB` (64) sets the groups. A failure gives the
+    /// polynomials back, those already holding stripe 0 interpolated back to their coefficients.
+    fn commit_lean_grouped(
+        &self,
+        mut polynomials: ColumnVec<CircleCoefficients<SimdBackend>>,
+        log_blowup: u32,
+        twiddles: &TwiddleTree<SimdBackend>,
+        lifting_log_size: u32,
+    ) -> Result<StripedTree, DeclinedCommit> {
+        let log_sizes = polynomials.iter().map(|poly| poly.log_size()).collect_vec();
+        let mut state = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        *state = None;
+        self.release_transient();
+        if let Some(warm) = &self.warm {
+            warm.begin();
+        }
+        let start = Instant::now();
+        let verbose = std::env::var("STWO_GPU_LEAN_VERBOSE").is_ok_and(|v| v == "1");
+        let chunk = lean_env_mib("STWO_GPU_LEAN_CHUNK_MIB", 8) << 20;
+        let group_words = (lean_env_mib("STWO_GPU_LEAN_GROUP_MIB", 64) << 20) / 4;
+        let index = self.lean_calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let fault = std::env::var("STWO_GPU_LEAN_FAULT").ok();
+        let faulty = |at: &str| {
+            fault.as_deref().is_some_and(|f| f == format!("{at}:{index}") || f == format!("{at}:all"))
+        };
+        // `stripe0:N:K`: commitment N fails after K groups of stripe 0.
+        let fault_after = fault.as_deref().and_then(|f| {
+            let mut parts = f.split(':');
+            (parts.next() == Some("stripe0") && parts.next()?.parse::<usize>().ok()? == index)
+                .then(|| parts.next()?.parse().ok())
+                .flatten()
+        });
+        let built = catch_unwind(AssertUnwindSafe(|| {
+            self.root_cosets
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .insert(log_blowup, twiddles.root_coset);
+            let distinct = log_sizes.iter().copied().collect();
+            let stripe_twiddles = std::sync::Arc::new(crate::extension::StripeTwiddles::new(
+                &self.gpu, &distinct, log_blowup, twiddles,
+            ));
+            let mut sources: Vec<Option<crate::extension::ColumnSource>> = polynomials
+                .iter()
+                .map(|poly| {
+                    let words = bytemuck::cast_slice::<BaseField, u32>(poly.coeffs.as_slice());
+                    wrap_host(&self.gpu, words)
+                        .map(|buffer| crate::extension::ColumnSource { buffer, word_offset: 0 })
+                })
+                .collect();
+            let packed_columns = (0..log_sizes.len())
+                .filter(|&i| sources[i].is_none())
+                .sorted_by_key(|&i| log_sizes[i])
+                .collect_vec();
+            let packed_words: u64 = packed_columns.iter().map(|&i| 1u64 << log_sizes[i]).sum();
+            let packed = self.gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("packed coefficients"),
+                size: (packed_words * 4).max(4),
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            let mut offset = 0;
+            let mut pieces = vec![];
+            for &i in &packed_columns {
+                sources[i] =
+                    Some(crate::extension::ColumnSource { buffer: packed.clone(), word_offset: offset });
+                pieces.push(Upload {
+                    dst: &packed,
+                    dst_offset: offset * 4,
+                    src: bytemuck::cast_slice::<BaseField, u8>(polynomials[i].coeffs.as_slice()),
+                });
+                offset += 1 << log_sizes[i];
+            }
+            if !pieces.is_empty() {
+                UploadRing::new(&self.gpu, chunk, 2).upload(&self.gpu, &pieces);
+            }
+            assert!(!faulty("setup"), "STWO_GPU_LEAN_FAULT: a fault in the setup");
+            let commitment = crate::lean::GroupedCommitment::new(
+                &self.gpu,
+                &self.kernels,
+                stripe_twiddles,
+                &log_sizes,
+                log_blowup,
+                lifting_log_size,
+                group_words,
+                lean_top_whole(),
+                sources.into_iter().map(Option::unwrap).collect(),
+            );
+            if verbose {
+                eprintln!(
+                    "lean grouped {} columns up to 2^{}: {} groups {}, {} packed ({} MiB), {:?}; footprint {} MiB",
+                    log_sizes.len(),
+                    log_sizes.iter().max().unwrap_or(&0),
+                    commitment.n_groups(),
+                    commitment.describe(),
+                    packed_columns.len(),
+                    (packed_words * 4) >> 20,
+                    commitment.gpu_bytes(),
+                    footprint_mib()
+                );
+            }
+            (commitment, packed)
+        }));
+        let finish = |commitment: Option<&crate::lean::GroupedCommitment>, packed: Option<&wgpu::Buffer>| {
+            if let Some(commitment) = commitment {
+                commitment.destroy();
+            }
+            if let Some(packed) = packed {
+                packed.destroy();
+            }
+            let _ = self.gpu.device.poll(wgpu::PollType::wait_indefinitely());
+            if let Some(warm) = &self.warm {
+                warm.end();
+            }
+        };
+        let (commitment, packed) = match built {
+            Ok(built) => built,
+            Err(panic) => {
+                finish(None, None);
+                return Err((polynomials, Declined::Gpu(panic_message(&panic))));
+            }
+        };
+        let mut readback = ReadbackRing::new(&self.gpu, chunk, 2);
+        let result = commitment.run(
+            &self.gpu,
+            &self.kernels,
+            &mut readback,
+            &mut polynomials,
+            faulty("submit"),
+            fault_after,
+        );
+        drop(readback);
+        // The GPU done with the host's columns, and their wrappers gone, before anything else.
+        finish(Some(&commitment), Some(&packed));
+        if verbose {
+            eprintln!("lean grouped done: footprint {} MiB at {:.3} s", footprint_mib(), start.elapsed().as_secs_f64());
+        }
+        match result {
+            Ok(output) => {
+                drop(polynomials);
+                let mut times = CommitTimes::default();
+                times.total = start.elapsed();
+                *self.times.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(times);
+                Ok(crate::commit::tree_prover(&log_sizes, log_blowup, output))
+            }
+            Err(failure) => {
+                crate::lean::restore_coefficients(&mut polynomials, &failure.overwritten, log_blowup);
+                Err((polynomials, Declined::Gpu(format!(
+                    "{} ({} columns restored from stripe 0)",
+                    failure.message,
+                    failure.overwritten.len()
+                ))))
+            }
+        }
+    }
+
     /// EXPERIMENT (lean, zero-copy): [`Self::commit_lean`] with the host's coefficients read in
     /// place and kept until the commitment is done, so that any failure gives them back to
     /// `new_striped`, as every commitment does. The GPU reads the columns that start on a page
@@ -768,6 +935,8 @@ impl GpuCommitter {
                 );
             }
             commitment.submit(&self.gpu, &self.kernels);
+            // A test of the failure path with the GPU still reading the host's columns.
+            assert!(!faulty("submit"), "STWO_GPU_LEAN_FAULT: a fault with the GPU at work");
             self.gpu.device.poll(wgpu::PollType::wait_indefinitely()).expect("poll");
             assert!(!faulty("compute"), "STWO_GPU_LEAN_FAULT: a fault after the compute");
             // The GPU is done with the host's columns: their wrappers go before anything writes.
@@ -1764,6 +1933,17 @@ fn footprint_mib() -> u64 {
 /// ([`GpuCommitter::commit_lean`]): lean commitments.
 fn lean_from_env() -> bool {
     std::env::var("STWO_GPU_LEAN").is_ok_and(|v| v == "1" || v == "move")
+}
+
+/// Whether a grouped lean commitment keeps the columns of the largest size in one group
+/// (`STWO_GPU_LEAN_TOP=whole`), splits them like the others (`split`), or takes whichever needs
+/// less memory (`None`, the default): see [`crate::lean::GroupedCommitment::new`].
+fn lean_top_whole() -> Option<bool> {
+    match std::env::var("STWO_GPU_LEAN_TOP").as_deref() {
+        Ok("whole") => Some(true),
+        Ok("split") => Some(false),
+        _ => None,
+    }
 }
 
 /// Whether lean commitments move the coefficients (`STWO_GPU_LEAN=move`) instead of reading the

@@ -104,6 +104,14 @@ pub struct ColumnsLayout {
 impl ColumnsLayout {
     /// Columns of the given log sizes, in buffers of at most `max_buffer_words` words.
     pub fn new(log_sizes: &[u32], max_buffer_words: u64) -> Self {
+        Self::grouped(log_sizes, max_buffer_words, false)
+    }
+
+    /// [`Self::new`], except that if `top_whole` the columns of the largest log size all go in
+    /// one buffer of their own, as one batch however large (a lean commitment's groups, see
+    /// [`crate::lean`]: the Merkle leaves then need no states at the stripe's full height).
+    pub fn grouped(log_sizes: &[u32], max_buffer_words: u64, top_whole: bool) -> Self {
+        let top = log_sizes.iter().copied().max().unwrap_or(0);
         let mut order = (0..log_sizes.len()).collect::<Vec<_>>();
         order.sort_by_key(|&i| (log_sizes[i], i));
         let mut buffer_words: Vec<u64> = vec![];
@@ -116,15 +124,22 @@ impl ColumnsLayout {
                 "column {i}: log size {log_size} out of {MIN_LOG_SIZE}..={MAX_LOG_SIZE}"
             );
             let len = 1u64 << log_size;
-            assert!(len <= max_buffer_words, "column {i} (log size {log_size}) exceeds a buffer");
+            let whole = top_whole && log_size == top;
+            assert!(
+                whole || len <= max_buffer_words,
+                "column {i} (log size {log_size}) exceeds a buffer"
+            );
             let continues = batches.last().is_some_and(|batch| {
-                batch.log_size == log_size && buffer_words[batch.buffer] + len <= max_buffer_words
+                batch.log_size == log_size
+                    && (whole || buffer_words[batch.buffer] + len <= max_buffer_words)
             });
             if !continues {
                 let fill =
                     buffer_words.last().map(|&fill| fill.next_multiple_of(BATCH_ALIGN_WORDS));
                 let buffer = match fill {
-                    Some(fill) if fill + len <= max_buffer_words => buffer_words.len() - 1,
+                    Some(fill) if !whole && fill + len <= max_buffer_words => {
+                        buffer_words.len() - 1
+                    }
                     _ => {
                         buffer_words.push(0);
                         buffer_words.len() - 1
@@ -1221,6 +1236,31 @@ impl StripeExtension {
     ) {
         let mut current = None;
         for dispatch in &self.dispatches {
+            let kind = dispatch.kind.index();
+            if current != Some(kind) {
+                pass.set_pipeline(&kernels.pipelines[kind].0);
+                current = Some(kind);
+            }
+            let group = match dispatch.run {
+                Some(run) => &self.run_groups[stripe][run],
+                None => &self.groups[kind][stripe][dispatch.buffer],
+            };
+            pass.set_bind_group(0, group, &[dispatch.params_offset]);
+            pass.dispatch_workgroups(dispatch.workgroups.0, dispatch.workgroups.1, 1);
+        }
+    }
+
+    /// [`Self::record`] for the dispatches of layout buffer `buffer` only (a group of a lean
+    /// commitment, see [`crate::lean`]).
+    pub fn record_buffer(
+        &self,
+        kernels: &ExtensionKernels,
+        pass: &mut wgpu::ComputePass<'_>,
+        stripe: usize,
+        buffer: usize,
+    ) {
+        let mut current = None;
+        for dispatch in self.dispatches.iter().filter(|dispatch| dispatch.buffer == buffer) {
             let kind = dispatch.kind.index();
             if current != Some(kind) {
                 pass.set_pipeline(&kernels.pipelines[kind].0);

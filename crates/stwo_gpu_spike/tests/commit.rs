@@ -728,3 +728,113 @@ fn committer_keeps_warm_after_commitments() {
     committer.warm_up();
     wait_for_more(after_window);
 }
+
+/// EXPERIMENT (lean): the grouped commitment (`stwo_gpu_spike::lean`) against `new_striped`, in
+/// small groups (sizes split across groups; the largest split too, kept whole, or whichever needs
+/// less memory), its coefficients packed into one buffer (as on a device without zero-copy); and
+/// its failure path: a fault after some groups of stripe 0 leaves their columns holding their
+/// stripe 0, which `restore_coefficients` interpolates back to exactly their coefficients.
+#[test]
+fn lean_grouped_matches_new_striped_and_restores() {
+    use stwo_gpu_spike::extension::ColumnSource;
+    use stwo_gpu_spike::lean::{GroupedCommitment, restore_coefficients};
+    let gpu = pollster::block_on(GpuContext::try_create_async(
+        None,
+        wgpu::Features::MAPPABLE_PRIMARY_BUFFERS,
+    ))
+    .expect("a GPU adapter");
+    if !gpu.device.features().contains(wgpu::Features::MAPPABLE_PRIMARY_BUFFERS) {
+        eprintln!("skipped: the device has no MAPPABLE_PRIMARY_BUFFERS");
+        return;
+    }
+    let kernels = CommitKernels::new(&gpu);
+    let scale = 4;
+    let mut circuit = vec![];
+    for (log_size, n) in [(21, 21), (20, 9), (19, 35), (18, 3), (17, 50), (15, 7), (12, 19), (8, 5)] {
+        circuit.extend(std::iter::repeat_n(log_size - scale, n));
+    }
+    let mut rng = SmallRng::seed_from_u64(950);
+    for i in (1..circuit.len()).rev() {
+        circuit.swap(i, rng.random_range(0..=i));
+    }
+    let cases = [
+        (
+            base_trace_log_sizes(&cairo_pay_components(), 3, 4),
+            CAIRO_LOG_BLOWUP,
+            CAIRO_LIFTING_LOG_SIZE - 3,
+        ),
+        (circuit, CIRCUIT_LOG_BLOWUP, CIRCUIT_LIFTING_LOG_SIZE - scale),
+    ];
+    for (case, (log_sizes, log_blowup, lifting_log_size)) in cases.into_iter().enumerate() {
+        let original = random_polys(&log_sizes, 900 + case as u64);
+        let twiddles = twiddles(lifting_log_size);
+        let cpu = cpu_commit(&original, log_blowup, &twiddles, lifting_log_size);
+        let distinct = log_sizes.iter().copied().collect();
+        // The coefficients packed in the tree's order (by size, then input order).
+        let mut words: Vec<u32> = vec![];
+        let mut offsets = vec![0u64; log_sizes.len()];
+        for i in (0..log_sizes.len()).sorted_by_key(|&i| (log_sizes[i], i)) {
+            offsets[i] = words.len() as u64;
+            words.extend(original[i].coeffs.as_slice().iter().map(|value| value.0));
+        }
+        for top_whole in [Some(false), Some(true), None] {
+            // A commitment destroys its twiddles with its buffers.
+            let stripe_twiddles =
+                Arc::new(StripeTwiddles::new(&gpu, &distinct, log_blowup, &twiddles));
+            let packed = gpu.upload("packed coefficients", &words);
+            let sources = offsets
+                .iter()
+                .map(|&word_offset| ColumnSource { buffer: packed.clone(), word_offset })
+                .collect_vec();
+            // Groups of 2 MiB: 4 columns of the largest size.
+            let commitment = GroupedCommitment::new(
+                &gpu,
+                &kernels,
+                stripe_twiddles,
+                &log_sizes,
+                log_blowup,
+                lifting_log_size,
+                1 << 19,
+                top_whole,
+                sources,
+            );
+            let what = format!("case {case}, top whole {top_whole:?}: {}", commitment.describe());
+            assert!(commitment.n_groups() >= 2, "{what}: one group");
+            let mut ring = ReadbackRing::new(&gpu, 1 << 20, 2);
+            let mut polys = original.clone();
+            let output = commitment
+                .run(&gpu, &kernels, &mut ring, &mut polys, false, None)
+                .unwrap_or_else(|failure| panic!("{what}: {}", failure.message));
+            let gpu_tree = stwo_gpu_spike::commit::tree_prover(&log_sizes, log_blowup, output);
+            assert_trees_eq(&gpu_tree, &cpu, &what);
+            // Faults before stripe 0's first group is copied, midway, and after every group.
+            let mut restored = vec![];
+            for after in [0, commitment.n_groups() / 2, commitment.n_groups()] {
+                let mut polys = original.clone();
+                let failure = match commitment.run(
+                    &gpu,
+                    &kernels,
+                    &mut ring,
+                    &mut polys,
+                    false,
+                    Some(after),
+                ) {
+                    Ok(_) => panic!("{what}: no fault after {after} groups"),
+                    Err(failure) => failure,
+                };
+                assert_eq!(failure.overwritten.is_empty(), after == 0, "{what}: after {after}");
+                restore_coefficients(&mut polys, &failure.overwritten, log_blowup);
+                for (i, (back, given)) in polys.iter().zip(&original).enumerate() {
+                    assert!(
+                        back.coeffs.as_slice() == given.coeffs.as_slice(),
+                        "{what}: fault after {after} groups: column {i} not restored"
+                    );
+                }
+                restored.push(failure.overwritten.len());
+            }
+            eprintln!("ok: {what}; columns restored after faults: {restored:?}");
+            commitment.destroy();
+            packed.destroy();
+        }
+    }
+}
