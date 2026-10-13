@@ -64,6 +64,7 @@ use stwo::prover::{CommitmentTreeProver, Poly};
 
 use crate::GpuContext;
 use crate::extension::{
+    ColumnSource,
     ColumnsLayout, ExtensionKernels, GpuColumns, MIN_LOG_SIZE, Merge, StripeExtension,
     StripeTwiddles, max_buffer_words,
 };
@@ -602,6 +603,11 @@ pub struct StripedCommitment {
     whole_slots: Vec<Option<u64>>,
     /// The columns kept whole, every stripe: stripe `s` at `s * whole_words`.
     whole: Option<wgpu::Buffer>,
+    /// The buffers of the coefficients' sources (see [`Self::with_sources`]), to release with
+    /// the commitment.
+    sources: Vec<wgpu::Buffer>,
+    /// Whether the evaluations' buffers can be mapped for reading.
+    mappable_out: bool,
 }
 
 impl StripedCommitment {
@@ -753,6 +759,134 @@ impl StripedCommitment {
             whole_words,
             whole_slots,
             whole,
+            sources: vec![],
+            mappable_out: false,
+        }
+    }
+
+    /// [`Self::with_buffers`] with the coefficients in `sources` (per input column, e.g. the
+    /// host's columns wrapped without a copy, see [`crate::committer`]), not in coefficient
+    /// buffers: no upload. The evaluations' buffers are its own, mappable for reading if
+    /// `mappable_out` (the device must have `MAPPABLE_PRIMARY_BUFFERS`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_sources(
+        gpu: &GpuContext,
+        kernels: &CommitKernels,
+        buffers: &mut CommitBuffers,
+        twiddles: Arc<StripeTwiddles>,
+        log_sizes: &[u32],
+        log_blowup: u32,
+        lifting_log_size: u32,
+        options: CommitOptions,
+        sources: Vec<ColumnSource>,
+        mappable_out: bool,
+    ) -> Self {
+        let max_buffer_words = options.max_buffer_words.unwrap_or_else(|| max_buffer_words(gpu));
+        assert!(
+            takes_striped_path(log_sizes, log_blowup, lifting_log_size),
+            "new_striped falls back to new for log sizes {log_sizes:?}, log blowup {log_blowup}, \
+             lifting log size {lifting_log_size}"
+        );
+        assert_eq!(twiddles.log_blowup, log_blowup, "the twiddles of another blowup");
+        let n_stripes = 1usize << log_blowup;
+        let layout = Arc::new(ColumnsLayout::new(log_sizes, max_buffer_words));
+        // No coefficient buffers: the sources are the coefficients.
+        let coeffs = GpuColumns { buffers: vec![], layout: layout.clone() };
+        let usage = if mappable_out {
+            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_SRC
+        } else {
+            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST
+        };
+        let out = GpuColumns {
+            buffers: layout
+                .buffer_words
+                .iter()
+                .map(|&words| {
+                    gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                        label: Some("evaluations"),
+                        size: (words * 4).max(4),
+                        usage,
+                        mapped_at_creation: false,
+                    })
+                })
+                .collect(),
+            layout: layout.clone(),
+        };
+        let extension =
+            StripeExtension::with_sources(gpu, &kernels.extension, &sources, &out, twiddles);
+        let _ = options.merge;
+
+        // The extension's batches are the tree's order: by increasing size, input order within a
+        // size (`new_striped`'s `order`, a stable sort by size).
+        let stripe_height = lifting_log_size - log_blowup;
+        let sorted_sizes = layout
+            .batches
+            .iter()
+            .flat_map(|batch| repeat_n(batch.log_size, batch.columns.len()))
+            .collect_vec();
+        let tree_layout = TreeLayout::new(
+            stripe_height,
+            log_blowup,
+            stwo_min_stored_level(&sorted_sizes, stripe_height),
+        );
+        kernels.merkle.check_tree_buffer(tree_layout.total_words);
+        let tree = buffers.tree(gpu, tree_layout.total_words);
+        let batches = layout
+            .batches
+            .iter()
+            .map(|batch| MerkleBatch {
+                buffer: &out.buffers[batch.buffer],
+                word_offset: batch.offset,
+                log_size: batch.log_size,
+                n_columns: batch.columns.len() as u32,
+            })
+            .collect_vec();
+        let shapes = batches.iter().map(|batch| (batch.log_size, batch.n_columns)).collect_vec();
+        let states = buffers.states(gpu, kernels.merkle.state_words(&shapes, stripe_height));
+        let stripe_plans = (0..n_stripes as u32)
+            .map(|stripe| {
+                kernels.merkle.plan_stripe(gpu, &batches, &states, &tree, &tree_layout, stripe)
+            })
+            .collect_vec();
+        let top = kernels.merkle.plan_top(gpu, &tree, &tree_layout);
+
+        // The columns kept whole: every stripe's, side by side.
+        let mut whole_copies = vec![];
+        let mut whole_slots = vec![None; log_sizes.len()];
+        let mut whole_words = 0;
+        for batch in layout.batches.iter().filter(|batch| kept_whole(batch.log_size, log_blowup)) {
+            whole_copies.push(WholeCopy {
+                buffer: batch.buffer,
+                src: batch.offset,
+                dst: whole_words,
+                words: batch.n_words(),
+            });
+            for (k, &i) in batch.columns.iter().enumerate() {
+                whole_slots[i] = Some(whole_words + ((k as u64) << batch.log_size));
+            }
+            whole_words += batch.n_words();
+        }
+        let whole = (whole_words > 0).then(|| buffers.whole(gpu, n_stripes as u64 * whole_words));
+
+        Self {
+            log_sizes: log_sizes.to_vec(),
+            log_blowup,
+            lifting_log_size,
+            layout,
+            coeffs,
+            out,
+            extension,
+            tree_layout,
+            tree,
+            states,
+            stripe_plans,
+            top,
+            whole_copies,
+            whole_words,
+            whole_slots,
+            whole,
+            sources: sources.into_iter().map(|s| s.buffer).collect(),
+            mappable_out,
         }
     }
 
@@ -837,6 +971,9 @@ impl StripedCommitment {
         self.destroy_plans();
         self.extension.twiddles().destroy();
         self.coeffs.destroy();
+        for source in &self.sources {
+            source.destroy();
+        }
         self.out.destroy();
         self.tree.destroy();
         self.states.destroy();
@@ -1084,6 +1221,9 @@ impl StripedCommitment {
     /// and the twiddles (for a lean commitment, before stripe 0 is read back). Nothing may be
     /// recorded after this.
     pub fn release_inputs(&self) {
+        for source in &self.sources {
+            source.destroy();
+        }
         self.coeffs.destroy();
         self.states.destroy();
         self.extension.twiddles().destroy();
@@ -1175,6 +1315,129 @@ impl StripedCommitment {
             layers: levels,
             evaluations: evaluations.into_iter().map(|column| column.expect("every column read")).collect(),
         }
+    }
+
+    /// The result of a commitment made [`Self::with_sources`] with `mappable_out`, after its work
+    /// is done and its inputs released: the tree's levels and the columns kept whole are read back
+    /// through `ring`, then every evaluation buffer is mapped; only once all of that has worked
+    /// is stripe 0 of every other column copied into that column's own coefficient column (the
+    /// same length), which becomes its evaluation. Before that point a failure gives `polys`
+    /// back untouched (`Err`), for the CPU to commit them; after it nothing can fail.
+    pub fn read_into_coefficients(
+        &self,
+        gpu: &GpuContext,
+        ring: &mut ReadbackRing,
+        polys: ColumnVec<CircleCoefficients<SimdBackend>>,
+        fault: bool,
+    ) -> Result<CommitOutput, (ColumnVec<CircleCoefficients<SimdBackend>>, String)> {
+        assert!(self.mappable_out, "the evaluations' buffers are not mappable");
+        let n_stripes = self.n_stripes();
+        let staged = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            // The levels and the columns kept whole (small), into new columns.
+            let mut levels = (0..=self.tree_layout.height())
+                .map(|level| match self.tree_layout.level_offset(level) {
+                    Some(_) => vec![Blake2sHash::default(); self.tree_layout.level_len(level)],
+                    None => vec![],
+                })
+                .collect_vec();
+            let mut whole_columns = self
+                .whole_slots
+                .iter()
+                .enumerate()
+                .filter_map(|(i, slot)| {
+                    // Safety: every value is read back below.
+                    slot.map(|_| (i, unsafe { BaseColumn::uninitialized(n_stripes << self.log_sizes[i]) }))
+                })
+                .collect_vec();
+            let mut pieces = vec![];
+            if let Some(whole) = &self.whole {
+                for (i, column) in whole_columns.iter_mut() {
+                    let offset = self.whole_slots[*i].unwrap();
+                    let words = bytemuck::cast_slice_mut::<BaseField, u8>(column.as_mut_slice());
+                    let len = words.len() / n_stripes;
+                    for (stripe, words) in words.chunks_exact_mut(len).enumerate() {
+                        let src_offset = (stripe as u64 * self.whole_words + offset) * 4;
+                        pieces.push((0, src_offset, whole, words));
+                    }
+                }
+            }
+            for (level, hashes) in levels.iter_mut().enumerate() {
+                if let Some(offset) = self.tree_layout.level_offset(level as u32) {
+                    let bytes = bytemuck::cast_slice_mut::<Blake2sHash, u8>(hashes);
+                    pieces.push((1, offset * 4, &self.tree, bytes));
+                }
+            }
+            pieces.sort_by_key(|&(order, offset, _, _)| (order, offset));
+            ring.read(
+                gpu,
+                pieces
+                    .into_iter()
+                    .map(|(_, src_offset, src, dst)| Readback { src, src_offset, dst })
+                    .collect(),
+            );
+            // A test of the failure path (`STWO_GPU_LEAN_FAULT=map:N`): after the reads.
+            assert!(!fault, "STWO_GPU_LEAN_FAULT: a fault before the evaluations are mapped");
+            // Every evaluation buffer mapped.
+            let results = std::sync::Arc::new(std::sync::Mutex::new(vec![None; self.out.buffers.len()]));
+            for (b, buffer) in self.out.buffers.iter().enumerate() {
+                let results = results.clone();
+                buffer.slice(..).map_async(wgpu::MapMode::Read, move |result| {
+                    results.lock().unwrap()[b] = Some(result.is_ok());
+                });
+            }
+            gpu.device.poll(wgpu::PollType::wait_indefinitely()).expect("poll");
+            let mapped = results.lock().unwrap().iter().all(|r| *r == Some(true));
+            assert!(mapped, "an evaluation buffer failed to map");
+            levels.reverse();
+            (levels, whole_columns)
+        }));
+        let (levels, whole_columns) = match staged {
+            Ok(staged) => staged,
+            Err(panic) => {
+                let message = panic
+                    .downcast_ref::<String>()
+                    .cloned()
+                    .or_else(|| panic.downcast_ref::<&str>().map(|m| m.to_string()))
+                    .unwrap_or_else(|| "a panic".to_string());
+                return Err((polys, message));
+            }
+        };
+        // Nothing can fail from here: stripe 0 into the coefficients' own columns.
+        let views = self
+            .out
+            .buffers
+            .iter()
+            .map(|buffer| buffer.slice(..).get_mapped_range().expect("mapped"))
+            .collect_vec();
+        let mut whole_columns = whole_columns.into_iter().map(Some).collect_vec();
+        let mut whole_at = vec![None; polys.len()];
+        for (k, column) in whole_columns.iter().enumerate() {
+            whole_at[column.as_ref().unwrap().0] = Some(k);
+        }
+        let mut evaluations: Vec<BaseColumn> = polys
+            .into_iter()
+            .map(|poly| poly.coeffs)
+            .collect();
+        evaluations.par_iter_mut().enumerate().for_each(|(i, column)| {
+            if whole_at[i].is_some() {
+                return;
+            }
+            let slot = self.layout.slots[i];
+            let len = 4usize << self.log_sizes[i];
+            let start = slot.offset as usize * 4;
+            bytemuck::cast_slice_mut::<BaseField, u8>(column.as_mut_slice())
+                .copy_from_slice(&views[slot.buffer][start..start + len]);
+        });
+        for (i, k) in whole_at.iter().enumerate() {
+            if let Some(k) = k {
+                evaluations[i] = whole_columns[*k].take().unwrap().1;
+            }
+        }
+        drop(views);
+        for buffer in &self.out.buffers {
+            buffer.unmap();
+        }
+        Ok(CommitOutput { layers: levels, evaluations })
     }
 
     /// [`CommitOutput`] as `new_striped` returns it: every column's kept evaluations on its

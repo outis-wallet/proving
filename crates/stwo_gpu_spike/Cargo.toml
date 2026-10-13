@@ -25,6 +25,11 @@ rayon = "1.10"
 [target.'cfg(not(any(target_arch = "wasm32", target_vendor = "apple")))'.dependencies]
 ash = "0.38"
 
+# The lean commitment's zero-copy coefficients (src/committer.rs): the host's memory wrapped as
+# Metal buffers.
+[target.'cfg(target_vendor = "apple")'.dependencies]
+objc2-metal = { version = "0.3", default-features = false, features = ["std", "block2", "MTLAllocation", "MTLBuffer", "MTLDevice", "MTLResource"] }
+
 [dev-dependencies]
 log = "0.4"
 num-traits = "0.2"

@@ -1415,6 +1415,7 @@ dependencies = [
  "log",
  "naga",
  "num-traits",
+ "objc2-metal",
  "pollster",
  "rand 0.9.5",
  "rayon",

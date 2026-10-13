@@ -750,6 +750,17 @@ struct Dispatch {
     buffer: usize,
     params_offset: u32,
     workgroups: (u32, u32),
+    /// A first pass from column sources (see [`StripeExtension::with_sources`]): its bind
+    /// group's index in `run_groups`; otherwise the layout buffer's.
+    run: Option<usize>,
+}
+
+/// Where a column's coefficients are, for [`StripeExtension::with_sources`]: a buffer and a word
+/// offset in it.
+#[derive(Clone, Debug)]
+pub struct ColumnSource {
+    pub buffer: wgpu::Buffer,
+    pub word_offset: u64,
 }
 
 /// The extension of one tree: the dispatches that evaluate a stripe of every column of `coeffs`
@@ -760,6 +771,8 @@ pub struct StripeExtension {
     _params: [wgpu::Buffer; 2],
     /// Per kind, per stripe, per buffer of the layout.
     groups: [Vec<Vec<wgpu::BindGroup>>; 4],
+    /// Per stripe, per run of a first pass from column sources.
+    run_groups: Vec<Vec<wgpu::BindGroup>>,
     dispatches: Vec<Dispatch>,
 }
 
@@ -861,6 +874,7 @@ impl StripeExtension {
         let mut dispatches = vec![];
         let mut single = |dispatches: &mut Vec<Dispatch>, b: usize, k: usize, p: Params| {
             dispatches.push(Dispatch {
+                run: None,
                 kind: Kind { in_place: k > 0, merged: false },
                 buffer: layout.batches[b].buffer,
                 params_offset: (params.len() as u64 * kernels.params_stride) as u32,
@@ -903,6 +917,7 @@ impl StripeExtension {
                         m.n_wg = n_wg;
                         m.n_batches = chunk.len() as u32;
                         dispatches.push(Dispatch {
+                run: None,
                             kind: Kind { in_place: k > 0, merged: true },
                             buffer,
                             params_offset: (merged_params.len() as u64 * kernels.merged_stride)
@@ -985,7 +1000,168 @@ impl StripeExtension {
                 })
                 .collect()
         });
-        Self { log_blowup, twiddles, _params: params_buffers, groups, dispatches }
+        Self { log_blowup, twiddles, _params: params_buffers, groups, run_groups: vec![], dispatches }
+    }
+
+    /// The extension of the columns laid out as `out`'s layout, whose coefficients are in
+    /// `sources` (per input column), not in a buffer of that layout: each batch's first pass (out
+    /// of place) in runs of columns whose sources follow one another in one buffer, a dispatch
+    /// and a bind group each; its other passes in place, as [`Self::with_twiddles`]'s. Not
+    /// merged.
+    pub fn with_sources(
+        gpu: &GpuContext,
+        kernels: &ExtensionKernels,
+        sources: &[ColumnSource],
+        out: &GpuColumns,
+        twiddles: Arc<StripeTwiddles>,
+    ) -> Self {
+        let layout = &out.layout;
+        assert_eq!(sources.len(), layout.slots.len(), "a source per column");
+        assert!(twiddles.covers(&layout.log_sizes()), "twiddles missing for some log sizes");
+        let log_blowup = twiddles.log_blowup;
+        let offsets = &twiddles.offsets;
+        let mut params: Vec<Params> = vec![];
+        let mut dispatches = vec![];
+        // The runs: (source buffer, out buffer).
+        let mut runs: Vec<(wgpu::Buffer, usize)> = vec![];
+        for batch in &layout.batches {
+            let log_size = batch.log_size;
+            for (k, pass) in passes(log_size).into_iter().enumerate() {
+                let base = Params {
+                    log_n: log_size,
+                    lo: pass.lo,
+                    hi: pass.hi,
+                    c: pass.c,
+                    total: 0,
+                    src_base: 0,
+                    dst_base: 0,
+                    tw_base: offsets[&log_size] as u32,
+                    transposed: u32::from(k == 0 && log_size > CACHED_FFT_LOG_SIZE),
+                    n_wg_x: 0,
+                    n_wg: 0,
+                    pad: [0; 5],
+                };
+                let mut push = |dispatches: &mut Vec<Dispatch>, p: Params, run: Option<usize>| {
+                    let n_wg = (p.total as u64).div_ceil(1 << TILE_LOG) as u32;
+                    let workgroups = kernels.grid(n_wg);
+                    let p = Params { n_wg, n_wg_x: workgroups.0, ..p };
+                    dispatches.push(Dispatch {
+                        run,
+                        kind: Kind { in_place: k > 0, merged: false },
+                        buffer: batch.buffer,
+                        params_offset: (params.len() as u64 * kernels.params_stride) as u32,
+                        workgroups,
+                    });
+                    params.push(p);
+                };
+                if k > 0 {
+                    let total = batch.n_words();
+                    assert!(total < 1 << 32);
+                    let p = Params {
+                        total: total as u32,
+                        src_base: batch.offset as u32,
+                        dst_base: batch.offset as u32,
+                        ..base
+                    };
+                    push(&mut dispatches, p, None);
+                    continue;
+                }
+                // The first pass, in runs of consecutive sources.
+                let mut j = 0;
+                while j < batch.columns.len() {
+                    let first = &sources[batch.columns[j]];
+                    let mut end = j + 1;
+                    while end < batch.columns.len() {
+                        let next = &sources[batch.columns[end]];
+                        if next.buffer != first.buffer
+                            || next.word_offset != first.word_offset + (((end - j) as u64) << log_size)
+                        {
+                            break;
+                        }
+                        end += 1;
+                    }
+                    let total = ((end - j) as u64) << log_size;
+                    assert!(total < 1 << 32 && first.word_offset < 1 << 32);
+                    let p = Params {
+                        total: total as u32,
+                        src_base: first.word_offset as u32,
+                        dst_base: (batch.offset + ((j as u64) << log_size)) as u32,
+                        ..base
+                    };
+                    push(&mut dispatches, p, Some(runs.len()));
+                    runs.push((first.buffer.clone(), batch.buffer));
+                    j = end;
+                }
+            }
+        }
+        let stride = kernels.params_stride as usize;
+        let mut bytes = vec![0u8; (params.len() * stride).max(stride.max(size_of::<Params>()))];
+        for (i, p) in params.iter().enumerate() {
+            bytes[i * stride..i * stride + size_of::<Params>()].copy_from_slice(bytemuck::bytes_of(p));
+        }
+        let params_buffer = gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("extension params (sources)"),
+            contents: &bytes,
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+        let params_binding = wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+            buffer: &params_buffer,
+            offset: 0,
+            size: wgpu::BufferSize::new(size_of::<Params>() as u64),
+        });
+        let entry = |binding, resource| wgpu::BindGroupEntry { binding, resource };
+        let in_place = Kind { in_place: true, merged: false };
+        let out_of_place = Kind { in_place: false, merged: false };
+        let mut groups: [Vec<Vec<wgpu::BindGroup>>; 4] = Default::default();
+        groups[in_place.index()] = (0..twiddles.n_stripes())
+            .map(|stripe| {
+                (0..layout.buffer_words.len())
+                    .map(|b| {
+                        gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                            label: None,
+                            layout: &kernels.pipelines[in_place.index()].1,
+                            entries: &[
+                                entry(1, out.buffers[b].as_entire_binding()),
+                                entry(2, twiddles.binding(stripe)),
+                                entry(3, params_binding.clone()),
+                            ],
+                        })
+                    })
+                    .collect()
+            })
+            .collect();
+        let run_groups = (0..twiddles.n_stripes())
+            .map(|stripe| {
+                runs.iter()
+                    .map(|(source, b)| {
+                        gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                            label: None,
+                            layout: &kernels.pipelines[out_of_place.index()].1,
+                            entries: &[
+                                entry(0, source.as_entire_binding()),
+                                entry(1, out.buffers[*b].as_entire_binding()),
+                                entry(2, twiddles.binding(stripe)),
+                                entry(3, params_binding.clone()),
+                            ],
+                        })
+                    })
+                    .collect()
+            })
+            .collect();
+        let merged_params = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("extension merged params (none)"),
+            size: 256,
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+        Self {
+            log_blowup,
+            twiddles,
+            _params: [params_buffer, merged_params],
+            groups,
+            run_groups,
+            dispatches,
+        }
     }
 
     pub fn n_stripes(&self) -> usize {
@@ -1050,11 +1226,11 @@ impl StripeExtension {
                 pass.set_pipeline(&kernels.pipelines[kind].0);
                 current = Some(kind);
             }
-            pass.set_bind_group(
-                0,
-                &self.groups[kind][stripe][dispatch.buffer],
-                &[dispatch.params_offset],
-            );
+            let group = match dispatch.run {
+                Some(run) => &self.run_groups[stripe][run],
+                None => &self.groups[kind][stripe][dispatch.buffer],
+            };
+            pass.set_bind_group(0, group, &[dispatch.params_offset]);
             pass.dispatch_workgroups(dispatch.workgroups.0, dispatch.workgroups.1, 1);
         }
     }
@@ -1147,6 +1323,7 @@ impl GroupedExtension {
                     m.n_wg = n_wg;
                     m.n_batches = chunk.len() as u32;
                     dispatches.push(Dispatch {
+                        run: None,
                         kind: Kind { in_place: k > 0, merged: true },
                         buffer: 0,
                         params_offset: (merged_params.len() as u64 * kernels.merged_stride) as u32,
