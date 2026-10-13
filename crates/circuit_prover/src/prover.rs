@@ -1,7 +1,7 @@
 use circuit_common::preprocessed::PreprocessedCircuit;
 use circuit_common::{N_RESERVED, Qm31OpsTraceGenerator};
 use circuit_verifier::circuit_claim::{CircuitInteractionElements, logup_sum, mix_circuit_hash};
-pub use circuit_verifier::circuit_proof::CircuitProof;
+use circuit_verifier::circuit_proof::CircuitProof;
 use circuit_verifier::statement::{INTERACTION_POW_BITS, all_circuit_components};
 use circuit_verifier::verify::CircuitPublicData;
 use circuits::blake::HashValue;
