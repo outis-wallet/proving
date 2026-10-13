@@ -90,8 +90,10 @@ pub(crate) fn finalize_constants_with_min_base(
     assert!(m31_constants.is_empty());
 
     // Deal with the QM31 constants.
-    // Build `i` and `i * u` to get the qm31_basis [i, u, iu].
-    // We know `2` is already produced because `min_base >= 2`.
+    // Build `i` (used by `decompose_qm31_constants`), and build `1 + i + u + iu` (used by
+    // `decompose_broadcast_constants`) from `1 + i` and `u + iu`. We know `2` is already produced
+    // because `min_base >= 2`.
+
     let two_var = *m31_cache.get(&2.into()).unwrap();
     // `u * u = 2 + i`.
     let i_plus_two = qm31_from_u32s(2, 1, 0, 0);
