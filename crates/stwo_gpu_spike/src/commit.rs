@@ -1428,7 +1428,7 @@ impl StripedCommitment {
             whole_at[column.as_ref().unwrap().0] = Some(k);
         }
         let mut evaluations: Vec<BaseColumn> = polys.into_iter().map(|poly| poly.coeffs).collect();
-        evaluations.par_iter_mut().enumerate().for_each(|(i, column)| {
+        let copy = |(i, column): (usize, &mut BaseColumn)| {
             if whole_at[i].is_some() {
                 return;
             }
@@ -1437,7 +1437,13 @@ impl StripedCommitment {
             let start = slot.offset as usize * 4;
             bytemuck::cast_slice_mut::<BaseField, u8>(column.as_mut_slice())
                 .copy_from_slice(&views[slot.buffer][start..start + len]);
-        });
+        };
+        // A mapped view is neither Send nor Sync on the web, where the GPU worker has one thread
+        // anyway: a plain loop there.
+        #[cfg(not(target_family = "wasm"))]
+        evaluations.par_iter_mut().enumerate().for_each(copy);
+        #[cfg(target_family = "wasm")]
+        evaluations.iter_mut().enumerate().for_each(copy);
         for (i, k) in whole_at.iter().enumerate() {
             if let Some(k) = k {
                 evaluations[i] = whole_columns[*k].take().unwrap().1;

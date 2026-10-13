@@ -1427,6 +1427,7 @@ dependencies = [
  "ash",
  "bytemuck",
  "itertools 0.12.1",
+ "objc2-metal",
  "pollster",
  "rand 0.9.5",
  "rayon",
