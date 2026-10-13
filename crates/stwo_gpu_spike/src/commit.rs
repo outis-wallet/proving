@@ -64,9 +64,8 @@ use stwo::prover::{CommitmentTreeProver, Poly};
 
 use crate::GpuContext;
 use crate::extension::{
-    ColumnSource,
-    ColumnsLayout, ExtensionKernels, GpuColumns, MIN_LOG_SIZE, Merge, StripeExtension,
-    StripeTwiddles, max_buffer_words,
+    ColumnSource, ColumnsLayout, ExtensionKernels, GpuColumns, MIN_LOG_SIZE, Merge,
+    StripeExtension, StripeTwiddles, max_buffer_words,
 };
 use crate::merkle::{
     ColumnBatch as MerkleBatch, GpuMerkle, Plan, StateBuffers, TreeLayout, stwo_min_stored_level,
@@ -793,9 +792,13 @@ impl StripedCommitment {
         // No coefficient buffers: the sources are the coefficients.
         let coeffs = GpuColumns { buffers: vec![], layout: layout.clone() };
         let usage = if mappable_out {
-            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_SRC
+            wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::MAP_READ
+                | wgpu::BufferUsages::COPY_SRC
         } else {
-            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST
+            wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST
         };
         let out = GpuColumns {
             buffers: layout
@@ -1233,7 +1236,11 @@ impl StripedCommitment {
     /// [`Self::release_inputs`]: stwo's columns are allocated buffer by buffer as they are read,
     /// and each output buffer is destroyed once read, so that stripe 0 is held twice for at most
     /// one buffer, not the whole tree.
-    pub fn read_through_releasing(&self, gpu: &GpuContext, ring: &mut ReadbackRing) -> CommitOutput {
+    pub fn read_through_releasing(
+        &self,
+        gpu: &GpuContext,
+        ring: &mut ReadbackRing,
+    ) -> CommitOutput {
         let n_stripes = self.n_stripes();
         let n = self.log_sizes.len();
         let mut evaluations: Vec<Option<BaseColumn>> = (0..n).map(|_| None).collect();
@@ -1313,7 +1320,10 @@ impl StripedCommitment {
         levels.reverse();
         CommitOutput {
             layers: levels,
-            evaluations: evaluations.into_iter().map(|column| column.expect("every column read")).collect(),
+            evaluations: evaluations
+                .into_iter()
+                .map(|column| column.expect("every column read"))
+                .collect(),
         }
     }
 
@@ -1346,7 +1356,9 @@ impl StripedCommitment {
                 .enumerate()
                 .filter_map(|(i, slot)| {
                     // Safety: every value is read back below.
-                    slot.map(|_| (i, unsafe { BaseColumn::uninitialized(n_stripes << self.log_sizes[i]) }))
+                    slot.map(|_| {
+                        (i, unsafe { BaseColumn::uninitialized(n_stripes << self.log_sizes[i]) })
+                    })
                 })
                 .collect_vec();
             let mut pieces = vec![];
@@ -1378,7 +1390,8 @@ impl StripedCommitment {
             // A test of the failure path (`STWO_GPU_LEAN_FAULT=map:N`): after the reads.
             assert!(!fault, "STWO_GPU_LEAN_FAULT: a fault before the evaluations are mapped");
             // Every evaluation buffer mapped.
-            let results = std::sync::Arc::new(std::sync::Mutex::new(vec![None; self.out.buffers.len()]));
+            let results =
+                std::sync::Arc::new(std::sync::Mutex::new(vec![None; self.out.buffers.len()]));
             for (b, buffer) in self.out.buffers.iter().enumerate() {
                 let results = results.clone();
                 buffer.slice(..).map_async(wgpu::MapMode::Read, move |result| {
@@ -1414,10 +1427,7 @@ impl StripedCommitment {
         for (k, column) in whole_columns.iter().enumerate() {
             whole_at[column.as_ref().unwrap().0] = Some(k);
         }
-        let mut evaluations: Vec<BaseColumn> = polys
-            .into_iter()
-            .map(|poly| poly.coeffs)
-            .collect();
+        let mut evaluations: Vec<BaseColumn> = polys.into_iter().map(|poly| poly.coeffs).collect();
         evaluations.par_iter_mut().enumerate().for_each(|(i, column)| {
             if whole_at[i].is_some() {
                 return;

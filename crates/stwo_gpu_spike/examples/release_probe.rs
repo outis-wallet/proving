@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use stwo_gpu_spike::GpuContext;
 
+#[cfg(target_vendor = "apple")]
 fn footprint_mib() -> u64 {
     unsafe extern "C" {
         fn proc_pid_rusage(pid: i32, flavor: i32, buffer: *mut u8) -> i32;
@@ -19,6 +20,12 @@ fn footprint_mib() -> u64 {
     if unsafe { proc_pid_rusage(getpid(), 4, buffer.as_mut_ptr()) } == 0 {
         return u64::from_le_bytes(buffer[72..80].try_into().unwrap()) >> 20;
     }
+    0
+}
+
+/// Elsewhere the probe builds (for `cargo test`, which builds the examples) but measures nothing.
+#[cfg(not(target_vendor = "apple"))]
+fn footprint_mib() -> u64 {
     0
 }
 
@@ -48,7 +55,8 @@ fn main() {
             later = footprint_mib();
         }
         println!(
-            "buffer: base {base} MiB, filled {filled}, destroyed {released}, back to {later} after {:.0} ms",
+            "buffer: base {base} MiB, filled {filled}, destroyed {released}, back to {later} \
+             after {:.0} ms",
             t.elapsed().as_secs_f64() * 1e3
         );
     }

@@ -932,7 +932,7 @@ impl StripeExtension {
                         m.n_wg = n_wg;
                         m.n_batches = chunk.len() as u32;
                         dispatches.push(Dispatch {
-                run: None,
+                            run: None,
                             kind: Kind { in_place: k > 0, merged: true },
                             buffer,
                             params_offset: (merged_params.len() as u64 * kernels.merged_stride)
@@ -1015,7 +1015,14 @@ impl StripeExtension {
                 })
                 .collect()
         });
-        Self { log_blowup, twiddles, _params: params_buffers, groups, run_groups: vec![], dispatches }
+        Self {
+            log_blowup,
+            twiddles,
+            _params: params_buffers,
+            groups,
+            run_groups: vec![],
+            dispatches,
+        }
     }
 
     /// The extension of the columns laid out as `out`'s layout, whose coefficients are in
@@ -1089,7 +1096,8 @@ impl StripeExtension {
                     while end < batch.columns.len() {
                         let next = &sources[batch.columns[end]];
                         if next.buffer != first.buffer
-                            || next.word_offset != first.word_offset + (((end - j) as u64) << log_size)
+                            || next.word_offset
+                                != first.word_offset + (((end - j) as u64) << log_size)
                         {
                             break;
                         }
@@ -1112,7 +1120,8 @@ impl StripeExtension {
         let stride = kernels.params_stride as usize;
         let mut bytes = vec![0u8; (params.len() * stride).max(stride.max(size_of::<Params>()))];
         for (i, p) in params.iter().enumerate() {
-            bytes[i * stride..i * stride + size_of::<Params>()].copy_from_slice(bytemuck::bytes_of(p));
+            bytes[i * stride..i * stride + size_of::<Params>()]
+                .copy_from_slice(bytemuck::bytes_of(p));
         }
         let params_buffer = gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("extension params (sources)"),

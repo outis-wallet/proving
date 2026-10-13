@@ -32,7 +32,9 @@ use stwo::prover::poly::circle::{CircleCoefficients, CircleEvaluation, PolyOps, 
 use crate::GpuContext;
 use crate::commit::{CommitKernels, CommitOutput, GpuBytes, WholeCopy, kept_whole, stripe_order};
 use crate::extension::{ColumnSource, ColumnsLayout, GpuColumns, StripeExtension, StripeTwiddles};
-use crate::merkle::{ColumnBatch as MerkleBatch, Plan, StateBuffers, TreeLayout, stwo_min_stored_level};
+use crate::merkle::{
+    ColumnBatch as MerkleBatch, Plan, StateBuffers, TreeLayout, stwo_min_stored_level,
+};
 use crate::transfer::{Readback, ReadbackRing};
 
 /// See the module docs.
@@ -128,7 +130,8 @@ impl GroupedCommitment {
             buffers: vec![scratch.clone(); layout.buffer_words.len()],
             layout: layout.clone(),
         };
-        let extension = StripeExtension::with_sources(gpu, &kernels.extension, &sources, &out, twiddles);
+        let extension =
+            StripeExtension::with_sources(gpu, &kernels.extension, &sources, &out, twiddles);
 
         let sorted_sizes = layout
             .batches
@@ -156,7 +159,14 @@ impl GroupedCommitment {
         let states = StateBuffers::new(gpu, kernels.merkle.state_words(&shapes, stripe_height));
         let (absorbs, finals): (Vec<_>, Vec<_>) = (0..n_stripes as u32)
             .map(|stripe| {
-                kernels.merkle.plan_stripe_split(gpu, &batches, &states, &tree, &tree_layout, stripe)
+                kernels.merkle.plan_stripe_split(
+                    gpu,
+                    &batches,
+                    &states,
+                    &tree,
+                    &tree_layout,
+                    stripe,
+                )
             })
             .unzip();
         let above = kernels.merkle.plan_top(gpu, &tree, &tree_layout);
@@ -231,7 +241,13 @@ impl GroupedCommitment {
 
     /// Records group `group` of stripe `stripe`: its extension into the scratch, its absorption,
     /// the copies of its columns kept whole.
-    fn encode_group(&self, kernels: &CommitKernels, encoder: &mut wgpu::CommandEncoder, stripe: usize, group: usize) {
+    fn encode_group(
+        &self,
+        kernels: &CommitKernels,
+        encoder: &mut wgpu::CommandEncoder,
+        stripe: usize,
+        group: usize,
+    ) {
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("lean extension"),
@@ -295,7 +311,10 @@ impl GroupedCommitment {
                 }
                 if verbose {
                     poll();
-                    eprintln!("lean grouped: stripes 1.. done at {:.3} s", start.elapsed().as_secs_f64());
+                    eprintln!(
+                        "lean grouped: stripes 1.. done at {:.3} s",
+                        start.elapsed().as_secs_f64()
+                    );
                 }
                 for group in 0..self.n_groups() {
                     let mut encoder = gpu.device.create_command_encoder(&Default::default());
@@ -310,7 +329,9 @@ impl GroupedCommitment {
                     let slice = self.scratch.slice(..words * 4);
                     let mapped = Arc::new(std::sync::Mutex::new(None));
                     let flag = mapped.clone();
-                    slice.map_async(wgpu::MapMode::Read, move |r| *flag.lock().unwrap() = Some(r.is_ok()));
+                    slice.map_async(wgpu::MapMode::Read, move |r| {
+                        *flag.lock().unwrap() = Some(r.is_ok())
+                    });
                     poll();
                     assert!(*mapped.lock().unwrap() == Some(true), "the scratch failed to map");
                     let view = slice.get_mapped_range().expect("mapped");
@@ -318,7 +339,9 @@ impl GroupedCommitment {
                         .layout
                         .batches
                         .iter()
-                        .filter(|batch| batch.buffer == group && !kept_whole(batch.log_size, self.log_blowup))
+                        .filter(|batch| {
+                            batch.buffer == group && !kept_whole(batch.log_size, self.log_blowup)
+                        })
                         .flat_map(|batch| {
                             batch.columns.iter().enumerate().map(move |(k, &i)| {
                                 (i, (batch.offset + ((k as u64) << batch.log_size)) as usize * 4)
@@ -334,12 +357,15 @@ impl GroupedCommitment {
                         polys
                             .iter_mut()
                             .enumerate()
-                            .filter_map(|(i, poly)| wanted[i].map(|offset| (offset, &mut poly.coeffs)))
+                            .filter_map(|(i, poly)| {
+                                wanted[i].map(|offset| (offset, &mut poly.coeffs))
+                            })
                             .collect()
                     };
                     let source: &[u8] = &view;
                     targets.into_par_iter().for_each(|(offset, column)| {
-                        let bytes = bytemuck::cast_slice_mut::<BaseField, u8>(column.as_mut_slice());
+                        let bytes =
+                            bytemuck::cast_slice_mut::<BaseField, u8>(column.as_mut_slice());
                         let len = bytes.len();
                         bytes.copy_from_slice(&source[offset..offset + len]);
                     });
@@ -402,7 +428,11 @@ impl GroupedCommitment {
     }
 
     /// The levels and the columns kept whole (new columns), through `ring`.
-    fn read_rest(&self, gpu: &GpuContext, ring: &mut ReadbackRing) -> (Vec<Vec<Blake2sHash>>, Vec<(usize, BaseColumn)>) {
+    fn read_rest(
+        &self,
+        gpu: &GpuContext,
+        ring: &mut ReadbackRing,
+    ) -> (Vec<Vec<Blake2sHash>>, Vec<(usize, BaseColumn)>) {
         let n_stripes = 1usize << self.log_blowup;
         let mut levels = (0..=self.tree_layout.height())
             .map(|level| match self.tree_layout.level_offset(level) {
@@ -416,7 +446,9 @@ impl GroupedCommitment {
             .enumerate()
             .filter_map(|(i, slot)| {
                 // Safety: every value is read back below.
-                slot.map(|_| (i, unsafe { BaseColumn::uninitialized(n_stripes << self.log_sizes[i]) }))
+                slot.map(|_| {
+                    (i, unsafe { BaseColumn::uninitialized(n_stripes << self.log_sizes[i]) })
+                })
             })
             .collect_vec();
         let mut pieces = vec![];
@@ -433,11 +465,22 @@ impl GroupedCommitment {
         }
         for (level, hashes) in levels.iter_mut().enumerate() {
             if let Some(offset) = self.tree_layout.level_offset(level as u32) {
-                pieces.push((1, offset * 4, &self.tree, bytemuck::cast_slice_mut::<Blake2sHash, u8>(hashes)));
+                pieces.push((
+                    1,
+                    offset * 4,
+                    &self.tree,
+                    bytemuck::cast_slice_mut::<Blake2sHash, u8>(hashes),
+                ));
             }
         }
         pieces.sort_by_key(|&(order, offset, _, _)| (order, offset));
-        ring.read(gpu, pieces.into_iter().map(|(_, src_offset, src, dst)| Readback { src, src_offset, dst }).collect());
+        ring.read(
+            gpu,
+            pieces
+                .into_iter()
+                .map(|(_, src_offset, src, dst)| Readback { src, src_offset, dst })
+                .collect(),
+        );
         levels.reverse();
         (levels, whole_columns)
     }
@@ -476,7 +519,9 @@ pub fn restore_coefficients(
         .map(|&i| polys[i].log_size())
         .collect::<std::collections::BTreeSet<_>>()
         .into_iter()
-        .map(|log_size| (log_size, SimdBackend::precompute_twiddles(stripe_domain(log_size).half_coset)))
+        .map(|log_size| {
+            (log_size, SimdBackend::precompute_twiddles(stripe_domain(log_size).half_coset))
+        })
         .collect();
     let restore = |poly: &mut CircleCoefficients<SimdBackend>| {
         let log_size = poly.log_size();

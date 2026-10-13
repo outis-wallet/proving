@@ -750,7 +750,8 @@ fn lean_grouped_matches_new_striped_and_restores() {
     let kernels = CommitKernels::new(&gpu);
     let scale = 4;
     let mut circuit = vec![];
-    for (log_size, n) in [(21, 21), (20, 9), (19, 35), (18, 3), (17, 50), (15, 7), (12, 19), (8, 5)] {
+    for (log_size, n) in [(21, 21), (20, 9), (19, 35), (18, 3), (17, 50), (15, 7), (12, 19), (8, 5)]
+    {
         circuit.extend(std::iter::repeat_n(log_size - scale, n));
     }
     let mut rng = SmallRng::seed_from_u64(950);
@@ -811,17 +812,12 @@ fn lean_grouped_matches_new_striped_and_restores() {
             let mut restored = vec![];
             for after in [0, commitment.n_groups() / 2, commitment.n_groups()] {
                 let mut polys = original.clone();
-                let failure = match commitment.run(
-                    &gpu,
-                    &kernels,
-                    &mut ring,
-                    &mut polys,
-                    false,
-                    Some(after),
-                ) {
-                    Ok(_) => panic!("{what}: no fault after {after} groups"),
-                    Err(failure) => failure,
-                };
+                let failure =
+                    match commitment.run(&gpu, &kernels, &mut ring, &mut polys, false, Some(after))
+                    {
+                        Ok(_) => panic!("{what}: no fault after {after} groups"),
+                        Err(failure) => failure,
+                    };
                 assert_eq!(failure.overwritten.is_empty(), after == 0, "{what}: after {after}");
                 restore_coefficients(&mut polys, &failure.overwritten, log_blowup);
                 for (i, (back, given)) in polys.iter().zip(&original).enumerate() {

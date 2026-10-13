@@ -383,7 +383,12 @@ impl GpuCommitter {
             && !self.decommit_enabled()
         {
             if lean_moves() {
-                return self.commit_lean(polynomials, log_blowup_factor, twiddles, lifting_log_size);
+                return self.commit_lean(
+                    polynomials,
+                    log_blowup_factor,
+                    twiddles,
+                    lifting_log_size,
+                );
             }
             if lean_env_mib("STWO_GPU_LEAN_GROUP_MIB", 64) > 0
                 && self.gpu.device.features().contains(wgpu::Features::MAPPABLE_PRIMARY_BUFFERS)
@@ -603,7 +608,12 @@ impl GpuCommitter {
             let mut upload = UploadRing::new(&self.gpu, chunk, 2);
             commitment.upload_through(&self.gpu, &mut upload, &polynomials);
             if std::env::var("STWO_GPU_LEAN_VERBOSE").is_ok_and(|v| v == "1") {
-                eprintln!("lean commitment of {} columns up to 2^{}: {:?}", log_sizes.len(), log_sizes.iter().max().unwrap_or(&0), commitment.gpu_bytes());
+                eprintln!(
+                    "lean commitment of {} columns up to 2^{}: {:?}",
+                    log_sizes.len(),
+                    log_sizes.iter().max().unwrap_or(&0),
+                    commitment.gpu_bytes()
+                );
             }
             commitment
         }));
@@ -618,31 +628,51 @@ impl GpuCommitter {
         };
         times.setup = start.elapsed();
         if verbose {
-            eprintln!("lean uploaded: footprint {} MiB at {:.3} s", footprint_mib(), start.elapsed().as_secs_f64());
+            eprintln!(
+                "lean uploaded: footprint {} MiB at {:.3} s",
+                footprint_mib(),
+                start.elapsed().as_secs_f64()
+            );
         }
         // The coefficients are on the GPU (in the ring's chunks or copied on): the host's go,
         // here (not on a thread), so that their pages are gone before the GPU's work touches the
         // evaluations' and the states'.
         drop(polynomials);
         if verbose {
-            eprintln!("lean host coefficients dropped: footprint {} MiB at {:.3} s", footprint_mib(), start.elapsed().as_secs_f64());
+            eprintln!(
+                "lean host coefficients dropped: footprint {} MiB at {:.3} s",
+                footprint_mib(),
+                start.elapsed().as_secs_f64()
+            );
         }
         let tree = catch_unwind(AssertUnwindSafe(|| {
             commitment.submit(&self.gpu, &self.kernels);
             self.gpu.device.poll(wgpu::PollType::wait_indefinitely()).expect("poll");
             times.commit = start.elapsed() - times.setup;
             if verbose {
-                eprintln!("lean computed: footprint {} MiB at {:.3} s", footprint_mib(), start.elapsed().as_secs_f64());
+                eprintln!(
+                    "lean computed: footprint {} MiB at {:.3} s",
+                    footprint_mib(),
+                    start.elapsed().as_secs_f64()
+                );
             }
             commitment.release_inputs();
             let _ = self.gpu.device.poll(wgpu::PollType::wait_indefinitely());
             if verbose {
-                eprintln!("lean inputs released: footprint {} MiB at {:.3} s", footprint_mib(), start.elapsed().as_secs_f64());
+                eprintln!(
+                    "lean inputs released: footprint {} MiB at {:.3} s",
+                    footprint_mib(),
+                    start.elapsed().as_secs_f64()
+                );
             }
             let mut readback = ReadbackRing::new(&self.gpu, chunk, 2);
             let output = commitment.read_through_releasing(&self.gpu, &mut readback);
             if verbose {
-                eprintln!("lean read back: footprint {} MiB at {:.3} s", footprint_mib(), start.elapsed().as_secs_f64());
+                eprintln!(
+                    "lean read back: footprint {} MiB at {:.3} s",
+                    footprint_mib(),
+                    start.elapsed().as_secs_f64()
+                );
             }
             drop(readback);
             commitment.tree_prover(output)
@@ -653,11 +683,16 @@ impl GpuCommitter {
         let _ = self.gpu.device.poll(wgpu::PollType::wait_indefinitely());
         // EXPERIMENT: Metal frees a released buffer's memory a while after (not at the release):
         // STWO_GPU_LEAN_SETTLE_MS waits for it, to see what prompt frees would give.
-        if let Some(ms) = std::env::var("STWO_GPU_LEAN_SETTLE_MS").ok().and_then(|v| v.parse().ok()) {
+        if let Some(ms) = std::env::var("STWO_GPU_LEAN_SETTLE_MS").ok().and_then(|v| v.parse().ok())
+        {
             std::thread::sleep(Duration::from_millis(ms));
         }
         if verbose {
-            eprintln!("lean destroyed: footprint {} MiB at {:.3} s", footprint_mib(), start.elapsed().as_secs_f64());
+            eprintln!(
+                "lean destroyed: footprint {} MiB at {:.3} s",
+                footprint_mib(),
+                start.elapsed().as_secs_f64()
+            );
         }
         if let Some(warm) = &self.warm {
             warm.end();
@@ -725,8 +760,10 @@ impl GpuCommitter {
             .collect_vec();
         let mut pieces = vec![];
         for &(i, b, offset) in &places {
-            sources[i] =
-                Some(crate::extension::ColumnSource { buffer: packed[b].clone(), word_offset: offset });
+            sources[i] = Some(crate::extension::ColumnSource {
+                buffer: packed[b].clone(),
+                word_offset: offset,
+            });
             pieces.push(Upload {
                 dst: &packed[b],
                 dst_offset: offset * 4,
@@ -737,7 +774,12 @@ impl GpuCommitter {
             UploadRing::new(&self.gpu, chunk, 2).upload(&self.gpu, &pieces);
         }
         let packed_words = buffer_words.iter().sum();
-        (sources.into_iter().map(Option::unwrap).collect(), packed, packed_columns.len(), packed_words)
+        (
+            sources.into_iter().map(Option::unwrap).collect(),
+            packed,
+            packed_columns.len(),
+            packed_words,
+        )
     }
 
     /// EXPERIMENT (lean, grouped): [`Self::commit_lean_in_place`] group by group through a
@@ -765,7 +807,9 @@ impl GpuCommitter {
         let index = self.lean_calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let fault = std::env::var("STWO_GPU_LEAN_FAULT").ok();
         let faulty = |at: &str| {
-            fault.as_deref().is_some_and(|f| f == format!("{at}:{index}") || f == format!("{at}:all"))
+            fault
+                .as_deref()
+                .is_some_and(|f| f == format!("{at}:{index}") || f == format!("{at}:all"))
         };
         // `stripe0:N:K`: commitment N fails after K groups of stripe 0.
         let fault_after = fault.as_deref().and_then(|f| {
@@ -799,7 +843,8 @@ impl GpuCommitter {
             );
             if verbose {
                 eprintln!(
-                    "lean grouped {} columns up to 2^{}: {} groups {}, {} packed ({} MiB), {:?}; footprint {} MiB",
+                    "lean grouped {} columns up to 2^{}: {} groups {}, {} packed ({} MiB), {:?}; \
+                     footprint {} MiB",
                     log_sizes.len(),
                     log_sizes.iter().max().unwrap_or(&0),
                     commitment.n_groups(),
@@ -812,7 +857,8 @@ impl GpuCommitter {
             }
             (commitment, packed)
         }));
-        let finish = |commitment: Option<&crate::lean::GroupedCommitment>, packed: &[wgpu::Buffer]| {
+        let finish = |commitment: Option<&crate::lean::GroupedCommitment>,
+                      packed: &[wgpu::Buffer]| {
             if let Some(commitment) = commitment {
                 commitment.destroy();
             }
@@ -844,23 +890,33 @@ impl GpuCommitter {
         // The GPU done with the host's columns, and their wrappers gone, before anything else.
         finish(Some(&commitment), &packed);
         if verbose {
-            eprintln!("lean grouped done: footprint {} MiB at {:.3} s", footprint_mib(), start.elapsed().as_secs_f64());
+            eprintln!(
+                "lean grouped done: footprint {} MiB at {:.3} s",
+                footprint_mib(),
+                start.elapsed().as_secs_f64()
+            );
         }
         match result {
             Ok(output) => {
                 drop(polynomials);
-                let mut times = CommitTimes::default();
-                times.total = start.elapsed();
+                let times = CommitTimes { total: start.elapsed(), ..Default::default() };
                 *self.times.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(times);
                 Ok(crate::commit::tree_prover(&log_sizes, log_blowup, output))
             }
             Err(failure) => {
-                crate::lean::restore_coefficients(&mut polynomials, &failure.overwritten, log_blowup);
-                Err((polynomials, Declined::Gpu(format!(
-                    "{} ({} columns restored from stripe 0)",
-                    failure.message,
-                    failure.overwritten.len()
-                ))))
+                crate::lean::restore_coefficients(
+                    &mut polynomials,
+                    &failure.overwritten,
+                    log_blowup,
+                );
+                Err((
+                    polynomials,
+                    Declined::Gpu(format!(
+                        "{} ({} columns restored from stripe 0)",
+                        failure.message,
+                        failure.overwritten.len()
+                    )),
+                ))
             }
         }
     }
@@ -892,10 +948,13 @@ impl GpuCommitter {
         let fault = std::env::var("STWO_GPU_LEAN_FAULT").ok();
         let mut times = CommitTimes::default();
         let chunk = lean_env_mib("STWO_GPU_LEAN_CHUNK_MIB", 8) << 20;
-        let mappable = self.gpu.device.features().contains(wgpu::Features::MAPPABLE_PRIMARY_BUFFERS);
+        let mappable =
+            self.gpu.device.features().contains(wgpu::Features::MAPPABLE_PRIMARY_BUFFERS);
         let index = self.lean_calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let faulty = |at: &str| {
-            fault.as_deref().is_some_and(|f| f == format!("{at}:{index}") || f == format!("{at}:all"))
+            fault
+                .as_deref()
+                .is_some_and(|f| f == format!("{at}:{index}") || f == format!("{at}:all"))
         };
         let worked = catch_unwind(AssertUnwindSafe(|| {
             self.root_cosets
@@ -923,7 +982,8 @@ impl GpuCommitter {
             );
             if verbose {
                 eprintln!(
-                    "lean in place {} columns up to 2^{}: {} packed ({} MiB), {:?}; footprint {} MiB",
+                    "lean in place {} columns up to 2^{}: {} packed ({} MiB), {:?}; footprint {} \
+                     MiB",
                     log_sizes.len(),
                     log_sizes.iter().max().unwrap_or(&0),
                     packed_columns,
@@ -944,7 +1004,10 @@ impl GpuCommitter {
             }
             let _ = self.gpu.device.poll(wgpu::PollType::wait_indefinitely());
             if verbose {
-                eprintln!("lean in place computed, inputs released: footprint {} MiB", footprint_mib());
+                eprintln!(
+                    "lean in place computed, inputs released: footprint {} MiB",
+                    footprint_mib()
+                );
             }
             commitment
         }));
@@ -971,11 +1034,18 @@ impl GpuCommitter {
                 // A failure before the commit point: the polynomials come back untouched.
                 Err((polynomials, "STWO_GPU_LEAN_FAULT: a fault in the readback".to_string()))
             } else {
-                commitment.read_into_coefficients(&self.gpu, &mut readback, polynomials, faulty("map"))
+                commitment.read_into_coefficients(
+                    &self.gpu,
+                    &mut readback,
+                    polynomials,
+                    faulty("map"),
+                )
             }
         } else {
             // Without mappable buffers, stripe 0 into new columns; the coefficients go after.
-            match catch_unwind(AssertUnwindSafe(|| commitment.read_through_releasing(&self.gpu, &mut readback))) {
+            match catch_unwind(AssertUnwindSafe(|| {
+                commitment.read_through_releasing(&self.gpu, &mut readback)
+            })) {
                 Ok(output) => {
                     drop(polynomials);
                     Ok(output)
@@ -987,7 +1057,11 @@ impl GpuCommitter {
         let tree = output.map(|output| commitment.tree_prover(output));
         done(Some(&commitment));
         if verbose {
-            eprintln!("lean in place done: footprint {} MiB at {:.3} s", footprint_mib(), start.elapsed().as_secs_f64());
+            eprintln!(
+                "lean in place done: footprint {} MiB at {:.3} s",
+                footprint_mib(),
+                start.elapsed().as_secs_f64()
+            );
         }
         match tree {
             Ok(tree) => {
