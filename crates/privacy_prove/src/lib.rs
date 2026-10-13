@@ -25,6 +25,7 @@ use circuit_common::finalize::pad_context;
 use circuit_common::preprocessed::PreprocessedCircuit;
 use circuit_prover::prover::{
     prepare_circuit_proof_for_circuit_verifier, prove_circuit_with_precompute,
+    prove_circuit_with_precompute_owned,
 };
 use circuit_serialize::serialize::CircuitSerialize;
 use circuit_verifier::verify::CircuitConfig;
@@ -486,7 +487,9 @@ pub fn privacy_recursive_prove_once_stoppable(
     if !valid {
         return Err("Circuit is not valid".into());
     }
-    let context_values = context.values();
+    // Only the values are proved: the gates go now, and the circuit proof frees the values once
+    // its base trace is written.
+    let context_values = context.into_values();
 
     check("before the circuit prover preprocessed tree")?;
     let circuit_preprocessed_tree = {
@@ -504,7 +507,7 @@ pub fn privacy_recursive_prove_once_stoppable(
 
     check("before the circuit proof")?;
     info!("Prove the cairo-circuit verifier");
-    let circuit_proof = prove_circuit_with_precompute(
+    let circuit_proof = prove_circuit_with_precompute_owned(
         &base_column_pool,
         &twiddles,
         &preprocessed_circuit,

@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use circuit_common::Qm31OpsTraceGenerator;
 use circuit_common::preprocessed::PreprocessedCircuit;
 use circuit_verifier::circuit_claim::{CircuitInteractionElements, lookup_sum, mix_circuit_hash};
@@ -109,6 +111,55 @@ where
     SimdBackend: stwo::prover::backend::BackendForChannel<MC>,
     <MC::H as MerkleHasherLifted>::Hash: Into<Blake2sHash>,
 {
+    prove_circuit_with_precompute_values(
+        base_column_pool,
+        twiddles,
+        preprocessed_circuit,
+        preprocessed_tree,
+        Cow::Borrowed(values),
+        pcs_config,
+    )
+}
+
+/// [prove_circuit_with_precompute] taking the values by value: the proof reads them only to write
+/// its base trace, so it frees them right after, before the base trace commitment and the rest of
+/// the proof.
+pub fn prove_circuit_with_precompute_owned<'a, MC>(
+    base_column_pool: &BaseColumnPool<SimdBackend>,
+    twiddles: &TwiddleTree<SimdBackend>,
+    preprocessed_circuit: &PreprocessedCircuit,
+    preprocessed_tree: MaybeOwned<'a, CommitmentTreeProver<SimdBackend, MC>>,
+    values: Vec<QM31>,
+    pcs_config: PcsConfig,
+) -> Result<CircuitProof<MC::H>, ProvingError>
+where
+    MC: MerkleChannel,
+    SimdBackend: stwo::prover::backend::BackendForChannel<MC>,
+    <MC::H as MerkleHasherLifted>::Hash: Into<Blake2sHash>,
+{
+    prove_circuit_with_precompute_values(
+        base_column_pool,
+        twiddles,
+        preprocessed_circuit,
+        preprocessed_tree,
+        Cow::Owned(values),
+        pcs_config,
+    )
+}
+
+fn prove_circuit_with_precompute_values<'a, MC>(
+    base_column_pool: &BaseColumnPool<SimdBackend>,
+    twiddles: &TwiddleTree<SimdBackend>,
+    preprocessed_circuit: &PreprocessedCircuit,
+    preprocessed_tree: MaybeOwned<'a, CommitmentTreeProver<SimdBackend, MC>>,
+    values: Cow<'_, [QM31]>,
+    pcs_config: PcsConfig,
+) -> Result<CircuitProof<MC::H>, ProvingError>
+where
+    MC: MerkleChannel,
+    SimdBackend: stwo::prover::backend::BackendForChannel<MC>,
+    <MC::H as MerkleHasherLifted>::Hash: Into<Blake2sHash>,
+{
     let PreprocessedCircuit {
         preprocessed_trace,
         first_permutation_row,
@@ -147,13 +198,15 @@ where
     // Base trace.
     let mut tree_builder = commitment_scheme.tree_builder();
     let (claim, component_log_sizes, interaction_generator) = write_trace(
-        values,
+        &values,
         preprocessed_trace.clone(),
         *n_outputs,
         &mut tree_builder,
         &trace_generator,
         twiddles,
     );
+    // Nothing reads the values after the base trace; owned ones are freed here.
+    drop(values);
 
     let circuit_hash = compute_circuit_hash(
         &component_log_sizes,

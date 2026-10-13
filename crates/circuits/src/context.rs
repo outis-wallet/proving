@@ -311,6 +311,12 @@ impl<Value: IValue> FinalizedContext<Value> {
         self.context.values()
     }
 
+    /// Consumes the context and returns its values, freeing the gates and everything else. For a
+    /// padded context that is only proved: the proof reads its values, and nothing else of it.
+    pub fn into_values(self) -> Vec<Value> {
+        self.context.values
+    }
+
     pub fn check_vars_used(&self) {
         self.context.check_vars_used();
     }
