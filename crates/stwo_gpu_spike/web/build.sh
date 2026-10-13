@@ -37,4 +37,9 @@ if [ "${1:-all}" != gpu ]; then
   wasm-bindgen --target web --out-dir pkg/demo \
     target/demo/wasm32-unknown-unknown/release/stwo_gpu_web_demo.wasm
 fi
-ls -l pkg/gpu/*.wasm pkg/demo/*.wasm 2>/dev/null
+# List what this run built (`gpu` alone leaves no pkg/demo, which made `ls` fail the script).
+case "${1:-all}" in
+  gpu) ls -l pkg/gpu/*.wasm ;;
+  demo) ls -l pkg/demo/*.wasm ;;
+  *) ls -l pkg/gpu/*.wasm pkg/demo/*.wasm ;;
+esac
