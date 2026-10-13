@@ -1,8 +1,9 @@
 # Outis's branch of StarkWare's prover
 
 This is `starkware-libs/proving` at `2b495a36`, the revision the sequencer's
-`PRIVACY-0.14.4-RC.0` pins, plus seven commits. The changes make the whole Starknet transaction
-proof small enough in memory for phones and browsers (wasm32, 4 GiB). They are used by
+`PRIVACY-0.14.4-RC.0` pins, plus Outis's commits. The changes make the whole Starknet transaction
+proof small enough in memory for phones and browsers (wasm32, 4 GiB), and let it run on a GPU
+(native, browsers, phones) with every GPU path off unless the prover turns it on. They are used by
 [outis-wallet/prover](https://github.com/outis-wallet/prover), and run on outis.cash/prover and
 in the Outis Prover apps.
 
@@ -20,6 +21,15 @@ Proofs are byte-identical to the upstream prover's for the same input.
 | privacy_recursive_prove_once | The recursive proof for a process that proves once: each leg's precomputes are built when it starts and freed when it ends (about -85 MiB at the peak), and none outlive the proof | Outis |
 | privacy_recursive_prove_once_stoppable | The proof for a process that proves once, stoppable: it reads a stop flag between steps (each leg, and the stages of the Cairo proof through `prove_cairo_with_precompute_stoppable`) and returns `Cancelled` once the flag is set, so an app can cancel a proof. The functions that can't be stopped call these with a flag never set; proofs are byte-identical | Outis |
 
+| The GPU (stwo-gpu-spike, a new crate, wgpu) | The striped commitments on a GPU (Vulkan, Metal, DX12; WebGPU in a page's worker), streamed; composition (constraint kernels generated from the components' expressions), decommitment, out-of-domain samples and FRI quotients on the GPU with the trace's coefficients resident; lean commitments for unified memory (a stripe and a column group at a time, the host's coefficients read in place on Metal, the CPU path on any GPU failure); fixes for Metal (no workgroup zero-initialization) and Adreno (no indexed uniform table) | Outis |
+| The GPU's hooks in stwo and the constraint framework | `CommitmentTreeProver::new_striped`, the decommitment, the out-of-domain samples and the FRI quotients each try a registered hook first; the constraint evaluation and the trace parts likewise (with ExprEvaluator's side tables). Every hook is off unless registered, its answer is shape-checked and the CPU computes whatever it declines: with no hook the computation is the one before | Outis |
+| CI gates passing again | fmt, clippy (CI's flags), stwo-examples, the fft benchmark and Cargo.lock, which the frontier, striped-commitment and wasm commits had broken; part 0 of a trace part computes no twiddles it doesn't use | Outis |
+| The large-block cache from 64 KiB on Apple | macOS and iOS keep freed blocks between 64 KiB and 1 MiB: mapping them here returns them (the CPU path's peak footprint 2576 to 2358 MiB on an M5 Pro). 1 MiB elsewhere, as before | Outis |
+
+The prover's releases pin this branch at a tag: `outis-v0.1.0` (16f4a93a, the CPU prover) and
+`outis-v0.2.0` (58503232, the GPU modes). Their measurements are in outis-wallet/prover's
+BASELINES.md.
+
 Of the non-trivial lines these commits add, about 2,600 come from the frontier, about 830 are
 ours (the striped prover and its port to `2b495a36`), about 50 are the wasm and Android fixes, and
 about 25 remove the per-row allocations.
@@ -34,6 +44,7 @@ to the upstream prover's (outis-wallet/prover's captures carry the reference pro
 Apache-2.0, as upstream (`LICENSE`). The files changed from `2b495a36`:
 
 - `Cargo.lock`
+- `OUTIS.md`
 - `crates/cairo-air/src/components/verify_bitwise_xor_12.rs`
 - `crates/cairo-program-runner-lib/Cargo.toml`
 - `crates/cairo-program-runner-lib/src/hints/mod.rs`
@@ -57,10 +68,19 @@ Apache-2.0, as upstream (`LICENSE`). The files changed from `2b495a36`:
 - `crates/circuits/Cargo.toml`
 - `crates/circuits/src/circuit.rs`
 - `crates/constraint-framework/src/component.rs`
+- `crates/constraint-framework/src/expr/evaluator.rs`
+- `crates/constraint-framework/src/expr/mod.rs`
+- `crates/constraint-framework/src/lib.rs`
 - `crates/constraint-framework/src/logup.rs`
 - `crates/constraint-framework/src/prover/component_prover.rs`
+- `crates/constraint-framework/src/prover/constraint_hook.rs`
+- `crates/constraint-framework/src/prover/fingerprint.rs`
 - `crates/constraint-framework/src/prover/logup.rs`
+- `crates/constraint-framework/src/prover/mod.rs`
 - `crates/constraint-framework/src/prover/simd_domain.rs`
+- `crates/constraint-framework/src/prover/trace_part_hook.rs`
+- `crates/constraint-framework/tests/trace_part_hook.rs`
+- `crates/examples/src/xor/gkr_lookups/mle_eval.rs`
 - `crates/privacy_prove/Cargo.toml`
 - `crates/privacy_prove/src/consts.rs`
 - `crates/privacy_prove/src/lib.rs`
@@ -91,6 +111,8 @@ Apache-2.0, as upstream (`LICENSE`). The files changed from `2b495a36`:
 - `crates/prover/src/witness/components/verify_instruction.rs`
 - `crates/prover/src/witness/prelude.rs`
 - `crates/prover/src/witness/utils.rs`
+- `crates/stwo/benches/fft.rs`
+- `crates/stwo/src/core/channel/mod.rs`
 - `crates/stwo/src/prover/air/accumulation.rs`
 - `crates/stwo/src/prover/air/component_prover.rs`
 - `crates/stwo/src/prover/backend/mod.rs`
@@ -117,3 +139,5 @@ Apache-2.0, as upstream (`LICENSE`). The files changed from `2b495a36`:
 - `crates/stwo/src/prover/poly/circle/ops.rs`
 - `crates/stwo/src/prover/vcs_lifted/ops.rs`
 - `crates/stwo/src/prover/vcs_lifted/prover.rs`
+
+and the new crate `crates/stwo_gpu_spike/` (Outis).
