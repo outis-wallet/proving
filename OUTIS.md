@@ -25,14 +25,17 @@ Proofs are byte-identical to the upstream prover's for the same input.
 | The GPU's hooks in stwo and the constraint framework | `CommitmentTreeProver::new_striped`, the decommitment, the out-of-domain samples and the FRI quotients each try a registered hook first; the constraint evaluation and the trace parts likewise (with ExprEvaluator's side tables). Every hook is off unless registered, its answer is shape-checked and the CPU computes whatever it declines: with no hook the computation is the one before | Outis |
 | CI gates passing again | fmt, clippy (CI's flags), stwo-examples, the fft benchmark and Cargo.lock, which the frontier, striped-commitment and wasm commits had broken; part 0 of a trace part computes no twiddles it doesn't use | Outis |
 | The large-block cache from 64 KiB on Apple | macOS and iOS keep freed blocks between 64 KiB and 1 MiB: mapping them here returns them (the CPU path's peak footprint 2576 to 2358 MiB on an M5 Pro). 1 MiB elsewhere, as before | Outis |
+| Lookup data narrowed from the base trace to the interaction trace | Each Cairo component's lookup tuples live from its `write_trace` until its interaction trace, across the base trace commitment. The bitwise-XOR tuples are now stored as one `u32` (4x smaller) and `memory_id_to_big`'s as 11 `u32` words (about 2.7x), in the bits the AIR range-checks them to, and widened back for the interaction trace. -350 MiB of wasm memory on every capture, no time cost. Hand-edits 34 AIR-generated witness files | ryun1, in the provably.fast frontier `66670df7` (whole-proof job f2498dc7), taken as is |
+| The verifier context freed before the circuit's base trace commitment | `prove_once` takes the padded context's values out (`FinalizedContext::into_values`, freeing the gates) and hands them to `prove_circuit_with_precompute_owned`, which frees them once the base trace is written. About -200 MiB through the circuit proof | Outis, after realadii's change in the provably.fast frontier `55720f34` |
 
-The prover's releases pin this branch at a tag: `outis-v0.1.0` (16f4a93a, the CPU prover) and
-`outis-v0.2.0` (58503232, the GPU modes). Their measurements are in outis-wallet/prover's
+The prover's releases pin this branch at a tag: `outis-v0.1.0` (16f4a93a, the CPU prover),
+`outis-v0.2.0` (58503232, the GPU modes) and `outis-v0.2.1` (the lookup-data narrowing and the freed
+verifier context: about -350 MiB of wasm memory and -200 to -320 MiB natively, the same time). Their measurements are in outis-wallet/prover's
 BASELINES.md.
 
 Of the non-trivial lines these commits add, about 2,600 come from the frontier, about 830 are
 ours (the striped prover and its port to `2b495a36`), about 50 are the wasm and Android fixes, and
-about 25 remove the per-row allocations.
+about 25 remove the per-row allocations. The lookup-data narrowing adds about 1,000 more lines from the frontier.
 
 ## Following upstream
 
@@ -67,6 +70,7 @@ Apache-2.0, as upstream (`LICENSE`). The files changed from `2b495a36`:
 - `crates/circuit_prover/src/witness/components/verify_bitwise_xor_9.rs`
 - `crates/circuits/Cargo.toml`
 - `crates/circuits/src/circuit.rs`
+- `crates/circuits/src/context.rs`
 - `crates/constraint-framework/src/component.rs`
 - `crates/constraint-framework/src/expr/evaluator.rs`
 - `crates/constraint-framework/src/expr/mod.rs`
@@ -85,9 +89,30 @@ Apache-2.0, as upstream (`LICENSE`). The files changed from `2b495a36`:
 - `crates/privacy_prove/src/consts.rs`
 - `crates/privacy_prove/src/lib.rs`
 - `crates/prover/src/prover.rs`
+- `crates/prover/src/witness/components/add_ap_opcode.rs`
+- `crates/prover/src/witness/components/add_mod_builtin.rs`
+- `crates/prover/src/witness/components/add_opcode.rs`
+- `crates/prover/src/witness/components/add_opcode_small.rs`
+- `crates/prover/src/witness/components/assert_eq_opcode_double_deref.rs`
+- `crates/prover/src/witness/components/bitwise_builtin.rs`
+- `crates/prover/src/witness/components/blake_compress_opcode.rs`
+- `crates/prover/src/witness/components/blake_g.rs`
+- `crates/prover/src/witness/components/blake_round.rs`
 - `crates/prover/src/witness/components/blake_round_sigma.rs`
+- `crates/prover/src/witness/components/call_opcode_abs.rs`
+- `crates/prover/src/witness/components/call_opcode_rel_imm.rs`
 - `crates/prover/src/witness/components/cube_252.rs`
+- `crates/prover/src/witness/components/ec_op_builtin.rs`
+- `crates/prover/src/witness/components/jnz_opcode_non_taken.rs`
+- `crates/prover/src/witness/components/jnz_opcode_taken.rs`
+- `crates/prover/src/witness/components/jump_opcode_abs.rs`
+- `crates/prover/src/witness/components/jump_opcode_double_deref.rs`
+- `crates/prover/src/witness/components/jump_opcode_rel.rs`
+- `crates/prover/src/witness/components/jump_opcode_rel_imm.rs`
 - `crates/prover/src/witness/components/memory_id_to_big.rs`
+- `crates/prover/src/witness/components/mul_mod_builtin.rs`
+- `crates/prover/src/witness/components/mul_opcode.rs`
+- `crates/prover/src/witness/components/mul_opcode_small.rs`
 - `crates/prover/src/witness/components/partial_ec_mul_window_bits_18.rs`
 - `crates/prover/src/witness/components/partial_ec_mul_window_bits_9.rs`
 - `crates/prover/src/witness/components/pedersen_aggregator_window_bits_18.rs`
@@ -96,6 +121,8 @@ Apache-2.0, as upstream (`LICENSE`). The files changed from `2b495a36`:
 - `crates/prover/src/witness/components/pedersen_points_table_window_bits_9.rs`
 - `crates/prover/src/witness/components/poseidon_aggregator.rs`
 - `crates/prover/src/witness/components/poseidon_round_keys.rs`
+- `crates/prover/src/witness/components/qm_31_add_mul_opcode.rs`
+- `crates/prover/src/witness/components/range_check96_builtin.rs`
 - `crates/prover/src/witness/components/range_check_3_3_3_3_3.rs`
 - `crates/prover/src/witness/components/range_check_3_6_6_3.rs`
 - `crates/prover/src/witness/components/range_check_4_3.rs`
@@ -103,6 +130,9 @@ Apache-2.0, as upstream (`LICENSE`). The files changed from `2b495a36`:
 - `crates/prover/src/witness/components/range_check_4_4_4_4.rs`
 - `crates/prover/src/witness/components/range_check_7_2_5.rs`
 - `crates/prover/src/witness/components/range_check_9_9.rs`
+- `crates/prover/src/witness/components/range_check_builtin.rs`
+- `crates/prover/src/witness/components/ret_opcode.rs`
+- `crates/prover/src/witness/components/triple_xor_32.rs`
 - `crates/prover/src/witness/components/verify_bitwise_xor_12.rs`
 - `crates/prover/src/witness/components/verify_bitwise_xor_4.rs`
 - `crates/prover/src/witness/components/verify_bitwise_xor_7.rs`
