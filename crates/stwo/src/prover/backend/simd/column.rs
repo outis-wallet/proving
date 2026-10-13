@@ -898,7 +898,7 @@ impl VeryPackedSecureColumnByCoords {
 #[cfg(unix)]
 pub struct LargeBlockCache;
 
-const LARGE_MIN_LOG: u32 = 20;
+const LARGE_MIN_LOG: u32 = 16;
 const LARGE_MAX_LOG: u32 = 40;
 const LARGE_CLASSES: usize = ((LARGE_MAX_LOG - LARGE_MIN_LOG) * 4) as usize + 1;
 /// Idle blocks a class can hold.
