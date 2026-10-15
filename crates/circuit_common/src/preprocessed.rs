@@ -41,8 +41,6 @@ use crate::finalize::{ComponentSizes, pad_context};
 #[path = "preprocessed_test.rs"]
 pub mod test;
 
-const N_OP_CODES: usize = 4;
-
 /// Declares one padded AIR component's preprocessed columns, in commitment order: one column per
 /// field, under the field's name as the column id.
 ///
@@ -197,26 +195,13 @@ enum OpCode {
     PointwiseMul,
 }
 
-impl OpCode {
-    const ALL: [OpCode; N_OP_CODES] = [OpCode::Add, OpCode::Sub, OpCode::Mul, OpCode::PointwiseMul];
-}
-
 impl Qm31OpsColumns {
-    /// The one-hot flag column of `op_code`.
-    fn flag_column(&mut self, op_code: OpCode) -> &mut Vec<usize> {
-        match op_code {
-            OpCode::Add => &mut self.qm_31_ops_add_flag,
-            OpCode::Sub => &mut self.qm_31_ops_sub_flag,
-            OpCode::Mul => &mut self.qm_31_ops_mul_flag,
-            OpCode::PointwiseMul => &mut self.qm_31_ops_pointwise_mul_flag,
-        }
-    }
-
-    /// Appends `n_rows` rows of the one-hot op-code flags, set for `op_code` and clear elsewhere.
-    fn push_op_code_flags(&mut self, op_code: OpCode, n_rows: usize) {
-        for op in OpCode::ALL {
-            self.flag_column(op).extend(std::iter::repeat_n((op == op_code) as usize, n_rows));
-        }
+    /// Appends a row of the one-hot op-code flags, set for `op_code` and clear elsewhere.
+    fn push_op_code_flags(&mut self, op_code: OpCode) {
+        self.qm_31_ops_add_flag.push((op_code == OpCode::Add) as usize);
+        self.qm_31_ops_sub_flag.push((op_code == OpCode::Sub) as usize);
+        self.qm_31_ops_mul_flag.push((op_code == OpCode::Mul) as usize);
+        self.qm_31_ops_pointwise_mul_flag.push((op_code == OpCode::PointwiseMul) as usize);
     }
 }
 
@@ -230,7 +215,7 @@ fn fill_binary_op_columns<G: Gate>(
     for gate in gates.iter() {
         let [in0, in1] = gate.uses()[..] else { panic!("Expected 2 uses for gate") };
         let [out] = gate.yields()[..] else { panic!("Expected 1 yield for gate") };
-        columns.push_op_code_flags(op_code, 1);
+        columns.push_op_code_flags(op_code);
         columns.qm_31_ops_in_0_address.push(in0);
         columns.qm_31_ops_in_1_address.push(in1);
         columns.qm_31_ops_out_address.push(out);
@@ -260,17 +245,17 @@ fn fill_permutation_columns(
         let inputs = gate.uses();
         let outputs = gate.yields();
 
-        columns.push_op_code_flags(OpCode::Add, inputs.len() + outputs.len());
-
-        // TODO(alonf): Parallelize, and insert the above loop inside.
+        // TODO(alonf): Parallelize.
         for (input, output) in zip_eq(inputs, outputs) {
             // Input row.
+            columns.push_op_code_flags(OpCode::Add);
             columns.qm_31_ops_in_0_address.push(0);
             columns.qm_31_ops_in_1_address.push(input);
             columns.qm_31_ops_out_address.push(permutation_address);
             columns.qm_31_ops_mults.push(1);
 
             // Output row.
+            columns.push_op_code_flags(OpCode::Add);
             columns.qm_31_ops_in_0_address.push(0);
             columns.qm_31_ops_in_1_address.push(permutation_address);
             columns.qm_31_ops_out_address.push(output);
