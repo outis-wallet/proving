@@ -61,6 +61,9 @@ pub struct CircuitsBuilder {
     pub cairo_roots_cache: BTreeMap<u32, HashValue<QM31>>,
     /// The program every leaf proof of these circuits attests to.
     pub leaf_program: Arc<[[M31; MEMORY_VALUES_LIMBS]]>,
+    /// The set of components used by the program. The leaf verifier circuit will assume the Cairo
+    /// AIR contains exactly this set of components.
+    pub cairo_component_names: Vec<String>,
     /// Prover parameters used to create the verified Cairo proofs.
     pub cairo_prover_params: ProverParameters,
     /// FRI params used to prove the leaf circuits
@@ -107,6 +110,7 @@ impl CircuitsBuilder {
         let verifier_config = leaf_verifier_config(
             self.cairo_prover_params.preprocessed_trace,
             &self.cairo_pcs_config(trace_log_size),
+            &self.cairo_component_names,
             self.leaf_program.clone(),
             preprocessed_root,
             self.add_zk_blinding.then_some(self.circuit_fri_params.n_queries + NON_QUERY_INFO_LEAK),
@@ -126,6 +130,7 @@ pub fn circuits_builder_from_definition(definition: &RegistryDefinition) -> Circ
     CircuitsBuilder {
         cairo_roots_cache: Default::default(),
         leaf_program: program,
+        cairo_component_names: definition.cairo_components.clone(),
         cairo_prover_params,
         circuit_fri_params,
         add_zk_blinding: definition.add_zk_blinding,
@@ -212,6 +217,7 @@ pub fn create_registry_from_definition(definition: &RegistryDefinition) -> Circu
 
     CircuitRegistry {
         cairo_prover_params: circuits_builder.cairo_prover_params,
+        cairo_components: circuits_builder.cairo_component_names,
         circuit_proof_configs,
         leaf_verifiers,
         multiverifiers,
@@ -317,6 +323,9 @@ pub struct RegistryDefinition {
     pub circuit_fri_params_json: std::path::PathBuf,
     /// The compiled program the leaf circuit verifies (the leaf prover's `--program`).
     pub program: std::path::PathBuf,
+    /// The set of components used by the program. The circuit will assume the Cairo AIR contains
+    /// exactly this set of components.
+    pub cairo_components: Vec<String>,
     /// Smallest verified trace log size (inclusive). Bounded below by the preprocessed-trace
     /// variant's sequence-column log height (20 for canonical_small, 25 for canonical).
     pub min_trace_log_size: u32,

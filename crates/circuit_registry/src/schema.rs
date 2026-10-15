@@ -108,6 +108,7 @@ pub struct Multiverifier {
 pub struct CircuitRegistry {
     /// The prover params the verified Cairo proofs are produced with.
     pub cairo_prover_params: ProverParameters,
+    pub cairo_components: Vec<String>,
     pub circuit_proof_configs: BTreeMap<String, CircuitProofConfig>,
     pub leaf_verifiers: Vec<LeafVerifier>,
     pub multiverifiers: Vec<Multiverifier>,

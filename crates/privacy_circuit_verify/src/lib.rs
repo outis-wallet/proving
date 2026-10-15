@@ -41,7 +41,7 @@ pub use utils::Version;
 
 use crate::consts::{
     CAIRO_PCS_CONFIG, CIRCUIT_FRI_CONFIG, CIRCUIT_PCS_CONFIG, LARGE_PROOFS_CIRCUIT_REGISTRY_JSON,
-    LEAF_BOOTLOADER_JSON, MAX_RECURSIVE_PROOF_UNCOMPRESSED_BYTES, PRIVACY_BOOTLOADER_JSON,
+    MAX_RECURSIVE_PROOF_UNCOMPRESSED_BYTES, PRIVACY_BOOTLOADER_JSON,
     PRIVACY_CIRCUIT_PREPROCESSED_IDS, PRIVACY_CIRCUIT_PREPROCESSED_LOG_SIZES,
     PRIVACY_RECURSION_CIRCUIT_PREPROCESSED_ROOT,
 };
@@ -161,11 +161,6 @@ pub fn get_cairo_verifier_config() -> Result<CairoVerifierConfig, Box<dyn Error>
 
 pub fn get_privacy_bootloader_program() -> Result<Program, Box<dyn Error>> {
     let bootloader_program = Program::from_bytes(PRIVACY_BOOTLOADER_JSON, Some("main"))?;
-    Ok(bootloader_program)
-}
-
-pub fn get_leaf_bootloader_program() -> Result<Program, Box<dyn Error>> {
-    let bootloader_program = Program::from_bytes(LEAF_BOOTLOADER_JSON, Some("main"))?;
     Ok(bootloader_program)
 }
 

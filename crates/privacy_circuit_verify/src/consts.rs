@@ -19,10 +19,6 @@ pub const PRIVACY_BOOTLOADER_JSON: &[u8] = include_bytes!(
     "../../cairo-program-runner-lib/resources/compiled_programs/bootloaders/\
      privacy_simple_bootloader_compiled.json"
 );
-pub const LEAF_BOOTLOADER_JSON: &[u8] = include_bytes!(
-    "../../cairo-program-runner-lib/resources/compiled_programs/bootloaders/\
-     leaf_simple_bootloader_compiled.json"
-);
 pub const LARGE_PROOFS_CIRCUIT_REGISTRY_JSON: &str =
     include_str!("../../privacy_circuit_verify/large_proofs_circuit_registry.json");
 pub const CIRCUIT_OUTPUT_ADDRESSES: [usize; 9] = [3, 4, 5, 6, 7, 8, 9, 10, 2];

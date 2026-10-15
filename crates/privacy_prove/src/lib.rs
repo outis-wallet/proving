@@ -39,8 +39,7 @@ use privacy_circuit_verify::utils::ProofHeader;
 use privacy_circuit_verify::{
     PrivacyProofOutput, Version, compute_privacy_bootloader_output_hash,
     get_cairo_preprocessed_circuit, get_cairo_verifier_config, get_large_proofs_circuit_registry,
-    get_leaf_bootloader_program, get_privacy_bootloader_program, get_proof_config,
-    get_recursive_circuit_config,
+    get_privacy_bootloader_program, get_proof_config, get_recursive_circuit_config,
 };
 use serde_json::from_str;
 use starknet_types_core::felt::Felt;
@@ -167,13 +166,15 @@ pub fn prepare_recursive_prover_precomputes()
 }
 
 pub fn privacy_recursive_prove_large(pie: CairoPie) -> Result<PrivacyProofOutput, Box<dyn Error>> {
-    let leaf_bootloader = get_leaf_bootloader_program()?;
+    // Currently, the large privacy proofs use the same component types as the small privacy
+    // proofs, so they can use the same bootloader.
+    let bootloader = get_privacy_bootloader_program()?;
     let circuit_registry = get_large_proofs_circuit_registry();
     let output_preimage_file = NamedTempFile::new()?;
     let output_preimage_path = output_preimage_file.path();
 
     // The leaf bootloader and the privacy bootloader have the same input format
-    let leaf_bootloader_input = build_privacy_bootloader_input(pie, output_preimage_path);
+    let bootloader_input = build_privacy_bootloader_input(pie, output_preimage_path);
 
     // Prove
     let SerializedLeafProof {
@@ -181,8 +182,8 @@ pub fn privacy_recursive_prove_large(pie: CairoPie) -> Result<PrivacyProofOutput
         circuit_hash: _,
         proof,
     }: SerializedLeafProof = prove_leaf(
-        &leaf_bootloader,
-        Some(ProgramInput::Value(Box::new(leaf_bootloader_input))),
+        &bootloader,
+        Some(ProgramInput::Value(Box::new(bootloader_input))),
         &circuit_registry,
     );
     // Read the output preimage

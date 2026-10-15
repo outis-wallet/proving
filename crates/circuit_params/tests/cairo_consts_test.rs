@@ -57,6 +57,7 @@ fn shared_target(definition: &RegistryDefinition) -> (ComponentSizes, Preprocess
     let circuits_builder = CircuitsBuilder {
         cairo_roots_cache: Default::default(),
         leaf_program: load_program(&definition.program),
+        cairo_component_names: definition.cairo_components.clone(),
         cairo_prover_params: cairo_params,
         circuit_fri_params: definition.circuit_fri_params(),
         add_zk_blinding: definition.add_zk_blinding,
