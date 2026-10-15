@@ -137,6 +137,7 @@ pub mod slow_tests {
     use std::path::PathBuf;
 
     use cairo_vm::vm::runners::cairo_pie::CairoPie;
+    use circuit_params::assert_committed_registry_is_up_to_date;
     use privacy_prove::{prepare_recursive_prover_precomputes, privacy_recursive_prove};
     use tracing_subscriber::fmt;
 
@@ -187,5 +188,15 @@ pub mod slow_tests {
             "Update RECURSIVE_PROOF_UNCOMPRESSED_BYTES in consts.rs to {}",
             proof_bytes.len()
         );
+    }
+
+    #[test]
+    fn large_proofs_registry_matches_definition() {
+        const LARGE_REGISTRY_PATH: &str =
+            "crates/privacy_circuit_verify/large_proofs_circuit_registry.json";
+        const LARGE_REGISTRY_DEFINITION: &str =
+            "circuit_registry_definitions/privacy_large_proofs/definition.json";
+
+        assert_committed_registry_is_up_to_date(LARGE_REGISTRY_DEFINITION, LARGE_REGISTRY_PATH);
     }
 }

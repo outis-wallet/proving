@@ -17,6 +17,7 @@ use circuit_common::preprocessed::{PreprocessedCircuit, layout_from_component_si
 use circuit_params::{CircuitsBuilder, RegistryDefinition, padded_shared_target};
 use circuits::blake::HashValue;
 use stwo::core::fri::FriParams;
+use stwo_cairo_utils::file_utils::repo_root;
 
 /// Hand-written preamble of the generated `multiverifier_consts.cairo`.
 const MULTIVERIFIER_CONSTS_HEADER: &str = "\
@@ -42,10 +43,6 @@ const PREPROCESSED_COLUMNS_HEADER: &str = "\
 //! these indices change whenever the registry's component sizes change. Do not edit by hand.
 
 use stwo_constraint_framework::PreprocessedColumnIdx;";
-
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
-}
 
 /// `definition`'s shared padding target and the multiverifier padded to it: the elementwise max
 /// over the leaf circuits of its trace range, closed under the multiverifier fixpoint.
@@ -271,7 +268,10 @@ fn assert_generated_file(file_name: &str, rendered: &str) {
 /// fast).
 #[test]
 fn test_cairo_verifier_consts_match_production_registry() {
-    let production = RegistryDefinition::load(&repo_root(), "production");
+    let production = RegistryDefinition::load(
+        &repo_root(),
+        "circuit_registry_definitions/production/definition.json",
+    );
     // TODO(yair): Add a sizes-only shared-target variant; the discarded multiverifier's
     // preprocessed trace is the bulk of this test's memory.
     let (target_sizes, _preprocessed_multiverifier) = shared_target(&production);
@@ -287,7 +287,10 @@ fn test_cairo_verifier_consts_match_production_registry() {
 
     // The canonical_small registry pads to the production shape, so that its goldens' root proof —
     // the Cairo verifier's execution fixture — is verified by exactly these consts.
-    let small = RegistryDefinition::load(&repo_root(), "canonical_small");
+    let small = RegistryDefinition::load(
+        &repo_root(),
+        "circuit_registry_definitions/canonical_small/definition.json",
+    );
     assert_eq!(
         small.pad_to_component_log_sizes.as_ref(),
         Some(&circuit_registry::LogSizes::of(&target_sizes)),

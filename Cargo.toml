@@ -176,6 +176,7 @@ circuit-cairo-serialize = { path = "crates/circuit_cairo_serialize" }
 circuit-cairo-verifier = { path = "crates/cairo_verifier" }
 circuit-common = { path = "crates/circuit_common" }
 circuit-prover = { path = "crates/circuit_prover" }
+circuit-params = { path = "crates/circuit_params" }
 circuit-serialize = { path = "crates/circuit_serialize" }
 circuits-stark-verifier = { path = "crates/stark_verifier" }
 circuits-stark-verifier-examples = { path = "crates/stark_verifier_examples" }

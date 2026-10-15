@@ -7,6 +7,7 @@
 //! derive its circuits' shape without committing anything.
 
 use std::collections::BTreeMap;
+use std::fs;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -35,6 +36,7 @@ use stwo_cairo_common::prover_types::cpu::M31;
 use stwo_cairo_prover::prover::ProverParameters;
 use stwo_cairo_prover::witness::prelude::QM31;
 use stwo_cairo_prover::witness::preprocessed_trace::generate_preprocessed_commitment_root;
+use stwo_cairo_utils::file_utils::repo_root;
 
 /// Reads a prover params JSON file.
 pub fn read_params<T: serde::de::DeserializeOwned>(path: &Path) -> T {
@@ -327,12 +329,11 @@ pub struct RegistryDefinition {
 }
 
 impl RegistryDefinition {
-    /// Loads `circuit_registry_definitions/<name>/definition.json`, resolving its paths against
-    /// `repo_root`.
-    pub fn load(repo_root: &Path, name: &str) -> Self {
-        let mut definition: RegistryDefinition = read_params(
-            &repo_root.join(format!("circuit_registry_definitions/{name}/definition.json")),
-        );
+    /// Loads the definition at `relative_definition_path`. `relative_definition_path`
+    /// and the paths inside the definition are assumed to be relative to `repo_root`.
+    pub fn load(repo_root: &Path, relative_definition_path: &str) -> Self {
+        let mut definition: RegistryDefinition =
+            read_params(&repo_root.join(relative_definition_path));
         for path in [
             &mut definition.cairo_prover_params_json,
             &mut definition.circuit_fri_params_json,
@@ -349,5 +350,24 @@ impl RegistryDefinition {
 
     pub fn circuit_fri_params(&self) -> FriParams {
         read_params(&self.circuit_fri_params_json)
+    }
+}
+
+/// Regenerates the given registry and asserts it matches the committed. Run with `FIX=1`
+/// to regenerate.
+pub fn assert_committed_registry_is_up_to_date(definition_path: &str, committed_path: &str) {
+    let definition = RegistryDefinition::load(&repo_root(), definition_path);
+    let absolute_committed_path = repo_root().join(committed_path);
+
+    let registry = create_registry_from_definition(&definition);
+    let registry_serialized = serde_json::to_string_pretty(&registry).unwrap() + "\n";
+    if std::env::var("FIX") == Ok("1".to_string()) {
+        fs::write(absolute_committed_path, registry_serialized).unwrap();
+    } else {
+        let existing_registry = fs::read_to_string(absolute_committed_path).unwrap();
+        assert_eq!(
+            existing_registry, registry_serialized,
+            "{committed_path} does not match this run's output; run with FIX=1 to regenerate"
+        );
     }
 }

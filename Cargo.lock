@@ -3684,6 +3684,7 @@ dependencies = [
  "cairo-vm",
  "circuit-cairo-verifier",
  "circuit-common",
+ "circuit-params",
  "circuit-registry",
  "circuit-serialize",
  "circuit-verifier",

@@ -23,9 +23,6 @@ pub const LEAF_BOOTLOADER_JSON: &[u8] = include_bytes!(
     "../../cairo-program-runner-lib/resources/compiled_programs/bootloaders/\
      leaf_simple_bootloader_compiled.json"
 );
-// Registry that defines the circuits used for large privacy proofs. Generated using
-// `cargo run -r --bin circuit-params -- --definition
-// circuit_registry_definitions/privacy_large_proofs/definition.json --registry`
 pub const LARGE_PROOFS_CIRCUIT_REGISTRY_JSON: &str =
     include_str!("../../privacy_circuit_verify/large_proofs_circuit_registry.json");
 pub const CIRCUIT_OUTPUT_ADDRESSES: [usize; 9] = [3, 4, 5, 6, 7, 8, 9, 10, 2];
