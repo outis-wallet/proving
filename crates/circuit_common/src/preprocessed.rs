@@ -442,11 +442,7 @@ impl PreProcessedTrace {
 
     /// Log2 of the trace size: the largest column's log size.
     pub fn trace_log_size(&self) -> u32 {
-        self.columns
-            .values()
-            .map(|column| column.len().ilog2())
-            .max()
-            .expect("the preprocessed trace is non-empty")
+        *self.log_sizes().values().max().expect("the preprocessed trace is non-empty")
     }
 
     pub fn ids(&self) -> Vec<PreProcessedColumnId> {
