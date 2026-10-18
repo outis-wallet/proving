@@ -42,9 +42,7 @@ impl M31Wrapper<Var> {
     }
 
     pub fn const_from_u32(context: &mut Context<impl IValue>, value: u32) -> M31Wrapper<Var> {
-        if value >= P {
-            panic!("{value} is > P")
-        }
+        assert!(value < P, "{value} is >= P");
         Self::const_m31(context, value.into())
     }
 
@@ -118,7 +116,7 @@ impl<Value: IValue> U16Wrapper<Value> {
 
 impl From<u16> for U16Wrapper<QM31> {
     fn from(value: u16) -> Self {
-        Self(qm31_from_u32s(value as u32, 0, 0, 0))
+        Self(qm31_from_u32s(value.into(), 0, 0, 0))
     }
 }
 
@@ -137,7 +135,7 @@ impl<Value: IValue> Guess<Value> for U16Wrapper<Value> {
         context.stats.guess += 1;
         let out = context.new_var(*self.get());
         context.guessed_vars.as_mut().unwrap().push(GuessVar::U16(out));
-        U16Wrapper::new_unsafe(out)
+        U16Wrapper(out)
     }
 }
 
@@ -198,7 +196,7 @@ impl U32Wrapper<Var> {
     }
 
     pub fn get_value<Value: IValue>(self, context: &Context<Value>) -> U32Wrapper<Value> {
-        U32Wrapper::new_unsafe(context.get(self.0))
+        U32Wrapper(context.get(self.0))
     }
 }
 
@@ -210,8 +208,9 @@ impl<Value: IValue> Guess<Value> for U32Wrapper<Value> {
         // that each is range-constrained to `[0, 2^16)` during finalization, then recombine them as
         // `low + high * i` to rebuild the packed representation.
         let value = Value::unpack_u32(self.get());
-        let low = U16Wrapper::<Value>::from_u16(value as u16).guess(context);
-        let high = U16Wrapper::<Value>::from_u16((value >> 16) as u16).guess(context);
+        let low =
+            U16Wrapper::<Value>::from_u16((value & 0xffff).try_into().unwrap()).guess(context);
+        let high = U16Wrapper::<Value>::from_u16((value >> 16).try_into().unwrap()).guess(context);
         let i = context.i();
         U32Wrapper(eval!(context, (*low.get()) + ((*high.get()) * (i))))
     }
