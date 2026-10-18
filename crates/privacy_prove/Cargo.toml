@@ -21,6 +21,7 @@ zstd.workspace = true
 # local crates
 cairo-program-runner-lib.workspace = true
 privacy-circuit-verify.workspace = true
+privacy_common.workspace = true
 leaf-proof-format.workspace = true
 leaf-prover.workspace = true
 

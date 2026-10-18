@@ -1,21 +1,15 @@
-pub mod consts;
-#[cfg(test)]
-mod tests;
-pub mod utils;
-
 use std::error::Error;
 use std::sync::Arc;
 
 use anyhow::Result;
 use cairo_air::verifier::INTERACTION_POW_BITS;
-use cairo_vm::types::program::Program;
 use circuit_cairo_verifier::all_components::all_components;
 use circuit_cairo_verifier::privacy::PRIVACY_TRANSACTION_COMPONENTS;
 use circuit_cairo_verifier::verify::{
     CairoVerifierConfig, NON_QUERY_INFO_LEAK, build_cairo_verifier_circuit, get_preprocessed_root,
 };
 use circuit_common::preprocessed::{PreprocessedCircuit, layout_from_component_sizes};
-use circuit_registry::{CircuitProofConfig, CircuitRegistry};
+use circuit_registry::CircuitProofConfig;
 use circuit_serialize::deserialize::deserialize_proof_with_config;
 use circuit_verifier::components::prelude::PreProcessedColumnId;
 use circuit_verifier::statement::{
@@ -28,33 +22,29 @@ use circuits::ivalue::NoValue;
 use circuits::utils::le_u32s_from_bytes;
 use circuits_stark_verifier::proof::ProofConfig;
 use itertools::Itertools;
-use starknet_types_core::felt::Felt;
-use starknet_types_core::hash::Blake2Felt252;
+use privacy_common::consts::{
+    CAIRO_PCS_CONFIG, CIRCUIT_FRI_CONFIG, CIRCUIT_PCS_CONFIG,
+    MAX_RECURSIVE_PROOF_UNCOMPRESSED_BYTES, PRIVACY_CIRCUIT_PREPROCESSED_IDS,
+    PRIVACY_CIRCUIT_PREPROCESSED_LOG_SIZES, PRIVACY_RECURSION_CIRCUIT_PREPROCESSED_ROOT,
+};
+use privacy_common::utils::ProofHeader;
+use privacy_common::{
+    compute_privacy_bootloader_output_hash, get_large_proofs_circuit_registry,
+    get_privacy_bootloader_program,
+};
 use stwo::core::fields::qm31::QM31;
 use stwo::core::fri::FriConfig;
 use stwo::core::pcs::PcsConfig;
-use stwo::core::vcs::blake2_hash::{Blake2sHash, Blake2sHasher};
 use stwo_cairo_common::preprocessed_columns::preprocessed_trace::PreProcessedTraceVariant;
 use stwo_cairo_common::prover_types::cpu::Felt252;
 use tracing::{Level, info, span};
-pub use utils::Version;
 
-use crate::consts::{
-    CAIRO_PCS_CONFIG, CIRCUIT_FRI_CONFIG, CIRCUIT_PCS_CONFIG, LARGE_PROOFS_CIRCUIT_REGISTRY_JSON,
-    MAX_RECURSIVE_PROOF_UNCOMPRESSED_BYTES, PRIVACY_BOOTLOADER_JSON,
-    PRIVACY_CIRCUIT_PREPROCESSED_IDS, PRIVACY_CIRCUIT_PREPROCESSED_LOG_SIZES,
-    PRIVACY_RECURSION_CIRCUIT_PREPROCESSED_ROOT,
-};
-use crate::utils::ProofHeader;
+#[cfg(test)]
+mod tests;
 
-pub struct PrivacyProofOutput {
-    /// Proof bytes, laid out as the serialized [`ProofHeader`] of the `privacy-prove` crate that
-    /// generated the proof, followed by the compressed proof. The format must be consistent
-    /// between the prover (`privacy_recursive_prove`) and the verifier
-    /// (`verify_recursive_circuit`).
-    pub proof: Vec<u8>,
-    pub output_preimage: Vec<Felt>,
-}
+// Re-exported for external consumers (the sequencer uses `PrivacyProofOutput` and
+// `utils::ProofHeader` through this crate).
+pub use privacy_common::{PrivacyProofOutput, utils};
 
 /// Splits the version-prefixed proof bytes into the embedded header and the remaining
 /// compressed proof bytes.
@@ -159,23 +149,6 @@ pub fn get_cairo_verifier_config() -> Result<CairoVerifierConfig, Box<dyn Error>
     })
 }
 
-pub fn get_privacy_bootloader_program() -> Result<Program, Box<dyn Error>> {
-    let bootloader_program = Program::from_bytes(PRIVACY_BOOTLOADER_JSON, Some("main"))?;
-    Ok(bootloader_program)
-}
-
-/// Computes the Blake2s digest that the privacy bootloader emits as its output memory cells.
-///
-/// The bootloader hashes the felt-encoded `output_preimage` with Blake2s (the same encoding as
-/// [`Blake2Felt252::encode_felt252_data_and_calc_blake_hash`]) and stores the raw 256-bit digest
-/// across its output cells. This returns that digest directly (before any packing/reduction into
-/// a felt), which is the `output_hash` the circuit cairo verifier expects.
-pub fn compute_privacy_bootloader_output_hash(output_preimage: &[Felt]) -> Blake2sHash {
-    let u32_words = Blake2Felt252::encode_felts_to_u32s(output_preimage);
-    let byte_stream: Vec<u8> = u32_words.iter().flat_map(|word| word.to_le_bytes()).collect();
-    Blake2sHasher::hash(&byte_stream)
-}
-
 pub fn get_recursive_circuit_config(
     preprocessed_root: &[u32; 8],
 ) -> Result<CircuitConfig, Box<dyn Error>> {
@@ -257,8 +230,4 @@ pub fn get_cairo_preprocessed_circuit(
 ) -> PreprocessedCircuit {
     let mut novalue_context = build_cairo_verifier_circuit(cairo_verifier_config);
     PreprocessedCircuit::preprocess_circuit(&mut novalue_context)
-}
-
-pub fn get_large_proofs_circuit_registry() -> CircuitRegistry {
-    serde_json::from_str(LARGE_PROOFS_CIRCUIT_REGISTRY_JSON).unwrap()
 }

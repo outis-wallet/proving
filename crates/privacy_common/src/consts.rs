@@ -20,7 +20,7 @@ pub const PRIVACY_BOOTLOADER_JSON: &[u8] = include_bytes!(
      privacy_simple_bootloader_compiled.json"
 );
 pub const LARGE_PROOFS_CIRCUIT_REGISTRY_JSON: &str =
-    include_str!("../../privacy_circuit_verify/large_proofs_circuit_registry.json");
+    include_str!("../large_proofs_circuit_registry.json");
 pub const CIRCUIT_OUTPUT_ADDRESSES: [usize; 9] = [3, 4, 5, 6, 7, 8, 9, 10, 2];
 pub const PRIVACY_RECURSION_CIRCUIT_PREPROCESSED_ROOT: [u32; 8] =
     [1316794341, 3213136260, 4025293663, 2147676548, 491405811, 1322677440, 2552392821, 3026690267];

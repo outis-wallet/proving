@@ -1,6 +1,6 @@
 use cairo_vm::cairo_run::CairoRunConfig;
 use cairo_vm::types::layout_name::LayoutName;
-use privacy_circuit_verify::consts::CAIRO_PCS_CONFIG;
+use privacy_common::consts::CAIRO_PCS_CONFIG;
 use stwo_cairo_common::preprocessed_columns::preprocessed_trace::PreProcessedTraceVariant;
 use stwo_cairo_prover::prover::{ChannelHash, LiftingSizePolicy, ProverParameters};
 

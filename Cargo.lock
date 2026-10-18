@@ -3694,9 +3694,8 @@ dependencies = [
  "itertools 0.12.1",
  "mockall",
  "privacy-prove",
+ "privacy_common",
  "rstest",
- "serde_json",
- "starknet-types-core",
  "stwo",
  "stwo-cairo-common",
  "tempfile",
@@ -3726,6 +3725,7 @@ dependencies = [
  "leaf-prover",
  "mockall",
  "privacy-circuit-verify",
+ "privacy_common",
  "rstest",
  "serde_json",
  "starknet-types-core",
@@ -3737,6 +3737,20 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "zstd",
+]
+
+[[package]]
+name = "privacy_common"
+version = "2.4.0"
+dependencies = [
+ "cairo-vm",
+ "circuit-cairo-verifier",
+ "circuit-registry",
+ "circuits",
+ "itertools 0.12.1",
+ "serde_json",
+ "starknet-types-core",
+ "stwo",
 ]
 
 [[package]]

@@ -104,6 +104,7 @@ RUST_GROUPS: dict[str, Group] = {
             Crate("crates/vm_runner", "stwo-vm-runner"),
             Crate("crates/privacy_prove", "privacy-prove", stable_check=False),
             Crate("crates/privacy_circuit_verify", "privacy-circuit-verify"),
+            Crate("crates/privacy_common", "privacy_common"),
             Crate("crates/leaf_prover", "leaf-prover", stable_check=False),
             Crate("crates/leaf_proof_format", "leaf-proof-format"),
             Crate("crates/circuit_params", "circuit-params", stable_check=False),

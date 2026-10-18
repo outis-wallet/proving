@@ -3,7 +3,7 @@ fn test_privacy_bootloader_program_hash_snapshot() {
     use cairo_program_runner_lib::compute_program_hash_chain;
     use cairo_program_runner_lib::types::HashFunc;
     use expect_test::expect;
-    use privacy_circuit_verify::get_privacy_bootloader_program;
+    use privacy_common::get_privacy_bootloader_program;
 
     let bootloader_program = get_privacy_bootloader_program().unwrap();
     let stripped_program = bootloader_program.get_stripped_program().unwrap();

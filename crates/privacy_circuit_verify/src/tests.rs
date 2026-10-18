@@ -1,7 +1,9 @@
-use circuit_cairo_verifier::all_components::all_components;
-use circuit_cairo_verifier::privacy::PRIVACY_TRANSACTION_COMPONENTS;
-use circuit_cairo_verifier::test_utils::privacy_pcs_config;
-use stwo::core::fields::qm31::QM31;
+use privacy_common::consts::{
+    CAIRO_LOG_BLOWUP_FACTOR, CAIRO_PCS_CONFIG, CAIRO_TRACE_LOG_SIZE, CIRCUIT_LOG_BLOWUP_FACTOR,
+    CIRCUIT_OUTPUT_ADDRESSES, CIRCUIT_PCS_CONFIG, CIRCUIT_TRACE_LOG_SIZE,
+    PRIVACY_CIRCUIT_PREPROCESSED_IDS, PRIVACY_CIRCUIT_PREPROCESSED_LOG_SIZES,
+    PRIVACY_RECURSION_CIRCUIT_PREPROCESSED_ROOT,
+};
 use stwo::core::poly::circle::CanonicCoset;
 use stwo::core::vcs_lifted::blake2_merkle::Blake2sMerkleChannel;
 use stwo::prover::CommitmentTreeProver;
@@ -9,12 +11,6 @@ use stwo::prover::backend::simd::SimdBackend;
 use stwo::prover::mempool::BaseColumnPool;
 use stwo::prover::poly::circle::PolyOps;
 
-use crate::consts::{
-    CAIRO_LOG_BLOWUP_FACTOR, CAIRO_PCS_CONFIG, CAIRO_TRACE_LOG_SIZE, CIRCUIT_LOG_BLOWUP_FACTOR,
-    CIRCUIT_OUTPUT_ADDRESSES, CIRCUIT_PCS_CONFIG, CIRCUIT_TRACE_LOG_SIZE,
-    PRIVACY_CIRCUIT_PREPROCESSED_IDS, PRIVACY_CIRCUIT_PREPROCESSED_LOG_SIZES,
-    PRIVACY_RECURSION_CIRCUIT_PREPROCESSED_ROOT,
-};
 use crate::{get_cairo_preprocessed_circuit, get_cairo_verifier_config, get_proof_config};
 
 const CONJECTURED_SECURITY_BITS: u32 = 96;
@@ -24,27 +20,6 @@ fn check_proof_config() {
     let proof_config = get_proof_config(&PRIVACY_RECURSION_CIRCUIT_PREPROCESSED_ROOT).unwrap();
     // All circuit components should be enabled.
     assert!(proof_config.component_shapes.iter().all(|s| s.trace_columns > 0));
-}
-
-/// Test that the privacy test setup (`privacy_pcs_config`) matches the production configs.
-#[test]
-fn check_pcs_configs_match_test_setup() {
-    assert_eq!(CAIRO_PCS_CONFIG, privacy_pcs_config(CAIRO_TRACE_LOG_SIZE, CAIRO_LOG_BLOWUP_FACTOR));
-    assert_eq!(
-        CIRCUIT_PCS_CONFIG,
-        privacy_pcs_config(CIRCUIT_TRACE_LOG_SIZE, CIRCUIT_LOG_BLOWUP_FACTOR)
-    );
-}
-
-#[test]
-fn check_components() {
-    let all_components = all_components::<QM31>();
-    for component_name in PRIVACY_TRANSACTION_COMPONENTS {
-        assert!(
-            all_components.contains_key(component_name),
-            "Component {component_name} is not in the all_components"
-        );
-    }
 }
 
 #[test]
@@ -138,10 +113,12 @@ pub mod slow_tests {
 
     use cairo_vm::vm::runners::cairo_pie::CairoPie;
     use circuit_params::assert_committed_registry_is_up_to_date;
+    use privacy_common::consts::{
+        MAX_RECURSIVE_PROOF_UNCOMPRESSED_BYTES, RECURSIVE_PROOF_UNCOMPRESSED_BYTES,
+    };
     use privacy_prove::{prepare_recursive_prover_precomputes, privacy_recursive_prove};
     use tracing_subscriber::fmt;
 
-    use crate::consts::RECURSIVE_PROOF_UNCOMPRESSED_BYTES;
     use crate::{PRIVACY_RECURSION_CIRCUIT_PREPROCESSED_ROOT, get_proof_config};
 
     #[test]
@@ -156,11 +133,9 @@ pub mod slow_tests {
 
         let proof_config = get_proof_config(&PRIVACY_RECURSION_CIRCUIT_PREPROCESSED_ROOT).unwrap();
         let (_header, compressed_proof) = crate::split_proof_header(&proof_output.proof).unwrap();
-        let proof_bytes = crate::decompress_proof(
-            compressed_proof,
-            crate::consts::MAX_RECURSIVE_PROOF_UNCOMPRESSED_BYTES,
-        )
-        .unwrap();
+        let proof_bytes =
+            crate::decompress_proof(compressed_proof, MAX_RECURSIVE_PROOF_UNCOMPRESSED_BYTES)
+                .unwrap();
         let mut serialized_proof: &[u8] = &proof_bytes;
         circuit_serialize::deserialize::deserialize_proof_with_config(
             &mut serialized_proof,
@@ -193,7 +168,7 @@ pub mod slow_tests {
     #[test]
     fn large_proofs_registry_matches_definition() {
         const LARGE_REGISTRY_PATH: &str =
-            "crates/privacy_circuit_verify/large_proofs_circuit_registry.json";
+            "crates/privacy_common/large_proofs_circuit_registry.json";
         const LARGE_REGISTRY_DEFINITION: &str =
             "circuit_registry_definitions/privacy_large_proofs/definition.json";
 

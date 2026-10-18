@@ -35,6 +35,7 @@ members = [
     "crates/leaf_proof_format",
     "crates/leaf_prover",
     "crates/privacy_circuit_verify",
+    "crates/privacy_common",
     "crates/privacy_prove",
     "crates/stwo_run_and_prove",
     "crates/stwo_run_and_prove_common",
@@ -185,6 +186,7 @@ circuits-unpacker = { path = "crates/unpacker" }
 cairo-program-runner-lib = { path = "crates/cairo-program-runner-lib" }
 circuit-registry = { path = "crates/circuit_registry" }
 privacy-circuit-verify = { path = "crates/privacy_circuit_verify" }
+privacy_common = { path = "crates/privacy_common" }
 privacy-prove = { path = "crates/privacy_prove" }
 stwo-run-and-prove-common = { path = "crates/stwo_run_and_prove_common" }
 leaf-proof-format = { path = "crates/leaf_proof_format" }
