@@ -32,6 +32,7 @@ circuit-verifier.workspace = true
 
 # stwo
 stwo.workspace = true
+stwo-constraint-framework.workspace = true
 
 [dev-dependencies]
 circuit-params.workspace = true

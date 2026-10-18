@@ -11,7 +11,6 @@ use circuit_cairo_verifier::verify::{
 use circuit_common::preprocessed::{PreprocessedCircuit, layout_from_component_sizes};
 use circuit_registry::CircuitProofConfig;
 use circuit_serialize::deserialize::deserialize_proof_with_config;
-use circuit_verifier::components::prelude::PreProcessedColumnId;
 use circuit_verifier::statement::{
     INTERACTION_POW_BITS as CIRCUIT_INTERACTION_POW_BITS, all_circuit_components,
     circuit_component_log_sizes,
@@ -37,6 +36,7 @@ use stwo::core::fri::FriConfig;
 use stwo::core::pcs::PcsConfig;
 use stwo_cairo_common::preprocessed_columns::preprocessed_trace::PreProcessedTraceVariant;
 use stwo_cairo_common::prover_types::cpu::Felt252;
+use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 use tracing::{Level, info, span};
 
 #[cfg(test)]

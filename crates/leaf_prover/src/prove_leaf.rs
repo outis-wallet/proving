@@ -19,13 +19,13 @@ use circuit_common::preprocessed::PreprocessedCircuit;
 use circuit_prover::prover::{
     BaseColumnPool, prepare_circuit_proof_for_circuit_verifier, prove_circuit_assignment,
 };
-use circuit_prover::witness::components::prelude::Itertools;
 use circuit_registry::CircuitRegistry;
 use circuit_serialize::serialize::CircuitSerialize;
 use circuits::blake::HashValue;
 use circuits_stark_verifier::constraint_eval::CircuitEval;
 use circuits_stark_verifier::proof::ProofConfig;
 use indexmap::IndexMap;
+use itertools::Itertools;
 use leaf_proof_format::{DigestHex, SerializedLeafProof};
 use stwo::core::fri::FriConfig;
 use stwo::core::pcs::PcsConfig;
