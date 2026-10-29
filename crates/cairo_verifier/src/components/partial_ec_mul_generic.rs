@@ -349,62 +349,62 @@ pub fn accumulate_constraints<Value: IValue>(
         carry_24_col312,
         carry_25_col313,
         carry_26_col314,
-        new_acculumator_0_0_col315,
-        new_acculumator_0_1_col316,
-        new_acculumator_0_2_col317,
-        new_acculumator_0_3_col318,
-        new_acculumator_0_4_col319,
-        new_acculumator_0_5_col320,
-        new_acculumator_0_6_col321,
-        new_acculumator_0_7_col322,
-        new_acculumator_0_8_col323,
-        new_acculumator_0_9_col324,
-        new_acculumator_0_10_col325,
-        new_acculumator_0_11_col326,
-        new_acculumator_0_12_col327,
-        new_acculumator_0_13_col328,
-        new_acculumator_0_14_col329,
-        new_acculumator_0_15_col330,
-        new_acculumator_0_16_col331,
-        new_acculumator_0_17_col332,
-        new_acculumator_0_18_col333,
-        new_acculumator_0_19_col334,
-        new_acculumator_0_20_col335,
-        new_acculumator_0_21_col336,
-        new_acculumator_0_22_col337,
-        new_acculumator_0_23_col338,
-        new_acculumator_0_24_col339,
-        new_acculumator_0_25_col340,
-        new_acculumator_0_26_col341,
-        new_acculumator_0_27_col342,
-        new_acculumator_1_0_col343,
-        new_acculumator_1_1_col344,
-        new_acculumator_1_2_col345,
-        new_acculumator_1_3_col346,
-        new_acculumator_1_4_col347,
-        new_acculumator_1_5_col348,
-        new_acculumator_1_6_col349,
-        new_acculumator_1_7_col350,
-        new_acculumator_1_8_col351,
-        new_acculumator_1_9_col352,
-        new_acculumator_1_10_col353,
-        new_acculumator_1_11_col354,
-        new_acculumator_1_12_col355,
-        new_acculumator_1_13_col356,
-        new_acculumator_1_14_col357,
-        new_acculumator_1_15_col358,
-        new_acculumator_1_16_col359,
-        new_acculumator_1_17_col360,
-        new_acculumator_1_18_col361,
-        new_acculumator_1_19_col362,
-        new_acculumator_1_20_col363,
-        new_acculumator_1_21_col364,
-        new_acculumator_1_22_col365,
-        new_acculumator_1_23_col366,
-        new_acculumator_1_24_col367,
-        new_acculumator_1_25_col368,
-        new_acculumator_1_26_col369,
-        new_acculumator_1_27_col370,
+        new_accumulator_0_0_col315,
+        new_accumulator_0_1_col316,
+        new_accumulator_0_2_col317,
+        new_accumulator_0_3_col318,
+        new_accumulator_0_4_col319,
+        new_accumulator_0_5_col320,
+        new_accumulator_0_6_col321,
+        new_accumulator_0_7_col322,
+        new_accumulator_0_8_col323,
+        new_accumulator_0_9_col324,
+        new_accumulator_0_10_col325,
+        new_accumulator_0_11_col326,
+        new_accumulator_0_12_col327,
+        new_accumulator_0_13_col328,
+        new_accumulator_0_14_col329,
+        new_accumulator_0_15_col330,
+        new_accumulator_0_16_col331,
+        new_accumulator_0_17_col332,
+        new_accumulator_0_18_col333,
+        new_accumulator_0_19_col334,
+        new_accumulator_0_20_col335,
+        new_accumulator_0_21_col336,
+        new_accumulator_0_22_col337,
+        new_accumulator_0_23_col338,
+        new_accumulator_0_24_col339,
+        new_accumulator_0_25_col340,
+        new_accumulator_0_26_col341,
+        new_accumulator_0_27_col342,
+        new_accumulator_1_0_col343,
+        new_accumulator_1_1_col344,
+        new_accumulator_1_2_col345,
+        new_accumulator_1_3_col346,
+        new_accumulator_1_4_col347,
+        new_accumulator_1_5_col348,
+        new_accumulator_1_6_col349,
+        new_accumulator_1_7_col350,
+        new_accumulator_1_8_col351,
+        new_accumulator_1_9_col352,
+        new_accumulator_1_10_col353,
+        new_accumulator_1_11_col354,
+        new_accumulator_1_12_col355,
+        new_accumulator_1_13_col356,
+        new_accumulator_1_14_col357,
+        new_accumulator_1_15_col358,
+        new_accumulator_1_16_col359,
+        new_accumulator_1_17_col360,
+        new_accumulator_1_18_col361,
+        new_accumulator_1_19_col362,
+        new_accumulator_1_20_col363,
+        new_accumulator_1_21_col364,
+        new_accumulator_1_22_col365,
+        new_accumulator_1_23_col366,
+        new_accumulator_1_24_col367,
+        new_accumulator_1_25_col368,
+        new_accumulator_1_26_col369,
+        new_accumulator_1_27_col370,
         mul_res_limb_0_col371,
         mul_res_limb_1_col372,
         mul_res_limb_2_col373,
@@ -1294,560 +1294,560 @@ pub fn accumulate_constraints<Value: IValue>(
         acc,
     );
 
-    // new_acculumator_0_0.
+    // new_accumulator_0_0.
     let constraint_52_value = eval!(
         context,
-        (new_acculumator_0_0_col315)
+        (new_accumulator_0_0_col315)
             - ((((result_x_limb_0_col203) - (input_accumulator_x_limb_0_col69))
                 * (to_add_bit_col126))
                 + (input_accumulator_x_limb_0_col69))
     );
     acc.add_constraint(context, constraint_52_value);
 
-    // new_acculumator_0_1.
+    // new_accumulator_0_1.
     let constraint_53_value = eval!(
         context,
-        (new_acculumator_0_1_col316)
+        (new_accumulator_0_1_col316)
             - ((((result_x_limb_1_col204) - (input_accumulator_x_limb_1_col70))
                 * (to_add_bit_col126))
                 + (input_accumulator_x_limb_1_col70))
     );
     acc.add_constraint(context, constraint_53_value);
 
-    // new_acculumator_0_2.
+    // new_accumulator_0_2.
     let constraint_54_value = eval!(
         context,
-        (new_acculumator_0_2_col317)
+        (new_accumulator_0_2_col317)
             - ((((result_x_limb_2_col205) - (input_accumulator_x_limb_2_col71))
                 * (to_add_bit_col126))
                 + (input_accumulator_x_limb_2_col71))
     );
     acc.add_constraint(context, constraint_54_value);
 
-    // new_acculumator_0_3.
+    // new_accumulator_0_3.
     let constraint_55_value = eval!(
         context,
-        (new_acculumator_0_3_col318)
+        (new_accumulator_0_3_col318)
             - ((((result_x_limb_3_col206) - (input_accumulator_x_limb_3_col72))
                 * (to_add_bit_col126))
                 + (input_accumulator_x_limb_3_col72))
     );
     acc.add_constraint(context, constraint_55_value);
 
-    // new_acculumator_0_4.
+    // new_accumulator_0_4.
     let constraint_56_value = eval!(
         context,
-        (new_acculumator_0_4_col319)
+        (new_accumulator_0_4_col319)
             - ((((result_x_limb_4_col207) - (input_accumulator_x_limb_4_col73))
                 * (to_add_bit_col126))
                 + (input_accumulator_x_limb_4_col73))
     );
     acc.add_constraint(context, constraint_56_value);
 
-    // new_acculumator_0_5.
+    // new_accumulator_0_5.
     let constraint_57_value = eval!(
         context,
-        (new_acculumator_0_5_col320)
+        (new_accumulator_0_5_col320)
             - ((((result_x_limb_5_col208) - (input_accumulator_x_limb_5_col74))
                 * (to_add_bit_col126))
                 + (input_accumulator_x_limb_5_col74))
     );
     acc.add_constraint(context, constraint_57_value);
 
-    // new_acculumator_0_6.
+    // new_accumulator_0_6.
     let constraint_58_value = eval!(
         context,
-        (new_acculumator_0_6_col321)
+        (new_accumulator_0_6_col321)
             - ((((result_x_limb_6_col209) - (input_accumulator_x_limb_6_col75))
                 * (to_add_bit_col126))
                 + (input_accumulator_x_limb_6_col75))
     );
     acc.add_constraint(context, constraint_58_value);
 
-    // new_acculumator_0_7.
+    // new_accumulator_0_7.
     let constraint_59_value = eval!(
         context,
-        (new_acculumator_0_7_col322)
+        (new_accumulator_0_7_col322)
             - ((((result_x_limb_7_col210) - (input_accumulator_x_limb_7_col76))
                 * (to_add_bit_col126))
                 + (input_accumulator_x_limb_7_col76))
     );
     acc.add_constraint(context, constraint_59_value);
 
-    // new_acculumator_0_8.
+    // new_accumulator_0_8.
     let constraint_60_value = eval!(
         context,
-        (new_acculumator_0_8_col323)
+        (new_accumulator_0_8_col323)
             - ((((result_x_limb_8_col211) - (input_accumulator_x_limb_8_col77))
                 * (to_add_bit_col126))
                 + (input_accumulator_x_limb_8_col77))
     );
     acc.add_constraint(context, constraint_60_value);
 
-    // new_acculumator_0_9.
+    // new_accumulator_0_9.
     let constraint_61_value = eval!(
         context,
-        (new_acculumator_0_9_col324)
+        (new_accumulator_0_9_col324)
             - ((((result_x_limb_9_col212) - (input_accumulator_x_limb_9_col78))
                 * (to_add_bit_col126))
                 + (input_accumulator_x_limb_9_col78))
     );
     acc.add_constraint(context, constraint_61_value);
 
-    // new_acculumator_0_10.
+    // new_accumulator_0_10.
     let constraint_62_value = eval!(
         context,
-        (new_acculumator_0_10_col325)
+        (new_accumulator_0_10_col325)
             - ((((result_x_limb_10_col213) - (input_accumulator_x_limb_10_col79))
                 * (to_add_bit_col126))
                 + (input_accumulator_x_limb_10_col79))
     );
     acc.add_constraint(context, constraint_62_value);
 
-    // new_acculumator_0_11.
+    // new_accumulator_0_11.
     let constraint_63_value = eval!(
         context,
-        (new_acculumator_0_11_col326)
+        (new_accumulator_0_11_col326)
             - ((((result_x_limb_11_col214) - (input_accumulator_x_limb_11_col80))
                 * (to_add_bit_col126))
                 + (input_accumulator_x_limb_11_col80))
     );
     acc.add_constraint(context, constraint_63_value);
 
-    // new_acculumator_0_12.
+    // new_accumulator_0_12.
     let constraint_64_value = eval!(
         context,
-        (new_acculumator_0_12_col327)
+        (new_accumulator_0_12_col327)
             - ((((result_x_limb_12_col215) - (input_accumulator_x_limb_12_col81))
                 * (to_add_bit_col126))
                 + (input_accumulator_x_limb_12_col81))
     );
     acc.add_constraint(context, constraint_64_value);
 
-    // new_acculumator_0_13.
+    // new_accumulator_0_13.
     let constraint_65_value = eval!(
         context,
-        (new_acculumator_0_13_col328)
+        (new_accumulator_0_13_col328)
             - ((((result_x_limb_13_col216) - (input_accumulator_x_limb_13_col82))
                 * (to_add_bit_col126))
                 + (input_accumulator_x_limb_13_col82))
     );
     acc.add_constraint(context, constraint_65_value);
 
-    // new_acculumator_0_14.
+    // new_accumulator_0_14.
     let constraint_66_value = eval!(
         context,
-        (new_acculumator_0_14_col329)
+        (new_accumulator_0_14_col329)
             - ((((result_x_limb_14_col217) - (input_accumulator_x_limb_14_col83))
                 * (to_add_bit_col126))
                 + (input_accumulator_x_limb_14_col83))
     );
     acc.add_constraint(context, constraint_66_value);
 
-    // new_acculumator_0_15.
+    // new_accumulator_0_15.
     let constraint_67_value = eval!(
         context,
-        (new_acculumator_0_15_col330)
+        (new_accumulator_0_15_col330)
             - ((((result_x_limb_15_col218) - (input_accumulator_x_limb_15_col84))
                 * (to_add_bit_col126))
                 + (input_accumulator_x_limb_15_col84))
     );
     acc.add_constraint(context, constraint_67_value);
 
-    // new_acculumator_0_16.
+    // new_accumulator_0_16.
     let constraint_68_value = eval!(
         context,
-        (new_acculumator_0_16_col331)
+        (new_accumulator_0_16_col331)
             - ((((result_x_limb_16_col219) - (input_accumulator_x_limb_16_col85))
                 * (to_add_bit_col126))
                 + (input_accumulator_x_limb_16_col85))
     );
     acc.add_constraint(context, constraint_68_value);
 
-    // new_acculumator_0_17.
+    // new_accumulator_0_17.
     let constraint_69_value = eval!(
         context,
-        (new_acculumator_0_17_col332)
+        (new_accumulator_0_17_col332)
             - ((((result_x_limb_17_col220) - (input_accumulator_x_limb_17_col86))
                 * (to_add_bit_col126))
                 + (input_accumulator_x_limb_17_col86))
     );
     acc.add_constraint(context, constraint_69_value);
 
-    // new_acculumator_0_18.
+    // new_accumulator_0_18.
     let constraint_70_value = eval!(
         context,
-        (new_acculumator_0_18_col333)
+        (new_accumulator_0_18_col333)
             - ((((result_x_limb_18_col221) - (input_accumulator_x_limb_18_col87))
                 * (to_add_bit_col126))
                 + (input_accumulator_x_limb_18_col87))
     );
     acc.add_constraint(context, constraint_70_value);
 
-    // new_acculumator_0_19.
+    // new_accumulator_0_19.
     let constraint_71_value = eval!(
         context,
-        (new_acculumator_0_19_col334)
+        (new_accumulator_0_19_col334)
             - ((((result_x_limb_19_col222) - (input_accumulator_x_limb_19_col88))
                 * (to_add_bit_col126))
                 + (input_accumulator_x_limb_19_col88))
     );
     acc.add_constraint(context, constraint_71_value);
 
-    // new_acculumator_0_20.
+    // new_accumulator_0_20.
     let constraint_72_value = eval!(
         context,
-        (new_acculumator_0_20_col335)
+        (new_accumulator_0_20_col335)
             - ((((result_x_limb_20_col223) - (input_accumulator_x_limb_20_col89))
                 * (to_add_bit_col126))
                 + (input_accumulator_x_limb_20_col89))
     );
     acc.add_constraint(context, constraint_72_value);
 
-    // new_acculumator_0_21.
+    // new_accumulator_0_21.
     let constraint_73_value = eval!(
         context,
-        (new_acculumator_0_21_col336)
+        (new_accumulator_0_21_col336)
             - ((((result_x_limb_21_col224) - (input_accumulator_x_limb_21_col90))
                 * (to_add_bit_col126))
                 + (input_accumulator_x_limb_21_col90))
     );
     acc.add_constraint(context, constraint_73_value);
 
-    // new_acculumator_0_22.
+    // new_accumulator_0_22.
     let constraint_74_value = eval!(
         context,
-        (new_acculumator_0_22_col337)
+        (new_accumulator_0_22_col337)
             - ((((result_x_limb_22_col225) - (input_accumulator_x_limb_22_col91))
                 * (to_add_bit_col126))
                 + (input_accumulator_x_limb_22_col91))
     );
     acc.add_constraint(context, constraint_74_value);
 
-    // new_acculumator_0_23.
+    // new_accumulator_0_23.
     let constraint_75_value = eval!(
         context,
-        (new_acculumator_0_23_col338)
+        (new_accumulator_0_23_col338)
             - ((((result_x_limb_23_col226) - (input_accumulator_x_limb_23_col92))
                 * (to_add_bit_col126))
                 + (input_accumulator_x_limb_23_col92))
     );
     acc.add_constraint(context, constraint_75_value);
 
-    // new_acculumator_0_24.
+    // new_accumulator_0_24.
     let constraint_76_value = eval!(
         context,
-        (new_acculumator_0_24_col339)
+        (new_accumulator_0_24_col339)
             - ((((result_x_limb_24_col227) - (input_accumulator_x_limb_24_col93))
                 * (to_add_bit_col126))
                 + (input_accumulator_x_limb_24_col93))
     );
     acc.add_constraint(context, constraint_76_value);
 
-    // new_acculumator_0_25.
+    // new_accumulator_0_25.
     let constraint_77_value = eval!(
         context,
-        (new_acculumator_0_25_col340)
+        (new_accumulator_0_25_col340)
             - ((((result_x_limb_25_col228) - (input_accumulator_x_limb_25_col94))
                 * (to_add_bit_col126))
                 + (input_accumulator_x_limb_25_col94))
     );
     acc.add_constraint(context, constraint_77_value);
 
-    // new_acculumator_0_26.
+    // new_accumulator_0_26.
     let constraint_78_value = eval!(
         context,
-        (new_acculumator_0_26_col341)
+        (new_accumulator_0_26_col341)
             - ((((result_x_limb_26_col229) - (input_accumulator_x_limb_26_col95))
                 * (to_add_bit_col126))
                 + (input_accumulator_x_limb_26_col95))
     );
     acc.add_constraint(context, constraint_78_value);
 
-    // new_acculumator_0_27.
+    // new_accumulator_0_27.
     let constraint_79_value = eval!(
         context,
-        (new_acculumator_0_27_col342)
+        (new_accumulator_0_27_col342)
             - ((((result_x_limb_27_col230) - (input_accumulator_x_limb_27_col96))
                 * (to_add_bit_col126))
                 + (input_accumulator_x_limb_27_col96))
     );
     acc.add_constraint(context, constraint_79_value);
 
-    // new_acculumator_1_0.
+    // new_accumulator_1_0.
     let constraint_80_value = eval!(
         context,
-        (new_acculumator_1_0_col343)
+        (new_accumulator_1_0_col343)
             - ((((result_y_limb_0_col259) - (input_accumulator_y_limb_0_col97))
                 * (to_add_bit_col126))
                 + (input_accumulator_y_limb_0_col97))
     );
     acc.add_constraint(context, constraint_80_value);
 
-    // new_acculumator_1_1.
+    // new_accumulator_1_1.
     let constraint_81_value = eval!(
         context,
-        (new_acculumator_1_1_col344)
+        (new_accumulator_1_1_col344)
             - ((((result_y_limb_1_col260) - (input_accumulator_y_limb_1_col98))
                 * (to_add_bit_col126))
                 + (input_accumulator_y_limb_1_col98))
     );
     acc.add_constraint(context, constraint_81_value);
 
-    // new_acculumator_1_2.
+    // new_accumulator_1_2.
     let constraint_82_value = eval!(
         context,
-        (new_acculumator_1_2_col345)
+        (new_accumulator_1_2_col345)
             - ((((result_y_limb_2_col261) - (input_accumulator_y_limb_2_col99))
                 * (to_add_bit_col126))
                 + (input_accumulator_y_limb_2_col99))
     );
     acc.add_constraint(context, constraint_82_value);
 
-    // new_acculumator_1_3.
+    // new_accumulator_1_3.
     let constraint_83_value = eval!(
         context,
-        (new_acculumator_1_3_col346)
+        (new_accumulator_1_3_col346)
             - ((((result_y_limb_3_col262) - (input_accumulator_y_limb_3_col100))
                 * (to_add_bit_col126))
                 + (input_accumulator_y_limb_3_col100))
     );
     acc.add_constraint(context, constraint_83_value);
 
-    // new_acculumator_1_4.
+    // new_accumulator_1_4.
     let constraint_84_value = eval!(
         context,
-        (new_acculumator_1_4_col347)
+        (new_accumulator_1_4_col347)
             - ((((result_y_limb_4_col263) - (input_accumulator_y_limb_4_col101))
                 * (to_add_bit_col126))
                 + (input_accumulator_y_limb_4_col101))
     );
     acc.add_constraint(context, constraint_84_value);
 
-    // new_acculumator_1_5.
+    // new_accumulator_1_5.
     let constraint_85_value = eval!(
         context,
-        (new_acculumator_1_5_col348)
+        (new_accumulator_1_5_col348)
             - ((((result_y_limb_5_col264) - (input_accumulator_y_limb_5_col102))
                 * (to_add_bit_col126))
                 + (input_accumulator_y_limb_5_col102))
     );
     acc.add_constraint(context, constraint_85_value);
 
-    // new_acculumator_1_6.
+    // new_accumulator_1_6.
     let constraint_86_value = eval!(
         context,
-        (new_acculumator_1_6_col349)
+        (new_accumulator_1_6_col349)
             - ((((result_y_limb_6_col265) - (input_accumulator_y_limb_6_col103))
                 * (to_add_bit_col126))
                 + (input_accumulator_y_limb_6_col103))
     );
     acc.add_constraint(context, constraint_86_value);
 
-    // new_acculumator_1_7.
+    // new_accumulator_1_7.
     let constraint_87_value = eval!(
         context,
-        (new_acculumator_1_7_col350)
+        (new_accumulator_1_7_col350)
             - ((((result_y_limb_7_col266) - (input_accumulator_y_limb_7_col104))
                 * (to_add_bit_col126))
                 + (input_accumulator_y_limb_7_col104))
     );
     acc.add_constraint(context, constraint_87_value);
 
-    // new_acculumator_1_8.
+    // new_accumulator_1_8.
     let constraint_88_value = eval!(
         context,
-        (new_acculumator_1_8_col351)
+        (new_accumulator_1_8_col351)
             - ((((result_y_limb_8_col267) - (input_accumulator_y_limb_8_col105))
                 * (to_add_bit_col126))
                 + (input_accumulator_y_limb_8_col105))
     );
     acc.add_constraint(context, constraint_88_value);
 
-    // new_acculumator_1_9.
+    // new_accumulator_1_9.
     let constraint_89_value = eval!(
         context,
-        (new_acculumator_1_9_col352)
+        (new_accumulator_1_9_col352)
             - ((((result_y_limb_9_col268) - (input_accumulator_y_limb_9_col106))
                 * (to_add_bit_col126))
                 + (input_accumulator_y_limb_9_col106))
     );
     acc.add_constraint(context, constraint_89_value);
 
-    // new_acculumator_1_10.
+    // new_accumulator_1_10.
     let constraint_90_value = eval!(
         context,
-        (new_acculumator_1_10_col353)
+        (new_accumulator_1_10_col353)
             - ((((result_y_limb_10_col269) - (input_accumulator_y_limb_10_col107))
                 * (to_add_bit_col126))
                 + (input_accumulator_y_limb_10_col107))
     );
     acc.add_constraint(context, constraint_90_value);
 
-    // new_acculumator_1_11.
+    // new_accumulator_1_11.
     let constraint_91_value = eval!(
         context,
-        (new_acculumator_1_11_col354)
+        (new_accumulator_1_11_col354)
             - ((((result_y_limb_11_col270) - (input_accumulator_y_limb_11_col108))
                 * (to_add_bit_col126))
                 + (input_accumulator_y_limb_11_col108))
     );
     acc.add_constraint(context, constraint_91_value);
 
-    // new_acculumator_1_12.
+    // new_accumulator_1_12.
     let constraint_92_value = eval!(
         context,
-        (new_acculumator_1_12_col355)
+        (new_accumulator_1_12_col355)
             - ((((result_y_limb_12_col271) - (input_accumulator_y_limb_12_col109))
                 * (to_add_bit_col126))
                 + (input_accumulator_y_limb_12_col109))
     );
     acc.add_constraint(context, constraint_92_value);
 
-    // new_acculumator_1_13.
+    // new_accumulator_1_13.
     let constraint_93_value = eval!(
         context,
-        (new_acculumator_1_13_col356)
+        (new_accumulator_1_13_col356)
             - ((((result_y_limb_13_col272) - (input_accumulator_y_limb_13_col110))
                 * (to_add_bit_col126))
                 + (input_accumulator_y_limb_13_col110))
     );
     acc.add_constraint(context, constraint_93_value);
 
-    // new_acculumator_1_14.
+    // new_accumulator_1_14.
     let constraint_94_value = eval!(
         context,
-        (new_acculumator_1_14_col357)
+        (new_accumulator_1_14_col357)
             - ((((result_y_limb_14_col273) - (input_accumulator_y_limb_14_col111))
                 * (to_add_bit_col126))
                 + (input_accumulator_y_limb_14_col111))
     );
     acc.add_constraint(context, constraint_94_value);
 
-    // new_acculumator_1_15.
+    // new_accumulator_1_15.
     let constraint_95_value = eval!(
         context,
-        (new_acculumator_1_15_col358)
+        (new_accumulator_1_15_col358)
             - ((((result_y_limb_15_col274) - (input_accumulator_y_limb_15_col112))
                 * (to_add_bit_col126))
                 + (input_accumulator_y_limb_15_col112))
     );
     acc.add_constraint(context, constraint_95_value);
 
-    // new_acculumator_1_16.
+    // new_accumulator_1_16.
     let constraint_96_value = eval!(
         context,
-        (new_acculumator_1_16_col359)
+        (new_accumulator_1_16_col359)
             - ((((result_y_limb_16_col275) - (input_accumulator_y_limb_16_col113))
                 * (to_add_bit_col126))
                 + (input_accumulator_y_limb_16_col113))
     );
     acc.add_constraint(context, constraint_96_value);
 
-    // new_acculumator_1_17.
+    // new_accumulator_1_17.
     let constraint_97_value = eval!(
         context,
-        (new_acculumator_1_17_col360)
+        (new_accumulator_1_17_col360)
             - ((((result_y_limb_17_col276) - (input_accumulator_y_limb_17_col114))
                 * (to_add_bit_col126))
                 + (input_accumulator_y_limb_17_col114))
     );
     acc.add_constraint(context, constraint_97_value);
 
-    // new_acculumator_1_18.
+    // new_accumulator_1_18.
     let constraint_98_value = eval!(
         context,
-        (new_acculumator_1_18_col361)
+        (new_accumulator_1_18_col361)
             - ((((result_y_limb_18_col277) - (input_accumulator_y_limb_18_col115))
                 * (to_add_bit_col126))
                 + (input_accumulator_y_limb_18_col115))
     );
     acc.add_constraint(context, constraint_98_value);
 
-    // new_acculumator_1_19.
+    // new_accumulator_1_19.
     let constraint_99_value = eval!(
         context,
-        (new_acculumator_1_19_col362)
+        (new_accumulator_1_19_col362)
             - ((((result_y_limb_19_col278) - (input_accumulator_y_limb_19_col116))
                 * (to_add_bit_col126))
                 + (input_accumulator_y_limb_19_col116))
     );
     acc.add_constraint(context, constraint_99_value);
 
-    // new_acculumator_1_20.
+    // new_accumulator_1_20.
     let constraint_100_value = eval!(
         context,
-        (new_acculumator_1_20_col363)
+        (new_accumulator_1_20_col363)
             - ((((result_y_limb_20_col279) - (input_accumulator_y_limb_20_col117))
                 * (to_add_bit_col126))
                 + (input_accumulator_y_limb_20_col117))
     );
     acc.add_constraint(context, constraint_100_value);
 
-    // new_acculumator_1_21.
+    // new_accumulator_1_21.
     let constraint_101_value = eval!(
         context,
-        (new_acculumator_1_21_col364)
+        (new_accumulator_1_21_col364)
             - ((((result_y_limb_21_col280) - (input_accumulator_y_limb_21_col118))
                 * (to_add_bit_col126))
                 + (input_accumulator_y_limb_21_col118))
     );
     acc.add_constraint(context, constraint_101_value);
 
-    // new_acculumator_1_22.
+    // new_accumulator_1_22.
     let constraint_102_value = eval!(
         context,
-        (new_acculumator_1_22_col365)
+        (new_accumulator_1_22_col365)
             - ((((result_y_limb_22_col281) - (input_accumulator_y_limb_22_col119))
                 * (to_add_bit_col126))
                 + (input_accumulator_y_limb_22_col119))
     );
     acc.add_constraint(context, constraint_102_value);
 
-    // new_acculumator_1_23.
+    // new_accumulator_1_23.
     let constraint_103_value = eval!(
         context,
-        (new_acculumator_1_23_col366)
+        (new_accumulator_1_23_col366)
             - ((((result_y_limb_23_col282) - (input_accumulator_y_limb_23_col120))
                 * (to_add_bit_col126))
                 + (input_accumulator_y_limb_23_col120))
     );
     acc.add_constraint(context, constraint_103_value);
 
-    // new_acculumator_1_24.
+    // new_accumulator_1_24.
     let constraint_104_value = eval!(
         context,
-        (new_acculumator_1_24_col367)
+        (new_accumulator_1_24_col367)
             - ((((result_y_limb_24_col283) - (input_accumulator_y_limb_24_col121))
                 * (to_add_bit_col126))
                 + (input_accumulator_y_limb_24_col121))
     );
     acc.add_constraint(context, constraint_104_value);
 
-    // new_acculumator_1_25.
+    // new_accumulator_1_25.
     let constraint_105_value = eval!(
         context,
-        (new_acculumator_1_25_col368)
+        (new_accumulator_1_25_col368)
             - ((((result_y_limb_25_col284) - (input_accumulator_y_limb_25_col122))
                 * (to_add_bit_col126))
                 + (input_accumulator_y_limb_25_col122))
     );
     acc.add_constraint(context, constraint_105_value);
 
-    // new_acculumator_1_26.
+    // new_accumulator_1_26.
     let constraint_106_value = eval!(
         context,
-        (new_acculumator_1_26_col369)
+        (new_accumulator_1_26_col369)
             - ((((result_y_limb_26_col285) - (input_accumulator_y_limb_26_col123))
                 * (to_add_bit_col126))
                 + (input_accumulator_y_limb_26_col123))
     );
     acc.add_constraint(context, constraint_106_value);
 
-    // new_acculumator_1_27.
+    // new_accumulator_1_27.
     let constraint_107_value = eval!(
         context,
-        (new_acculumator_1_27_col370)
+        (new_accumulator_1_27_col370)
             - ((((result_y_limb_27_col286) - (input_accumulator_y_limb_27_col124))
                 * (to_add_bit_col126))
                 + (input_accumulator_y_limb_27_col124))
@@ -2375,62 +2375,62 @@ pub fn accumulate_constraints<Value: IValue>(
         eval!(context, result_y_limb_25_col593),
         eval!(context, result_y_limb_26_col594),
         eval!(context, result_y_limb_27_col595),
-        eval!(context, new_acculumator_0_0_col315),
-        eval!(context, new_acculumator_0_1_col316),
-        eval!(context, new_acculumator_0_2_col317),
-        eval!(context, new_acculumator_0_3_col318),
-        eval!(context, new_acculumator_0_4_col319),
-        eval!(context, new_acculumator_0_5_col320),
-        eval!(context, new_acculumator_0_6_col321),
-        eval!(context, new_acculumator_0_7_col322),
-        eval!(context, new_acculumator_0_8_col323),
-        eval!(context, new_acculumator_0_9_col324),
-        eval!(context, new_acculumator_0_10_col325),
-        eval!(context, new_acculumator_0_11_col326),
-        eval!(context, new_acculumator_0_12_col327),
-        eval!(context, new_acculumator_0_13_col328),
-        eval!(context, new_acculumator_0_14_col329),
-        eval!(context, new_acculumator_0_15_col330),
-        eval!(context, new_acculumator_0_16_col331),
-        eval!(context, new_acculumator_0_17_col332),
-        eval!(context, new_acculumator_0_18_col333),
-        eval!(context, new_acculumator_0_19_col334),
-        eval!(context, new_acculumator_0_20_col335),
-        eval!(context, new_acculumator_0_21_col336),
-        eval!(context, new_acculumator_0_22_col337),
-        eval!(context, new_acculumator_0_23_col338),
-        eval!(context, new_acculumator_0_24_col339),
-        eval!(context, new_acculumator_0_25_col340),
-        eval!(context, new_acculumator_0_26_col341),
-        eval!(context, new_acculumator_0_27_col342),
-        eval!(context, new_acculumator_1_0_col343),
-        eval!(context, new_acculumator_1_1_col344),
-        eval!(context, new_acculumator_1_2_col345),
-        eval!(context, new_acculumator_1_3_col346),
-        eval!(context, new_acculumator_1_4_col347),
-        eval!(context, new_acculumator_1_5_col348),
-        eval!(context, new_acculumator_1_6_col349),
-        eval!(context, new_acculumator_1_7_col350),
-        eval!(context, new_acculumator_1_8_col351),
-        eval!(context, new_acculumator_1_9_col352),
-        eval!(context, new_acculumator_1_10_col353),
-        eval!(context, new_acculumator_1_11_col354),
-        eval!(context, new_acculumator_1_12_col355),
-        eval!(context, new_acculumator_1_13_col356),
-        eval!(context, new_acculumator_1_14_col357),
-        eval!(context, new_acculumator_1_15_col358),
-        eval!(context, new_acculumator_1_16_col359),
-        eval!(context, new_acculumator_1_17_col360),
-        eval!(context, new_acculumator_1_18_col361),
-        eval!(context, new_acculumator_1_19_col362),
-        eval!(context, new_acculumator_1_20_col363),
-        eval!(context, new_acculumator_1_21_col364),
-        eval!(context, new_acculumator_1_22_col365),
-        eval!(context, new_acculumator_1_23_col366),
-        eval!(context, new_acculumator_1_24_col367),
-        eval!(context, new_acculumator_1_25_col368),
-        eval!(context, new_acculumator_1_26_col369),
-        eval!(context, new_acculumator_1_27_col370),
+        eval!(context, new_accumulator_0_0_col315),
+        eval!(context, new_accumulator_0_1_col316),
+        eval!(context, new_accumulator_0_2_col317),
+        eval!(context, new_accumulator_0_3_col318),
+        eval!(context, new_accumulator_0_4_col319),
+        eval!(context, new_accumulator_0_5_col320),
+        eval!(context, new_accumulator_0_6_col321),
+        eval!(context, new_accumulator_0_7_col322),
+        eval!(context, new_accumulator_0_8_col323),
+        eval!(context, new_accumulator_0_9_col324),
+        eval!(context, new_accumulator_0_10_col325),
+        eval!(context, new_accumulator_0_11_col326),
+        eval!(context, new_accumulator_0_12_col327),
+        eval!(context, new_accumulator_0_13_col328),
+        eval!(context, new_accumulator_0_14_col329),
+        eval!(context, new_accumulator_0_15_col330),
+        eval!(context, new_accumulator_0_16_col331),
+        eval!(context, new_accumulator_0_17_col332),
+        eval!(context, new_accumulator_0_18_col333),
+        eval!(context, new_accumulator_0_19_col334),
+        eval!(context, new_accumulator_0_20_col335),
+        eval!(context, new_accumulator_0_21_col336),
+        eval!(context, new_accumulator_0_22_col337),
+        eval!(context, new_accumulator_0_23_col338),
+        eval!(context, new_accumulator_0_24_col339),
+        eval!(context, new_accumulator_0_25_col340),
+        eval!(context, new_accumulator_0_26_col341),
+        eval!(context, new_accumulator_0_27_col342),
+        eval!(context, new_accumulator_1_0_col343),
+        eval!(context, new_accumulator_1_1_col344),
+        eval!(context, new_accumulator_1_2_col345),
+        eval!(context, new_accumulator_1_3_col346),
+        eval!(context, new_accumulator_1_4_col347),
+        eval!(context, new_accumulator_1_5_col348),
+        eval!(context, new_accumulator_1_6_col349),
+        eval!(context, new_accumulator_1_7_col350),
+        eval!(context, new_accumulator_1_8_col351),
+        eval!(context, new_accumulator_1_9_col352),
+        eval!(context, new_accumulator_1_10_col353),
+        eval!(context, new_accumulator_1_11_col354),
+        eval!(context, new_accumulator_1_12_col355),
+        eval!(context, new_accumulator_1_13_col356),
+        eval!(context, new_accumulator_1_14_col357),
+        eval!(context, new_accumulator_1_15_col358),
+        eval!(context, new_accumulator_1_16_col359),
+        eval!(context, new_accumulator_1_17_col360),
+        eval!(context, new_accumulator_1_18_col361),
+        eval!(context, new_accumulator_1_19_col362),
+        eval!(context, new_accumulator_1_20_col363),
+        eval!(context, new_accumulator_1_21_col364),
+        eval!(context, new_accumulator_1_22_col365),
+        eval!(context, new_accumulator_1_23_col366),
+        eval!(context, new_accumulator_1_24_col367),
+        eval!(context, new_accumulator_1_25_col368),
+        eval!(context, new_accumulator_1_26_col369),
+        eval!(context, new_accumulator_1_27_col370),
         eval!(context, next_counter_col139),
     ];
     let numerator_110 = eval!(context, -(enabler_col0));
@@ -2484,7 +2484,7 @@ mod tests {
     use super::Component;
     #[allow(unused_imports)]
     use crate::components::prelude::PreProcessedColumnId;
-    use crate::sample_evaluations::*;
+    use crate::sample_evaluations_test_data::*;
 
     #[test]
     fn test_evaluation_result() {

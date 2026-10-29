@@ -1,5 +1,5 @@
 use std::ops::Range;
-use std::simd::cmp::{SimdOrd, SimdPartialEq};
+use std::simd::cmp::SimdPartialEq;
 use std::simd::{simd_swizzle, u32x8, u32x16};
 
 use bytemuck::cast_slice;
@@ -8,10 +8,10 @@ use rayon::prelude::*;
 use tracing::{Level, span};
 
 use super::SimdBackend;
-use crate::core::channel::{Blake2sChannelGeneric, Channel, Keccak256Channel};
+use crate::core::channel::{Blake2sChannel, Channel, Keccak256Channel};
 use crate::core::fields::m31::P;
 use crate::core::proof_of_work::GrindOps;
-use crate::core::vcs::blake2_hash::Blake2sHasherGeneric;
+use crate::core::vcs::blake2_hash::Blake2sHasher;
 use crate::prover::backend::simd::blake2s::{IV, SIGMA};
 use crate::prover::backend::simd::m31::N_LANES;
 
@@ -23,10 +23,10 @@ const GRIND_LOW_BITS: u32 = 20;
 #[cfg(feature = "parallel")]
 const GRIND_UNIT_BITS: u32 = 16;
 
-impl<const IS_M31_OUTPUT: bool> GrindOps<Blake2sChannelGeneric<IS_M31_OUTPUT>> for SimdBackend {
+impl GrindOps<Blake2sChannel> for SimdBackend {
     /// Outputs the smallest nonce of the form `(a << 32) | b`, where `0 <= a < 2^31 - 1` and
     /// `0 <= b < 2^GRIND_LOW_BITS`.
-    fn grind(channel: &Blake2sChannelGeneric<IS_M31_OUTPUT>, pow_bits: u32) -> u64 {
+    fn grind(channel: &Blake2sChannel, pow_bits: u32) -> u64 {
         let _span = span!(Level::TRACE, "Simd Blake2s Grind", class = "Blake2s Grind");
 
         // TODO(first): support more than 32 bits.
@@ -34,8 +34,8 @@ impl<const IS_M31_OUTPUT: bool> GrindOps<Blake2sChannelGeneric<IS_M31_OUTPUT>> f
         let digest = channel.digest();
 
         // Compute the prefix digest H(POW_PREFIX, [0_u8; 12], digest, n_bits).
-        let mut hasher = Blake2sHasherGeneric::<IS_M31_OUTPUT>::default();
-        hasher.update(&Blake2sChannelGeneric::<IS_M31_OUTPUT>::POW_PREFIX.to_le_bytes());
+        let mut hasher = Blake2sHasher::default();
+        hasher.update(&Blake2sChannel::POW_PREFIX.to_le_bytes());
         hasher.update(&[0_u8; 12]);
         hasher.update(&digest.0[..]);
         hasher.update(&pow_bits.to_le_bytes());
@@ -44,14 +44,11 @@ impl<const IS_M31_OUTPUT: bool> GrindOps<Blake2sChannelGeneric<IS_M31_OUTPUT>> f
 
         #[cfg(not(feature = "parallel"))]
         let res = (0..)
-            .find_map(|hi| {
-                grind_blake::<IS_M31_OUTPUT>(prefixed_digest, hi, 0..1 << GRIND_LOW_BITS, pow_bits)
-            })
+            .find_map(|hi| grind_blake(prefixed_digest, hi, 0..1 << GRIND_LOW_BITS, pow_bits))
             .expect("Grind failed to find a solution.");
 
         #[cfg(feature = "parallel")]
-        let res =
-            parallel_grind(prefixed_digest, pow_bits, GRIND_LOW_BITS, grind_blake::<IS_M31_OUTPUT>);
+        let res = parallel_grind(prefixed_digest, pow_bits, GRIND_LOW_BITS, grind_blake);
 
         assert!(
             ((res >> 32) as u32) < P,
@@ -201,12 +198,7 @@ impl GrindPrefix {
     }
 }
 
-fn grind_blake<const IS_M31_OUTPUT: bool>(
-    digest: &[u32],
-    hi: u32,
-    lows: Range<u32>,
-    pow_bits: u32,
-) -> Option<u64> {
+fn grind_blake(digest: &[u32], hi: u32, lows: Range<u32>, pow_bits: u32) -> Option<u64> {
     const DIGEST_SIZE: usize = std::mem::size_of::<[u32; 8]>();
     const NONCE_SIZE: usize = std::mem::size_of::<u64>();
     let prefix = GrindPrefix::new(digest, (DIGEST_SIZE + NONCE_SIZE) as u32);
@@ -214,7 +206,6 @@ fn grind_blake<const IS_M31_OUTPUT: bool>(
     // `trailing_zeros(x) >= pow_bits` iff the `pow_bits` lowest bits of `x` are zero.
     let mask = u32x8::splat(if pow_bits >= u32::BITS { u32::MAX } else { (1 << pow_bits) - 1 });
     let zero = u32x8::splat(0);
-    let modulus = u32x8::splat(P);
 
     let mut attempt_low = offsets_vec + u32x16::splat(lows.start);
     let attempt_high = u32x8::splat(hi);
@@ -226,12 +217,7 @@ fn grind_blake<const IS_M31_OUTPUT: bool>(
             simd_swizzle!(attempt_low, [8, 9, 10, 11, 12, 13, 14, 15]),
         ];
         for (group, group_low) in groups.into_iter().enumerate() {
-            let mut res0 = prefix.hash_word0(attempt_high, group_low);
-            if IS_M31_OUTPUT {
-                // Reduce modulo `P`, as `reduce_to_m31` does for the hash output.
-                res0 = res0.simd_min(res0 - modulus);
-                res0 = res0.simd_min(res0 - modulus);
-            }
+            let res0 = prefix.hash_word0(attempt_high, group_low);
             let success_mask = (res0 & mask).simd_eq(zero);
             if success_mask.any() {
                 let i = success_mask.to_array().iter().position(|&x| x).unwrap();
@@ -290,7 +276,7 @@ where
 
 // TODO: replace with an optimized SIMD implementation using parallel keccak permutations
 // (e.g. `keccak::parallel` `f1600x4`/`x8`), similar to the parallel + SIMD path used for
-// `Blake2sChannelGeneric` above.
+// `Blake2sChannel` above.
 impl GrindOps<Keccak256Channel> for SimdBackend {
     fn grind(channel: &Keccak256Channel, pow_bits: u32) -> u64 {
         let mut nonce = 0u64;

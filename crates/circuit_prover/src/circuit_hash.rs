@@ -77,7 +77,7 @@ mod tests {
     fn host_matches_in_circuit() {
         let component_log_sizes = PerComponent {
             eq: 0,
-            qm31_ops: 1,
+            qm_31_ops: 1,
             triple_xor: 2,
             m_31_to_u_32: 3,
             blake_g_gate: 4,
@@ -106,7 +106,7 @@ mod tests {
             &root,
         );
         let in_circuit: [u32; BLAKE2S_DIGEST_N_WORDS] =
-            std::array::from_fn(|i| context.get(*hash[i].get()).unpack_u32());
+            std::array::from_fn(|i| hash[i].get_value(&context).get().unpack_u32());
 
         assert_eq!(host, in_circuit);
     }

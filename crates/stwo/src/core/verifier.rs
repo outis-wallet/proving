@@ -8,6 +8,7 @@ use crate::core::fields::qm31::{SECURE_EXTENSION_DEGREE, SecureField};
 use crate::core::fri::FriVerificationError;
 use crate::core::pcs::CommitmentSchemeVerifier;
 use crate::core::proof::StarkProof;
+use crate::core::proof_of_work::OODS_POW_BITS;
 use crate::core::vcs_lifted::verifier::MerkleVerificationError;
 pub const PREPROCESSED_TRACE_IDX: usize = 0;
 
@@ -60,12 +61,12 @@ pub fn verify_ex<MC: MerkleChannel>(
     // which the lifted protocol does not support yet — there the commit below rejects the
     // oversized columns.
     let lifting_log_size = lifting_log_size.max(
-        split_composition_log_degree_bound + commitment_scheme.config.fri_config.log_blowup_factor,
+        split_composition_log_degree_bound + commitment_scheme.config.fri_params.log_blowup_factor,
     );
 
     // The max degree of a committed polynomial.
     let max_log_degree_bound =
-        lifting_log_size - commitment_scheme.config.fri_config.log_blowup_factor;
+        lifting_log_size - commitment_scheme.config.fri_params.log_blowup_factor;
 
     let random_coeff = channel.draw_secure_felt();
 
@@ -75,6 +76,13 @@ pub fn verify_ex<MC: MerkleChannel>(
         &[max_log_degree_bound; 2 * SECURE_EXTENSION_DEGREE],
         channel,
     );
+
+    // Verify the proof of work ground before the OODS point. Must mirror the prover: verify the
+    // nonce, then mix it into the channel before drawing the OODS point.
+    if !channel.verify_pow_nonce(OODS_POW_BITS, proof.oods_proof_of_work) {
+        return Err(VerificationError::OodsProofOfWork);
+    }
+    channel.mix_u64(proof.oods_proof_of_work);
 
     // Draw OODS point.
     let oods_point = CirclePoint::<SecureField>::get_random_point(channel);
@@ -125,6 +133,8 @@ pub enum VerificationError {
     Fri(#[from] FriVerificationError),
     #[error("Proof of work verification failed.")]
     ProofOfWork,
+    #[error("OODS proof of work verification failed.")]
+    OodsProofOfWork,
     #[error(transparent)]
     InvalidLiftingLogSize(#[from] crate::core::pcs::utils::InvalidLiftingLogSizeError),
     #[error(transparent)]

@@ -1,5 +1,6 @@
 use itertools::Itertools;
 use stwo::core::circle::CirclePoint;
+use stwo::core::fields::qm31::QM31;
 
 use crate::circuit::{Add, Eq, Mul, Output, Permutation, PointwiseMul, Sub};
 use crate::context::{Context, GuessVar, Var};
@@ -250,8 +251,8 @@ pub fn guess_m31<Value: IValue>(
 /// Computes the map `(a, b, c, d) -> a + b * i + c * u + d * iu`. Note that the input values are
 /// not necessarily in the base field `M31`.
 pub fn from_partial_evals(context: &mut Context<impl IValue>, values: [Var; 4]) -> Var {
-    let i = context.constant(qm31_from_u32s(0, 1, 0, 0));
-    let u = context.constant(qm31_from_u32s(0, 0, 1, 0));
+    let i = context.i();
+    let u = context.u();
     let iu = context.constant(qm31_from_u32s(0, 0, 0, 1));
 
     eval!(
@@ -320,6 +321,14 @@ pub trait Constant<Value: IValue> {
     type Target;
 
     fn constant(&self, context: &mut Context<Value>) -> Self::Target;
+}
+
+impl<Value: IValue> Constant<Value> for QM31 {
+    type Target = Var;
+
+    fn constant(&self, context: &mut Context<Value>) -> Self::Target {
+        context.constant(*self)
+    }
 }
 
 impl<Value: IValue, T: Constant<Value>, const N: usize> Constant<Value> for [T; N] {

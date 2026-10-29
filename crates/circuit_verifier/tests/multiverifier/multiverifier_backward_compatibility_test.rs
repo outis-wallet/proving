@@ -1,0 +1,84 @@
+use circuit_common::N_RESERVED;
+use circuit_common::finalize::pad_to_targets;
+use circuit_serialize::deserialize::deserialize_proof_with_config;
+use circuit_verifier::multiverifier::{
+    MultiverifierInput, SharedConfig, build_multiverifier_circuit,
+};
+use circuit_verifier::statement::circuit_verifier_proof_config;
+use itertools::chain;
+use stwo::core::fields::qm31::QM31;
+
+use crate::multiverifier_test_utils::{
+    MULTIVERIFIER_OF_TWO_CAIRO_PROOFS_PATH, MULTIVERIFIER_PREPROCESSED_ROOT, PCS_CONFIG,
+    PRIVACY_CAIRO_VERIFIER_OUTPUT_DIGEST, PRIVACY_CAIRO_VERIFIER_PREPROCESSED_ROOT,
+    TARGET_PADDING_SIZES, leaf_circuit_hash, multiverifier_preprocessed_column_log_sizes,
+    native_blake_u32s,
+};
+
+/// The preprocessed root of the backward-compatibility Cairo verifier circuit.
+const BACKWARD_COMPATIBILITY_CAIRO_VERIFIER_PREPROCESSED_ROOT: [u32; 8] =
+    [3461839265, 1768344184, 1546597907, 1585217408, 427664610, 158966453, 724012200, 2473462434];
+/// The output digest of the backward-compatibility Cairo verifier circuit.
+const BACKWARD_COMPATIBILITY_CAIRO_VERIFIER_OUTPUT_DIGEST: [u32; 8] =
+    [2238863647, 930608170, 3577551515, 250236175, 3905226011, 365840198, 2418738012, 3030158971];
+/// A Cairo verifier proof used as the backward-compatibility baseline. Re-baselined to the current
+/// proof whenever a transcript-changing feature makes the previous fixture unverifiable.
+const BACKWARD_COMPATIBILITY_CAIRO_PROOF_PATH: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../test_data/multiverifier/backward_compatibility_cairo_proof.bin"
+);
+
+/// Backward-compatibility regression test.
+///
+/// Checks that the *current* multiverifier can verify, in the same circuit, both a Cairo verifier
+/// proof produced by an older version of the prover/circuit.
+/// in slot 0, and a multiverifier proof produced by the current version in slot 1.
+#[test]
+fn test_backward_compatibility() {
+    let preprocessed_column_log_sizes = multiverifier_preprocessed_column_log_sizes();
+    let shared_config = SharedConfig {
+        pcs_config: PCS_CONFIG,
+        proof_config: circuit_verifier_proof_config(&preprocessed_column_log_sizes, &PCS_CONFIG),
+        preprocessed_column_log_sizes,
+    };
+
+    // Slot 0: the older Cairo verifier proof (backward-compatibility fixture), deserialized with
+    // the current proof config.
+    let old_bytes = std::fs::read(BACKWARD_COMPATIBILITY_CAIRO_PROOF_PATH).unwrap();
+    let old_cairo_proof =
+        deserialize_proof_with_config(&mut old_bytes.as_slice(), &shared_config.proof_config)
+            .unwrap();
+    let old_input = MultiverifierInput {
+        proof: old_cairo_proof,
+        output_digest: BACKWARD_COMPATIBILITY_CAIRO_VERIFIER_OUTPUT_DIGEST.into(),
+        preprocessed_root: BACKWARD_COMPATIBILITY_CAIRO_VERIFIER_PREPROCESSED_ROOT.into(),
+    };
+
+    // Slot 1: the current multiverifier proof. Its inputs are hashed as
+    // `circuit_hash(preprocessed_root) || output_digest`.
+    let cairo_input_preimage_words: Vec<u32> =
+        leaf_circuit_hash(PRIVACY_CAIRO_VERIFIER_PREPROCESSED_ROOT.into(), &shared_config)
+            .into_iter()
+            .chain(PRIVACY_CAIRO_VERIFIER_OUTPUT_DIGEST)
+            .collect();
+    let payload_words: Vec<u32> =
+        chain!(&cairo_input_preimage_words, &cairo_input_preimage_words).copied().collect();
+    let current_output_digest: [u32; N_RESERVED] = native_blake_u32s(&payload_words);
+
+    let current_bytes = std::fs::read(MULTIVERIFIER_OF_TWO_CAIRO_PROOFS_PATH).unwrap();
+    let current_proof =
+        deserialize_proof_with_config(&mut current_bytes.as_slice(), &shared_config.proof_config)
+            .unwrap();
+    let current_input = MultiverifierInput {
+        proof: current_proof,
+        output_digest: current_output_digest.into(),
+        preprocessed_root: MULTIVERIFIER_PREPROCESSED_ROOT.into(),
+    };
+
+    // Verifying both the old Cairo verifier proof and the current multiverifier proof inside a
+    // current multiverifier must succeed.
+    let mut context =
+        build_multiverifier_circuit::<QM31>(vec![old_input, current_input], &shared_config);
+    pad_to_targets(&mut context, &TARGET_PADDING_SIZES);
+    context.validate_circuit();
+}

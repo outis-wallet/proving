@@ -1,6 +1,6 @@
 //! The striped commitment of a tree on the GPU, equal to stwo's
 //! `CommitmentTreeProver::new_striped` (`stwo/src/prover/pcs/mod.rs`) with `SimdBackend` and
-//! `Blake2sM31MerkleChannel`: the same layers, root and all, and the same evaluations kept.
+//! `Blake2sMerkleChannel`: the same layers, root and all, and the same evaluations kept.
 //!
 //! # What `new_striped` does, and what this does
 //!
@@ -52,7 +52,7 @@ use stwo::core::circle::Coset;
 use stwo::core::fields::m31::BaseField;
 use stwo::core::poly::circle::CanonicCoset;
 use stwo::core::vcs::blake2_hash::Blake2sHash;
-use stwo::core::vcs_lifted::blake2_merkle::Blake2sM31MerkleChannel;
+use stwo::core::vcs_lifted::blake2_merkle::Blake2sMerkleChannel;
 use stwo::prover::backend::Column;
 use stwo::prover::backend::simd::SimdBackend;
 use stwo::prover::backend::simd::column::BaseColumn;
@@ -1462,7 +1462,7 @@ impl StripedCommitment {
     pub fn tree_prover(
         &self,
         output: CommitOutput,
-    ) -> CommitmentTreeProver<SimdBackend, Blake2sM31MerkleChannel> {
+    ) -> CommitmentTreeProver<SimdBackend, Blake2sMerkleChannel> {
         tree_prover(&self.log_sizes, self.log_blowup, output)
     }
 }
@@ -1474,7 +1474,7 @@ pub fn tree_prover(
     log_sizes: &[u32],
     log_blowup: u32,
     output: CommitOutput,
-) -> CommitmentTreeProver<SimdBackend, Blake2sM31MerkleChannel> {
+) -> CommitmentTreeProver<SimdBackend, Blake2sMerkleChannel> {
     assert_eq!(output.evaluations.len(), log_sizes.len());
     let polynomials = output
         .evaluations
@@ -1538,7 +1538,7 @@ pub fn commit_striped(
     log_blowup_factor: u32,
     twiddles: &TwiddleTree<SimdBackend>,
     lifting_log_size: u32,
-) -> CommitmentTreeProver<SimdBackend, Blake2sM31MerkleChannel> {
+) -> CommitmentTreeProver<SimdBackend, Blake2sMerkleChannel> {
     let log_sizes = polynomials.iter().map(|poly| poly.log_size()).collect_vec();
     let commitment = StripedCommitment::new(
         gpu,

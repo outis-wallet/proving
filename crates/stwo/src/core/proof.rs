@@ -67,15 +67,15 @@ impl<H: MerkleHasherLifted> StarkProof<H> {
 
         let CommitmentSchemeProof {
             commitments,
+            oods_proof_of_work,
             sampled_values,
             decommitments,
             queried_values,
-            proof_of_work: _,
             fri_proof,
             config: _,
         } = commitment_scheme_proof;
 
-        let FriProof { first_layer, inner_layers, last_layer_poly } = fri_proof;
+        let FriProof { first_layer, inner_layers, last_layer_poly, proof_of_work } = fri_proof;
 
         let mut inner_layers_samples_size = 0;
         let mut inner_layers_hashes_size = 0;
@@ -95,6 +95,7 @@ impl<H: MerkleHasherLifted> StarkProof<H> {
                 + first_layer.decommitment.size_estimate()
                 + first_layer.commitment.size_estimate(),
             trace_decommitments: commitments.size_estimate() + decommitments.size_estimate(),
+            proof_of_work: mem::size_of_val(oods_proof_of_work) + mem::size_of_val(proof_of_work),
         }
     }
 }
@@ -115,6 +116,8 @@ pub struct StarkProofSizeBreakdown {
     pub fri_samples: usize,
     pub fri_decommitments: usize,
     pub trace_decommitments: usize,
+    /// Both grinding nonces: the one before the OODS point and the one before the FRI queries.
+    pub proof_of_work: usize,
 }
 
 trait SizeEstimate {
@@ -167,8 +170,11 @@ impl<H: MerkleHasherLifted> SizeEstimate for FriLayerProof<H> {
 
 impl<H: MerkleHasherLifted> SizeEstimate for FriProof<H> {
     fn size_estimate(&self) -> usize {
-        let Self { first_layer, inner_layers, last_layer_poly } = self;
-        first_layer.size_estimate() + inner_layers.size_estimate() + last_layer_poly.size_estimate()
+        let Self { first_layer, inner_layers, last_layer_poly, proof_of_work } = self;
+        first_layer.size_estimate()
+            + inner_layers.size_estimate()
+            + last_layer_poly.size_estimate()
+            + mem::size_of_val(proof_of_work)
     }
 }
 
@@ -176,18 +182,18 @@ impl<H: MerkleHasherLifted> SizeEstimate for CommitmentSchemeProof<H> {
     fn size_estimate(&self) -> usize {
         let Self {
             commitments,
+            oods_proof_of_work,
             sampled_values,
             decommitments,
             queried_values,
-            proof_of_work,
             fri_proof,
             config,
         } = self;
         commitments.size_estimate()
+            + mem::size_of_val(oods_proof_of_work)
             + sampled_values.size_estimate()
             + decommitments.size_estimate()
             + queried_values.size_estimate()
-            + mem::size_of_val(proof_of_work)
             + fri_proof.size_estimate()
             + mem::size_of_val(config)
     }

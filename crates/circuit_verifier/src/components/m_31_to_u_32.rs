@@ -105,9 +105,11 @@ impl<Value: IValue> CircuitEval<Value> for Component {
         &self,
         preprocessed_column_log_sizes: &OrderedHashMap<PreProcessedColumnId, u32>,
     ) -> Option<u32> {
-        preprocessed_column_log_sizes
-            .get(&PreProcessedColumnId { id: "m31_to_u32_input_addr".to_string() })
-            .cloned()
+        Some(
+            *preprocessed_column_log_sizes
+                .get(&PreProcessedColumnId { id: "m31_to_u32_input_addr".to_string() })
+                .unwrap(),
+        )
     }
 }
 #[cfg(test)]
@@ -123,7 +125,7 @@ mod tests {
     use super::Component;
     #[allow(unused_imports)]
     use crate::components::prelude::PreProcessedColumnId;
-    use crate::sample_evaluations::*;
+    use crate::sample_evaluations_test_data::*;
 
     #[test]
     fn test_evaluation_result() {

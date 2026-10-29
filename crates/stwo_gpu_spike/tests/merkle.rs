@@ -9,7 +9,7 @@ use rand::rngs::SmallRng;
 use rand::{Rng, SeedableRng};
 use stwo::core::poly::circle::CanonicCoset;
 use stwo::core::vcs::blake2_hash::Blake2sHash;
-use stwo::core::vcs_lifted::blake2_merkle::{Blake2sM31MerkleChannel, Blake2sMerkleHasher};
+use stwo::core::vcs_lifted::blake2_merkle::{Blake2sMerkleChannel, Blake2sMerkleHasher};
 use stwo::prover::CommitmentTreeProver;
 use stwo::prover::backend::Column;
 use stwo::prover::backend::simd::SimdBackend;
@@ -389,14 +389,14 @@ fn new_striped_commitment() {
         CanonicCoset::new(lifting_log_size).circle_domain().half_coset,
     );
     let pool = BaseColumnPool::<SimdBackend>::new();
-    let striped = CommitmentTreeProver::<SimdBackend, Blake2sM31MerkleChannel>::new_striped(
+    let striped = CommitmentTreeProver::<SimdBackend, Blake2sMerkleChannel>::new_striped(
         polys.clone(),
         log_blowup,
         &twiddles,
         lifting_log_size,
         &pool,
     );
-    let plain = CommitmentTreeProver::<SimdBackend, Blake2sM31MerkleChannel>::new(
+    let plain = CommitmentTreeProver::<SimdBackend, Blake2sMerkleChannel>::new(
         polys.clone(),
         log_blowup,
         &twiddles,

@@ -1,11 +1,11 @@
 use serde::{Deserialize, Serialize};
 
 use super::merkle_hasher::MerkleHasherLifted;
-use crate::core::channel::{Blake2sChannel, Blake2sM31Channel, MerkleChannel};
+use crate::core::channel::{Blake2sChannel, MerkleChannel};
 use crate::core::fields::m31::BaseField;
-use crate::core::vcs::blake2_hash::{Blake2sHash, Blake2sHasherGeneric};
+use crate::core::vcs::blake2_hash::{Blake2sHash, Blake2sHasher};
 
-pub type Blake2sMerkleHasher = Blake2sHasherGeneric<false>;
+pub type Blake2sMerkleHasher = Blake2sHasher;
 
 impl MerkleHasherLifted for Blake2sMerkleHasher {
     type Hash = Blake2sHash;
@@ -38,30 +38,7 @@ impl MerkleChannel for Blake2sMerkleChannel {
     type H = Blake2sMerkleHasher;
 
     fn mix_root(channel: &mut Self::C, root: Blake2sHash) {
-        channel.update_digest(Blake2sHasherGeneric::<false>::concat_and_hash(
-            &channel.digest(),
-            &root,
-        ));
-    }
-}
-
-/// A [`MerkleChannel`] that commits with the **standard** (non-`M31`-reduced) Blake2s Merkle
-/// hasher, while running Fiat-Shamir through the **`M31`** Blake2s channel.
-///
-/// All challenge and query derivation in the reduced field.
-/// This avoids the standard channel's rejection sampling and raw-word query draws
-/// (`Channel::draw_u32s`).
-#[derive(Default)]
-pub struct Blake2sM31MerkleChannel;
-
-impl MerkleChannel for Blake2sM31MerkleChannel {
-    type C = Blake2sM31Channel;
-    type H = Blake2sMerkleHasher;
-
-    fn mix_root(channel: &mut Self::C, root: Blake2sHash) {
-        // Mix the *unreduced* Merkle root into the channel.
-        channel
-            .update_digest(Blake2sHasherGeneric::<true>::concat_and_hash(&channel.digest(), &root));
+        channel.update_digest(Blake2sHasher::concat_and_hash(&channel.digest(), &root));
     }
 }
 

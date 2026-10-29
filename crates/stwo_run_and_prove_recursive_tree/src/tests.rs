@@ -1,7 +1,8 @@
 use circuit_registry::CircuitRegistry;
+use leaf_proof_format::{PackedNode, SerializedLeafProof};
 
 use crate::canonical::CanonicalCircuit;
-use crate::{LeafInput, PackedNode, RecursiveTreeError, load_leaves};
+use crate::{LeafInput, RecursiveTreeError, load_leaves};
 
 // ------------------------------------------------------------------------------------------------
 // Serde shapes.
@@ -43,13 +44,13 @@ fn test_load_leaves_reads_manifest_of_paths() {
     assert_eq!(leaves[0].proof.proof, vec![1, 2, 3]);
 }
 
-/// [`LeafInput::output_values`] must reproduce the leaf bootloader's output digest `H1` (the
+/// [`LeafInput::output_digest`] must reproduce the leaf bootloader's output digest `H1` (the
 /// cairo0-encoded Blake2s of the preimage) — the value the leaf cairo-verifier circuit emits
 /// verbatim as its public output. Golden recomputed independently (matches a real leaf run).
 #[test]
 fn test_leaf_output_values_derived_from_preimage() {
     let leaf = LeafInput {
-        proof: crate::SerializedLeafProof {
+        proof: SerializedLeafProof {
             circuit_preprocessed_root: leaf_proof_format::DigestHex([0; 8]),
             circuit_hash: leaf_proof_format::DigestHex([0; 8]),
             proof: vec![],
@@ -64,7 +65,7 @@ fn test_leaf_output_values_derived_from_preimage() {
         .to_vec(),
     };
     assert_eq!(
-        leaf.output_values().unwrap(),
+        leaf.output_digest().unwrap(),
         [
             1603116091, 3258597502, 2711032228, 4175407283, 343882323, 1898618121, 1344732087,
             1064799167,
@@ -75,14 +76,14 @@ fn test_leaf_output_values_derived_from_preimage() {
 #[test]
 fn test_leaf_output_values_rejects_invalid_felt() {
     let leaf = LeafInput {
-        proof: crate::SerializedLeafProof {
+        proof: SerializedLeafProof {
             circuit_preprocessed_root: leaf_proof_format::DigestHex([0; 8]),
             circuit_hash: leaf_proof_format::DigestHex([0; 8]),
             proof: vec![],
         },
         output_preimage: vec!["not-a-felt".to_string()],
     };
-    match leaf.output_values() {
+    match leaf.output_digest() {
         Err(RecursiveTreeError::BadLeafOutputs { reason }) => {
             assert!(reason.contains("not-a-felt"))
         }
@@ -137,6 +138,47 @@ fn circuit_registry() -> CircuitRegistry {
     CircuitRegistry::from_path(&circuit_registry_path()).unwrap()
 }
 
+/// The Blake program-hash chain of a compiled program as a decimal string.
+fn program_hash(path: &std::path::Path) -> String {
+    use cairo_program_runner_lib::compute_program_hash_chain;
+    use cairo_program_runner_lib::types::HashFunc;
+    use cairo_vm::types::program::Program;
+
+    let program_bytes = std::fs::read(path).expect("Failed to read the compiled fixture.");
+    let program =
+        Program::from_bytes(&program_bytes, Some("main")).expect("Failed to load the program.");
+    let stripped_program = program.get_stripped_program().unwrap();
+    compute_program_hash_chain(&stripped_program, 0, HashFunc::Blake)
+        .expect("Failed to compute program hash.")
+        .to_string()
+}
+
+// Check the program hash of the simple bootloader. This allows us to ignore
+// non-meaningful diffs in the compiled bootloader JSON (e.g., format/ordering
+// changes) - As long as this test passes the program is the same.
+#[test]
+fn test_leaf_simple_bootloader_program_hash_snapshot() {
+    // Source code for this compiled privacy bootloader can be found at:
+    // repo: https://github.com/starkware-industries/starkware
+    // commit: b9c5fc560e1916064997570ef4d25c8ea629fd65
+    // Built (with debug info) via the standard BUILD target, then stripped of debug info to keep
+    // the checked-in file small, from the starkware repo root:
+    //   bazel build
+    // //src/starkware/cairo/bootloaders/simple_bootloader:leaf_simple_bootloader_compiled.json
+    //   jq --indent 4 '.debug_info = null' \
+    //     "$(bazel info
+    // bazel-bin)/src/starkware/cairo/bootloaders/simple_bootloader/leaf_simple_bootloader_compiled.
+    // json" \
+    //     > leaf_simple_bootloader_compiled.json
+    let expected = expect_test::expect![
+        "182007537687310579697542984331198756973092309284201401073437552481857403195"
+    ];
+    expected.assert_eq(&program_hash(&std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(
+        "../cairo-program-runner-lib/resources/compiled_programs/bootloaders/\
+         leaf_simple_bootloader_compiled.json",
+    )));
+}
+
 // ------------------------------------------------------------------------------------------------
 // End-to-end folds (gated behind the `slow-tests` feature; run in RELEASE mode, one test at a
 // time: `cargo test --release --features slow-tests -- --test-threads=1`).
@@ -145,7 +187,7 @@ fn circuit_registry() -> CircuitRegistry {
 // `leaf_prover` output at `test_data/goldens/four_leaves/leaf.json` as N leaves and fold them —
 // every fold builds and proves a real multiverifier circuit over two valid child proofs. The
 // leaves go through the full `LeafInput` path, so the multiverifier also attests
-// `LeafInput::output_values`'s derivation against the real fixture proof.
+// `LeafInput::output_digest`'s derivation against the real fixture proof.
 //
 // `test_golden_four_leaves_e2e` is the true end-to-end: it runs `leaf_prover` itself on the leaf
 // simple bootloader (executing the simple-output task), injects the dumped hashed-output preimage
@@ -155,9 +197,10 @@ fn circuit_registry() -> CircuitRegistry {
 //   FIX=1 cargo test -p stwo-run-and-prove-recursive-tree --release --features slow-tests \
 //     --lib -- test_golden_four_leaves_e2e --test-threads=1
 //
-// The two compiled programs in `test_data/` (`leaf_simple_bootloader_compiled.json`,
-// `simple_output_compiled.json`) are inputs, not goldens; they are compiled from the main starkware
-// repo via `bazel run
+// The compiled programs are inputs, not goldens: `simple_output_compiled.json` in `test_data/`,
+// and the leaf simple bootloader shared with the privacy flow at
+// `crates/cairo-program-runner-lib/resources/compiled_programs/bootloaders/`. They are compiled
+// from the main starkware repo via `bazel run
 // //src/services/gps/bin/rust/test:compile_cairo_run_programs_with_rust_hints_script`.
 // ------------------------------------------------------------------------------------------------
 
@@ -167,13 +210,14 @@ mod e2e {
 
     use blake2::{Blake2s256, Digest};
     use circuit_prover::circuit_hash::preprocessed_circuit_hash;
+    use leaf_proof_format::PackedNode;
     use leaf_prover::prove_leaf::prove_leaf_from_files;
     use num_bigint::BigUint;
 
     use super::{circuit_registry, circuit_registry_path};
     use crate::canonical::CanonicalCircuit;
     use crate::fold::digest_bytes_to_words;
-    use crate::{LeafInput, PackedNode, stwo_run_and_prove_recursive_tree};
+    use crate::{LeafInput, stwo_run_and_prove_recursive_tree};
 
     fn goldens_dir() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test_data/goldens/four_leaves")
@@ -221,8 +265,10 @@ mod e2e {
         std::fs::write(&input_path, leaf_bl_input_json(&dump_path)).unwrap();
 
         let leaf = prove_leaf_from_files(
-            &PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("test_data/leaf_simple_bootloader_compiled.json"),
+            &PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(
+                "../cairo-program-runner-lib/resources/compiled_programs/bootloaders/\
+                 leaf_simple_bootloader_compiled.json",
+            ),
             &Some(input_path),
             &circuit_registry_path(),
         );
@@ -266,7 +312,7 @@ mod e2e {
     ) -> [u32; circuit_common::N_RESERVED] {
         let hash = preprocessed_circuit_hash(
             &canonical.preprocessed_multiverifier,
-            canonical.shared_config.pcs_config.fri_config.log_blowup_factor,
+            canonical.shared_config.pcs_config.fri_params.log_blowup_factor,
         );
         digest_bytes_to_words(&hash.0)
     }
@@ -274,14 +320,14 @@ mod e2e {
     /// An expected tree node: the raw u32 output words + `circuit_hash` (both needed to hash a
     /// parent) alongside the `PackedNode` subtree the binary should emit for it.
     struct ExpectedNode {
-        output_words: [u32; circuit_common::N_RESERVED],
+        output_digest: [u32; circuit_common::N_RESERVED],
         circuit_hash: [u32; circuit_common::N_RESERVED],
         packed: PackedNode,
     }
 
     fn expected_leaf(leaf: &LeafInput) -> ExpectedNode {
         ExpectedNode {
-            output_words: leaf.output_values().unwrap(),
+            output_digest: leaf.output_digest().unwrap(),
             circuit_hash: leaf_circuit_hash(leaf),
             packed: PackedNode::leaf(leaf_circuit_hash(leaf), leaf.output_preimage.clone()),
         }
@@ -298,11 +344,11 @@ mod e2e {
         let mut preimage = Vec::new();
         for child in [&left, &right] {
             preimage.extend_from_slice(&child.circuit_hash);
-            preimage.extend_from_slice(&child.output_words);
+            preimage.extend_from_slice(&child.output_digest);
         }
-        let output_words = blake2s_u32s_host(&preimage);
+        let output_digest = blake2s_u32s_host(&preimage);
         ExpectedNode {
-            output_words,
+            output_digest,
             circuit_hash: multiverifier_circuit_hash,
             packed: PackedNode::Composite {
                 circuit_hash: multiverifier_circuit_hash,
@@ -320,10 +366,10 @@ mod e2e {
         let mut preimage = Vec::new();
         for _ in 0..2 {
             preimage.extend_from_slice(&child.circuit_hash);
-            preimage.extend_from_slice(&child.output_words);
+            preimage.extend_from_slice(&child.output_digest);
         }
         ExpectedNode {
-            output_words: blake2s_u32s_host(&preimage),
+            output_digest: blake2s_u32s_host(&preimage),
             circuit_hash: multiverifier_circuit_hash,
             packed: PackedNode::Composite {
                 circuit_hash: multiverifier_circuit_hash,
@@ -402,7 +448,7 @@ mod e2e {
         let actual_outputs: Vec<u32> =
             serde_json::from_str(&std::fs::read_to_string(dir.join("root_outputs.json")).unwrap())
                 .unwrap();
-        assert_eq!(actual_outputs, expected.output_words.to_vec(), "root output values mismatch");
+        assert_eq!(actual_outputs, expected.output_digest.to_vec(), "root output values mismatch");
 
         let actual_packed: PackedNode =
             serde_json::from_str(&std::fs::read_to_string(dir.join("root_packed.json")).unwrap())

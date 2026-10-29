@@ -53,7 +53,7 @@ use std::time::{Duration, Instant};
 use itertools::Itertools;
 use stwo::core::fields::m31::BaseField;
 use stwo::core::vcs::blake2_hash::Blake2sHash;
-use stwo::core::vcs_lifted::blake2_merkle::Blake2sM31MerkleChannel;
+use stwo::core::vcs_lifted::blake2_merkle::Blake2sMerkleChannel;
 use stwo::prover::CommitmentTreeProver;
 use stwo::prover::backend::Column;
 use stwo::prover::backend::simd::SimdBackend;
@@ -806,7 +806,7 @@ impl StreamedCommitment {
     pub fn tree_prover(
         &self,
         output: CommitOutput,
-    ) -> CommitmentTreeProver<SimdBackend, Blake2sM31MerkleChannel> {
+    ) -> CommitmentTreeProver<SimdBackend, Blake2sMerkleChannel> {
         tree_prover(&self.log_sizes, self.log_blowup, output)
     }
 }

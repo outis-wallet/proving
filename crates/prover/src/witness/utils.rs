@@ -8,7 +8,8 @@ use stwo::core::channel::MerkleChannel;
 use stwo::core::fields::m31::M31;
 use stwo::core::pcs::{TreeSubspan, TreeVec};
 use stwo::core::utils::SliceExt;
-use stwo::core::vcs_lifted::blake2_merkle::{Blake2sM31MerkleChannel, Blake2sMerkleChannel};
+use stwo::core::vcs::blake2_hash::Blake2sHash;
+use stwo::core::vcs_lifted::blake2_merkle::Blake2sMerkleChannel;
 use stwo::prover::backend::simd::conversion::{Pack, Unpack};
 use stwo::prover::backend::simd::m31::{N_LANES, PackedBaseField, PackedM31};
 use stwo::prover::backend::{Backend, BackendForChannel};
@@ -235,13 +236,14 @@ pub fn witness_trace_cells(claim: &CairoClaim, pp_trace: &PreProcessedTrace) -> 
 /// needed.
 pub fn export_preprocessed_roots() {
     let max_log_blowup_factor = 2;
+    let canonical_trace = PreProcessedTraceVariant::Canonical;
 
     // Blake2s roots
     for log_blowup_factor in 1..=max_log_blowup_factor {
         let root = generate_preprocessed_commitment_root::<Blake2sMerkleChannel>(
             log_blowup_factor,
-            PreProcessedTraceVariant::Canonical,
-            0,
+            canonical_trace,
+            canonical_trace.max_log_trace_size(),
         );
         let root_bytes = root.0;
         let u32s_hex = root_bytes
@@ -258,12 +260,13 @@ pub fn export_preprocessed_roots() {
     #[cfg(not(any(target_arch = "wasm32", target_arch = "wasm64")))]
     {
         use stwo::core::vcs_lifted::poseidon252_merkle::Poseidon252MerkleChannel;
+        let no_pedersen_trace = PreProcessedTraceVariant::CanonicalWithoutPedersen;
         // Poseidon252 roots.
         for log_blowup_factor in 1..=max_log_blowup_factor {
             let root = generate_preprocessed_commitment_root::<Poseidon252MerkleChannel>(
                 log_blowup_factor,
-                PreProcessedTraceVariant::CanonicalWithoutPedersen,
-                0,
+                no_pedersen_trace,
+                no_pedersen_trace.max_log_trace_size(),
             );
             println!("log_blowup_factor: {log_blowup_factor}, poseidon root: [{root:#010x}]");
         }
@@ -271,17 +274,22 @@ pub fn export_preprocessed_roots() {
 }
 
 /// Exports the preprocessed roots for the circuit cairo verifier.
-/// Note: This function is very slow and is intended for generating the preprocessed roots when
-/// needed.
-pub fn export_circuit_cairo_verifier_preprocessed_roots() {
+/// Returns a map log-blowup-factor -> Cairo CanonicalSmall preprocessed root
+// The standard map, as upstream returns it, not this module's `HashMap` (Outis's fast-hash alias).
+pub fn export_circuit_cairo_verifier_preprocessed_roots()
+-> std::collections::HashMap<u32, Blake2sHash> {
     let max_log_blowup_factor = 3;
+    let small_trace = PreProcessedTraceVariant::CanonicalSmall;
+    let mut roots = std::collections::HashMap::new();
 
     for log_blowup_factor in 1..=max_log_blowup_factor {
-        let root = generate_preprocessed_commitment_root::<Blake2sM31MerkleChannel>(
+        let root = generate_preprocessed_commitment_root::<Blake2sMerkleChannel>(
             log_blowup_factor,
-            PreProcessedTraceVariant::CanonicalSmall,
-            20 + log_blowup_factor,
+            small_trace,
+            small_trace.max_log_trace_size(),
         );
+
+        roots.insert(log_blowup_factor, root);
 
         let root_bytes = root.0;
         let u32s = root_bytes
@@ -293,6 +301,8 @@ pub fn export_circuit_cairo_verifier_preprocessed_roots() {
 
         println!("log_blowup_factor: {log_blowup_factor}, blake root: [{u32s}]");
     }
+
+    roots
 }
 
 /// Create the input_to_row map used in const-size components.

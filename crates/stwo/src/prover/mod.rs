@@ -6,6 +6,7 @@ use crate::core::circle::CirclePoint;
 use crate::core::fields::qm31::{SECURE_EXTENSION_DEGREE, SecureField};
 use crate::core::pcs::utils::InvalidLiftingLogSizeError;
 use crate::core::proof::{ExtendedStarkProof, StarkProof};
+use crate::core::proof_of_work::OODS_POW_BITS;
 use crate::core::verifier::PREPROCESSED_TRACE_IDX;
 use crate::prover::backend::{BackendForChannel, Column};
 
@@ -61,7 +62,7 @@ pub fn prove_ex<B: BackendForChannel<MC>, MC: MerkleChannel>(
     // A column that holds only its first stripe (see `CommitmentTreeProver::new_striped`) holds
     // less than constraint evaluation reads: each component then evaluates the rest part by part,
     // and the components run one at a time, so that only one component's parts are held at once.
-    let log_blowup_factor = commitment_scheme.config.fri_config.log_blowup_factor;
+    let log_blowup_factor = commitment_scheme.config.fri_params.log_blowup_factor;
     let evaluation_mode = component_provers.evaluation_mode(log_blowup_factor);
     let one_component_at_a_time =
         trace.polys.iter().flatten().any(|poly| poly.evals.values.len() < poly.evals.domain.size());
@@ -84,6 +85,13 @@ pub fn prove_ex<B: BackendForChannel<MC>, MC: MerkleChannel>(
     tree_builder.commit(channel);
     span.exit();
 
+    // Proof of work before drawing the OODS point. Raises the cost of re-rolling the OODS
+    // (DEEP) challenge in search of a favorable point.
+    let oods_span = span!(Level::INFO, "Grind", class = "OODS POW").entered();
+    let oods_proof_of_work = B::grind(channel, OODS_POW_BITS);
+    oods_span.exit();
+    channel.mix_u64(oods_proof_of_work);
+
     // Draw OODS point.
     let oods_point = CirclePoint::<SecureField>::get_random_point(channel);
 
@@ -105,7 +113,7 @@ pub fn prove_ex<B: BackendForChannel<MC>, MC: MerkleChannel>(
         }
     }
     let max_log_degree_bound =
-        lifting_log_size - commitment_scheme.config.fri_config.log_blowup_factor;
+        lifting_log_size - commitment_scheme.config.fri_params.log_blowup_factor;
 
     // Get mask sample points relative to oods point.
     let mut sample_points = component_provers.components().mask_points(
@@ -118,7 +126,8 @@ pub fn prove_ex<B: BackendForChannel<MC>, MC: MerkleChannel>(
     sample_points.push(vec![vec![oods_point]; 2 * SECURE_EXTENSION_DEGREE]);
 
     // Prove the trace and composition OODS values, and retrieve them.
-    let commitment_scheme_proof = commitment_scheme.prove_values(sample_points, channel);
+    let commitment_scheme_proof =
+        commitment_scheme.prove_values(sample_points, channel, oods_proof_of_work);
     let proof = StarkProof(commitment_scheme_proof.proof);
     info!(proof_size_estimate = proof.size_estimate());
 

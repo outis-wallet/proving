@@ -344,7 +344,7 @@ impl<'a, B: BackendForChannel<MC>, MC: MerkleChannel> CommitmentSchemeProver<'a,
         let mut tree = if self.stripe_residency && !self.store_polynomials_coefficients {
             CommitmentTreeProver::new_striped(
                 polynomials,
-                self.config.fri_config.log_blowup_factor,
+                self.config.fri_params.log_blowup_factor,
                 self.twiddles,
                 lifting_log_size,
                 &self.base_column_pool,
@@ -352,7 +352,7 @@ impl<'a, B: BackendForChannel<MC>, MC: MerkleChannel> CommitmentSchemeProver<'a,
         } else {
             CommitmentTreeProver::new(
                 polynomials,
-                self.config.fri_config.log_blowup_factor,
+                self.config.fri_params.log_blowup_factor,
                 self.twiddles,
                 self.store_polynomials_coefficients,
                 lifting_log_size,
@@ -416,7 +416,7 @@ impl<'a, B: BackendForChannel<MC>, MC: MerkleChannel> CommitmentSchemeProver<'a,
             let compute_weights = |(log_size, point): (u32, CirclePoint<SecureField>)| {
                 weights_dashmap.entry((log_size, point)).or_insert_with(|| {
                     let weights_log_size =
-                        B::barycentric_log_size(log_size, self.config.fri_config.log_blowup_factor);
+                        B::barycentric_log_size(log_size, self.config.fri_params.log_blowup_factor);
                     let buffer = SecureColumnByCoords {
                         columns: array::from_fn(|_| {
                             self.base_column_pool.take_or_alloc(weights_log_size)
@@ -489,7 +489,7 @@ impl<'a, B: BackendForChannel<MC>, MC: MerkleChannel> CommitmentSchemeProver<'a,
                 }
             }
         }
-        let log_blowup = self.config.fri_config.log_blowup_factor;
+        let log_blowup = self.config.fri_params.log_blowup_factor;
         let groups = groups.into_iter().collect_vec();
         // A registered hook's values, per group and column (`None`: the CPU's).
         let hooked: Option<Vec<Vec<Option<SecureField>>>> =
@@ -585,7 +585,7 @@ impl<'a, B: BackendForChannel<MC>, MC: MerkleChannel> CommitmentSchemeProver<'a,
         if let Some(weights_hash_map) = weights_hash_map {
             for ((log_size, _), weights) in weights_hash_map {
                 let weights_log_size =
-                    B::barycentric_log_size(log_size, self.config.fri_config.log_blowup_factor);
+                    B::barycentric_log_size(log_size, self.config.fri_params.log_blowup_factor);
                 for column in weights.columns {
                     self.base_column_pool.give_back(weights_log_size, column);
                 }
@@ -599,6 +599,8 @@ impl<'a, B: BackendForChannel<MC>, MC: MerkleChannel> CommitmentSchemeProver<'a,
         mut self,
         sampled_points: TreeVec<ColumnVec<Vec<CirclePoint<SecureField>>>>,
         channel: &mut MC::C,
+        // Ground before the OODS point was drawn, so it cannot be produced here.
+        oods_proof_of_work: u64,
     ) -> ExtendedCommitmentSchemeProof<MC::H> {
         let lifting_log_size = self.trees.last().unwrap().commitment.layers.len() as u32 - 1;
 
@@ -629,23 +631,17 @@ impl<'a, B: BackendForChannel<MC>, MC: MerkleChannel> CommitmentSchemeProver<'a,
             samples: &samples,
             random_coeff: channel.draw_secure_felt(),
             lifting_log_size,
-            log_blowup_factor: self.config.fri_config.log_blowup_factor,
+            log_blowup_factor: self.config.fri_params.log_blowup_factor,
             twiddles: self.twiddles,
         });
 
         // Run FRI commitment phase on the oods quotients.
         let fri_prover =
-            FriProver::<B, MC>::commit(channel, self.config.fri_config, &quotients, self.twiddles);
-
-        // Proof of work.
-        let span1 = span!(Level::INFO, "Grind", class = "Queries POW").entered();
-        let proof_of_work = B::grind(channel, self.config.fri_config.pow_bits);
-        span1.exit();
-        channel.mix_u64(proof_of_work);
+            FriProver::<B, MC>::commit(channel, self.config.fri_params, &quotients, self.twiddles);
 
         // FRI decommitment phase.
         let FriDecommitResult { fri_proof, query_positions, unsorted_query_locations } =
-            fri_prover.decommit(channel);
+            fri_prover.decommit(channel, self.config.fri_params.pow_bits);
         // Build the query position tree.
         let preprocessed_query_positions = prepare_preprocessed_query_positions(
             &query_positions,
@@ -701,9 +697,9 @@ impl<'a, B: BackendForChannel<MC>, MC: MerkleChannel> CommitmentSchemeProver<'a,
                 sampled_values,
                 decommitments: TreeVec(decommitments),
                 queried_values: TreeVec(queried_values),
-                proof_of_work,
                 fri_proof: fri_proof.proof,
                 config: self.config,
+                oods_proof_of_work,
             },
             aux: CommitmentSchemeProofAux {
                 unsorted_query_locations,
@@ -1117,12 +1113,12 @@ mod striped_commit_hook_tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
-    use crate::core::vcs_lifted::blake2_merkle::Blake2sM31MerkleChannel;
+    use crate::core::vcs_lifted::blake2_merkle::Blake2sMerkleChannel;
     use crate::prover::backend::simd::SimdBackend;
     use crate::prover::backend::simd::column::BaseColumn;
     use crate::prover::poly::circle::PolyOps;
 
-    type Tree = CommitmentTreeProver<SimdBackend, Blake2sM31MerkleChannel>;
+    type Tree = CommitmentTreeProver<SimdBackend, Blake2sMerkleChannel>;
 
     /// This test's trees only: a lifting log size and a column count no other test commits, so
     /// that the hook, which is process-wide, declines everyone else's.
@@ -1165,7 +1161,7 @@ mod striped_commit_hook_tests {
         // A hook that gives the polynomials back: the CPU commits them, the same tree.
         let calls = Arc::new(AtomicUsize::new(0));
         let counted = calls.clone();
-        set_striped_commit_hook::<SimdBackend, Blake2sM31MerkleChannel>(Some(Arc::new(
+        set_striped_commit_hook::<SimdBackend, Blake2sMerkleChannel>(Some(Arc::new(
             move |polynomials, _, _, lifting_log_size| {
                 if ours(&polynomials, lifting_log_size) {
                     counted.fetch_add(1, Ordering::SeqCst);
@@ -1181,7 +1177,7 @@ mod striped_commit_hook_tests {
         // A hook that commits: its tree is new_striped's result. Here it is `new`'s (every column
         // whole), which has the same layers and tells the two apart.
         let pool_for_hook = Arc::new(BaseColumnPool::<SimdBackend>::new());
-        set_striped_commit_hook::<SimdBackend, Blake2sM31MerkleChannel>(Some(Arc::new(
+        set_striped_commit_hook::<SimdBackend, Blake2sMerkleChannel>(Some(Arc::new(
             move |polynomials, log_blowup, twiddles, lifting_log_size| {
                 if !ours(&polynomials, lifting_log_size) {
                     return Err(polynomials);
@@ -1201,7 +1197,7 @@ mod striped_commit_hook_tests {
         assert!(hooked.polynomials.iter().all(|p| p.evals.values.len() == p.evals.domain.size()));
 
         // Removed: the CPU's striped path again.
-        set_striped_commit_hook::<SimdBackend, Blake2sM31MerkleChannel>(None);
+        set_striped_commit_hook::<SimdBackend, Blake2sMerkleChannel>(None);
         let removed = Tree::new_striped(polys(), LOG_BLOWUP, &twiddles, LIFTING_LOG_SIZE, &pool);
         assert_eq!(removed.commitment.layers, cpu.commitment.layers);
         assert!(removed.polynomials.iter().any(|p| p.evals.values.len() < p.evals.domain.size()));
@@ -1213,12 +1209,12 @@ mod striped_decommit_hook_tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::core::vcs_lifted::blake2_merkle::Blake2sM31MerkleChannel;
+    use crate::core::vcs_lifted::blake2_merkle::Blake2sMerkleChannel;
     use crate::prover::backend::simd::SimdBackend;
     use crate::prover::backend::simd::column::BaseColumn;
     use crate::prover::poly::circle::PolyOps;
 
-    type Tree = CommitmentTreeProver<SimdBackend, Blake2sM31MerkleChannel>;
+    type Tree = CommitmentTreeProver<SimdBackend, Blake2sMerkleChannel>;
 
     /// This test's trees only (a shape no other test commits), so that the hook, which is
     /// process-wide, leaves everyone else's decommitments alone.
@@ -1331,13 +1327,13 @@ mod ood_sample_hook_tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::core::fri::FriConfig;
-    use crate::core::vcs_lifted::blake2_merkle::Blake2sM31MerkleChannel;
+    use crate::core::fri::FriParams;
+    use crate::core::vcs_lifted::blake2_merkle::Blake2sMerkleChannel;
     use crate::prover::backend::simd::SimdBackend;
     use crate::prover::backend::simd::column::BaseColumn;
     use crate::prover::poly::circle::PolyOps;
 
-    type Scheme<'a> = CommitmentSchemeProver<'a, SimdBackend, Blake2sM31MerkleChannel>;
+    type Scheme<'a> = CommitmentSchemeProver<'a, SimdBackend, Blake2sMerkleChannel>;
 
     /// This test's columns only (sizes no other test samples), so that the hook, which is
     /// process-wide, leaves everyone else's samples to the CPU.
@@ -1395,7 +1391,7 @@ mod ood_sample_hook_tests {
             CanonicCoset::new(LIFTING_LOG_SIZE).circle_domain().half_coset,
         );
         let config = PcsConfig {
-            fri_config: FriConfig::new(0, 1, LOG_BLOWUP, 3, 1),
+            fri_params: FriParams::new(0, 1, LOG_BLOWUP, 3, 1),
             trace_lifting_log_size: LIFTING_LOG_SIZE,
             preprocessed_lifting_log_size: LIFTING_LOG_SIZE,
         };
@@ -1500,7 +1496,7 @@ mod fri_quotients_hook_tests {
 
     use super::*;
     use crate::core::circle::SECURE_FIELD_CIRCLE_GEN;
-    use crate::core::vcs_lifted::blake2_merkle::Blake2sM31MerkleChannel;
+    use crate::core::vcs_lifted::blake2_merkle::Blake2sMerkleChannel;
     use crate::prover::backend::simd::SimdBackend;
     use crate::prover::backend::simd::column::BaseColumn;
 
@@ -1580,7 +1576,7 @@ mod fri_quotients_hook_tests {
             twiddles: &twiddles,
         };
         let quotients = |request: &FriQuotientsRequest<'_, SimdBackend>| {
-            words(&fri_quotients::<SimdBackend, Blake2sM31MerkleChannel>(request))
+            words(&fri_quotients::<SimdBackend, Blake2sMerkleChannel>(request))
         };
         let expected = words(&cpu(&request));
         assert_eq!(quotients(&request), expected);

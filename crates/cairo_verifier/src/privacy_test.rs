@@ -6,13 +6,14 @@ use circuit_common::N_RESERVED;
 use circuit_common::finalize::pad_context;
 use circuit_common::preprocessed::PreprocessedCircuit;
 use circuit_prover::prover::{
-    BaseColumnPool, CircuitProof, SimdBackend, prepare_circuit_proof_for_circuit_verifier,
+    BaseColumnPool, SimdBackend, prepare_circuit_proof_for_circuit_verifier,
     prove_circuit_assignment,
 };
 use circuit_prover::test_utils::default_circuit_pcs_config;
 use circuit_serialize::serialize::CircuitSerialize;
+use circuit_verifier::circuit_proof::CircuitProof;
 use circuit_verifier::statement::CircuitStatement;
-use circuit_verifier::verify::{CircuitConfig, CircuitPublicData, verify_circuit};
+use circuit_verifier::verify::{CircuitConfig, verify_circuit};
 use circuits::blake::HashValue;
 use circuits::context::{Context, FinalizedContext};
 use circuits::ivalue::{IValue, NoValue};
@@ -20,15 +21,16 @@ use circuits::ops::Guess;
 use circuits_stark_verifier::proof::{ProofConfig, ProofInfo};
 use circuits_stark_verifier::statement::Statement;
 use itertools::Itertools;
-use num_traits::Zero;
 use stwo::core::fields::qm31::QM31;
-use stwo::core::fri::FriConfig;
+use stwo::core::fri::FriParams;
 use stwo::core::pcs::PcsConfig;
 use stwo::core::vcs_lifted::blake2_merkle::Blake2sMerkleHasher;
 
-use crate::privacy::{privacy_cairo_verifier_config, privacy_components};
+use crate::test_utils::{
+    privacy_cairo_verifier_config, privacy_components, verify_cairo_with_component_set,
+};
 use crate::utils::{get_proof_file_path, get_test_data_dir};
-use crate::verify::{build_cairo_verifier_circuit, verify_cairo_with_component_set};
+use crate::verify::build_cairo_verifier_circuit;
 
 /// Verifies with a circuit a proof of execution of another circuit.
 fn verify_circuit_proof(
@@ -38,12 +40,10 @@ fn verify_circuit_proof(
 ) -> FinalizedContext<QM31> {
     let circuit_config = CircuitConfig {
         config: circuit_proof.pcs_config,
-        n_outputs: preprocessed_circuit.n_outputs,
         preprocessed_column_log_sizes: preprocessed_circuit.preprocessed_trace.log_sizes(),
-        preprocessed_root,
     };
     let (proof, public_data) = prepare_circuit_proof_for_circuit_verifier(circuit_proof);
-    verify_circuit(circuit_config, proof, public_data).unwrap()
+    verify_circuit(circuit_config, preprocessed_root, proof, public_data).unwrap()
 }
 
 /// Compares the topology of two contexts.
@@ -111,7 +111,7 @@ fn test_verify_privacy_with_recursion() {
         context.values(),
         &preprocessed,
         &BaseColumnPool::<SimdBackend>::new(),
-        default_circuit_pcs_config(preprocessed.trace_log_size),
+        default_circuit_pcs_config(preprocessed.trace_log_size()),
     )
     .unwrap();
 
@@ -123,9 +123,7 @@ fn test_verify_privacy_with_recursion() {
     // compression are applied. Assert it matches the committed fixture.
     let circuit_config = CircuitConfig {
         config: circuit_proof.pcs_config,
-        n_outputs: preprocessed.n_outputs,
         preprocessed_column_log_sizes: preprocessed.preprocessed_trace.log_sizes(),
-        preprocessed_root,
     };
     let (proof, public_data) = prepare_circuit_proof_for_circuit_verifier(circuit_proof);
     let mut proof_bytes = Vec::new();
@@ -143,7 +141,7 @@ fn test_verify_privacy_with_recursion() {
     );
 
     // Verify the recursion proof with the circuit verifier.
-    verify_circuit(circuit_config, proof, public_data).unwrap();
+    verify_circuit(circuit_config, preprocessed_root, proof, public_data).unwrap();
 }
 
 #[test]
@@ -168,7 +166,7 @@ fn test_privacy_recursion_with_preprocessed_context() {
         assignment_context.values(),
         &preprocessed,
         &BaseColumnPool::<SimdBackend>::new(),
-        default_circuit_pcs_config(preprocessed.trace_log_size),
+        default_circuit_pcs_config(preprocessed.trace_log_size()),
     )
     .unwrap();
 
@@ -180,7 +178,7 @@ fn test_privacy_recursion_with_preprocessed_context() {
         full_prove_context.values(),
         &full_preprocessed,
         &BaseColumnPool::<SimdBackend>::new(),
-        default_circuit_pcs_config(full_preprocessed.trace_log_size),
+        default_circuit_pcs_config(full_preprocessed.trace_log_size()),
     )
     .unwrap();
 
@@ -208,9 +206,9 @@ fn test_privacy_proof_info() {
     let preprocessed_circuit = PreprocessedCircuit::preprocess_circuit(&mut novalue_context);
 
     let log_blowup_factor = 2;
-    let lifting_log_size = preprocessed_circuit.trace_log_size + log_blowup_factor;
+    let lifting_log_size = preprocessed_circuit.trace_log_size() + log_blowup_factor;
     let pcs_config = PcsConfig::from_fri_and_lifting_size(
-        FriConfig {
+        FriParams {
             pow_bits: 26,
             log_blowup_factor,
             log_last_layer_degree_bound: 0,
@@ -219,22 +217,15 @@ fn test_privacy_proof_info() {
         },
         lifting_log_size,
     );
-    let preprocessed_root = HashValue::from([0u32; 8]);
     let circuit_config = CircuitConfig {
         config: pcs_config,
-        n_outputs: preprocessed_circuit.n_outputs,
         preprocessed_column_log_sizes: preprocessed_circuit.preprocessed_trace.log_sizes(),
-        preprocessed_root,
     };
-    let public_data =
-        CircuitPublicData { output_values: vec![QM31::zero(); preprocessed_circuit.n_outputs] };
     let mut context: Context<NoValue> = Context::new(N_RESERVED);
-    let output_values = public_data
-        .output_values
-        .iter()
-        .map(|value| NoValue::from_qm31(*value).guess(&mut context))
-        .collect_vec();
-    let statement = CircuitStatement::new(&mut context, &circuit_config, &output_values);
+    let output_digest = HashValue::<NoValue>::no_value().guess(&mut context);
+    let preprocessed_root = HashValue::no_value().guess(&mut context);
+    let statement =
+        CircuitStatement::new(&mut context, &circuit_config, preprocessed_root, output_digest);
 
     let proof_config = ProofConfig::new(
         statement.get_components(),
@@ -245,5 +236,5 @@ fn test_privacy_proof_info() {
     let proof_info = ProofInfo::from_config(&proof_config);
     println!("{proof_info}");
     // Assert the total size in bytes.
-    assert_eq!(proof_info.total_bytes(), 263796);
+    assert_eq!(proof_info.total_bytes(), 263812);
 }

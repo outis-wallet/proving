@@ -11,7 +11,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::Result;
-use cairo_air::flat_claims::FlatClaim;
 use cairo_program_runner_lib::types::{
     HashFunc, PrivacySimpleBootloaderInput, SimpleBootloaderInput,
 };
@@ -34,22 +33,24 @@ use circuits_stark_verifier::proof::ProofConfig;
 use itertools::chain;
 use leaf_proof_format::{DigestHex, SerializedLeafProof};
 use leaf_prover::prove_leaf::prove_leaf;
-use privacy_circuit_verify::consts::{
+use privacy_circuit_verify::{
+    get_cairo_preprocessed_circuit, get_cairo_verifier_config, get_proof_config,
+    get_recursive_circuit_config,
+};
+use privacy_common::consts::{
     CAIRO_PCS_CONFIG, CIRCUIT_FRI_CONFIG, CIRCUIT_PCS_CONFIG,
     PRIVACY_RECURSION_CIRCUIT_PREPROCESSED_ROOT,
 };
-use privacy_circuit_verify::utils::ProofHeader;
-use privacy_circuit_verify::{
-    PrivacyProofOutput, Version, compute_privacy_bootloader_output_hash,
-    get_cairo_preprocessed_circuit, get_cairo_verifier_config, get_large_proofs_circuit_registry,
-    get_leaf_bootloader_program, get_privacy_bootloader_program, get_proof_config,
-    get_recursive_circuit_config,
+use privacy_common::utils::{ProofHeader, Version};
+use privacy_common::{
+    PrivacyProofOutput, compute_privacy_bootloader_output_hash, get_large_proofs_circuit_registry,
+    get_privacy_bootloader_program,
 };
 use serde_json::from_str;
 use starknet_types_core::felt::Felt;
 use stwo::core::poly::circle::CanonicCoset;
 use stwo::core::utils::MaybeOwned;
-use stwo::core::vcs_lifted::blake2_merkle::Blake2sM31MerkleChannel;
+use stwo::core::vcs_lifted::blake2_merkle::Blake2sMerkleChannel;
 use stwo::prover::CommitmentTreeProver;
 use stwo::prover::backend::simd::SimdBackend;
 #[cfg(unix)]
@@ -61,8 +62,8 @@ use stwo_cairo_adapter::ProverInput;
 use stwo_cairo_adapter::adapter::adapt;
 use stwo_cairo_common::preprocessed_columns::preprocessed_trace::PreProcessedTrace;
 use stwo_cairo_prover::prover::{
-    LiftingSizePolicy, prove_cairo, prove_cairo_with_precompute,
-    prove_cairo_with_precompute_stoppable, warm_pedersen_pp_trace,
+    LiftingSizePolicy, prove_cairo_with_precompute, prove_cairo_with_precompute_stoppable,
+    warm_pedersen_pp_trace,
 };
 use stwo_cairo_prover::witness::preprocessed_trace::gen_trace;
 use tempfile::NamedTempFile;
@@ -82,7 +83,7 @@ pub struct RecursiveProverPrecomputes {
     pub twiddles: std::mem::ManuallyDrop<Arc<TwiddleTree<SimdBackend>>>,
     pub cairo_preprocessed_trace: Arc<PreProcessedTrace>,
     pub cairo_preprocessed_tree:
-        std::mem::ManuallyDrop<CommitmentTreeProver<SimdBackend, Blake2sM31MerkleChannel>>,
+        std::mem::ManuallyDrop<CommitmentTreeProver<SimdBackend, Blake2sMerkleChannel>>,
     pub cairo_verifier_config: CairoVerifierConfig,
     /// Built on first use, which is after the Cairo proof: its committed evaluations are not
     /// resident while that proof runs, its columns reuse that proof's idle buffers, and the
@@ -93,7 +94,7 @@ pub struct RecursiveProverPrecomputes {
     pub proof_config: ProofConfig,
 }
 
-type PrecomputedTree = CommitmentTreeProver<SimdBackend, Blake2sM31MerkleChannel>;
+type PrecomputedTree = CommitmentTreeProver<SimdBackend, Blake2sMerkleChannel>;
 
 /// A committed preprocessed tree that is built the first time it is dereferenced.
 pub struct LazyCommitmentTree {
@@ -148,36 +149,6 @@ fn build_privacy_proof_output(
     Ok(PrivacyProofOutput { proof, output_preimage })
 }
 
-/// Runs the program and generates a proof for it with params, bootloader and output format suitable
-/// for the privacy circuit verifier.
-pub fn privacy_prove(pie: CairoPie) -> Result<PrivacyProofOutput, Box<dyn Error>> {
-    let _span = span!(Level::INFO, "privacy_prove").entered();
-
-    info!("Run privacy bootloader and get the prover input and output preimage");
-    let (prover_input, output_preimage) = run_privacy_bootloader(pie)?;
-
-    info!("Generate the cairo proof");
-    let cairo_proof = prove_cairo::<Blake2sM31MerkleChannel>(prover_input, CAIRO_PROVER_PARAMS)?;
-    let FlatClaim { component_enable_bits, component_log_sizes: _, public_data: _ } =
-        cairo_proof.claim.flatten_claim();
-
-    info!("Prepare the proof for the circuit verifier");
-    let (proof, serialized_aux_data) =
-        prepare_cairo_proof_for_circuit_verifier(&cairo_proof, &component_enable_bits);
-
-    info!("Serialize and compress the proof and public data");
-    let mut proof_bytes: Vec<u8> = vec![];
-    proof.serialize(&mut proof_bytes);
-    let serialized_aux_bytes: Vec<u8> =
-        serialized_aux_data.iter().flat_map(|x| x.0.to_le_bytes()).collect();
-    let combined_bytes: Vec<u8> = chain!(serialized_aux_bytes, proof_bytes).collect();
-    build_privacy_proof_output(
-        combined_bytes,
-        &PRIVACY_RECURSION_CIRCUIT_PREPROCESSED_ROOT,
-        output_preimage,
-    )
-}
-
 pub fn prepare_recursive_prover_precomputes()
 -> Result<Arc<RecursiveProverPrecomputes>, Box<dyn Error>> {
     let _span = span!(Level::INFO, "prepare_privacy_recursiveprover_precomputes").entered();
@@ -227,9 +198,9 @@ pub fn prepare_recursive_prover_precomputes()
                     SimdBackend::interpolate_columns(cairo_preprocessed_evals, &twiddles);
                 // Committed as the Cairo prover commits its own trees: only the first stripe stays.
                 let cairo_preprocessed_tree =
-                    CommitmentTreeProver::<SimdBackend, Blake2sM31MerkleChannel>::new_striped(
+                    CommitmentTreeProver::<SimdBackend, Blake2sMerkleChannel>::new_striped(
                         cairo_preprocessed_trace_polys,
-                        CAIRO_PCS_CONFIG.fri_config.log_blowup_factor,
+                        CAIRO_PCS_CONFIG.fri_params.log_blowup_factor,
                         &twiddles,
                         cairo_lifting_log_size,
                         &base_column_pool,
@@ -252,9 +223,9 @@ pub fn prepare_recursive_prover_precomputes()
             let circuit_preprocessed_trace_polys =
                 SimdBackend::interpolate_columns(circuit_preprocessed_trace, &twiddles);
             // Committed as the circuit prover commits its own trees: only the first stripe stays.
-            CommitmentTreeProver::<SimdBackend, Blake2sM31MerkleChannel>::new_striped(
+            CommitmentTreeProver::<SimdBackend, Blake2sMerkleChannel>::new_striped(
                 circuit_preprocessed_trace_polys,
-                CIRCUIT_FRI_CONFIG.log_blowup_factor,
+                CIRCUIT_FRI_CONFIG.params.log_blowup_factor,
                 &twiddles,
                 preprocessed_lifting_log_size,
                 &base_column_pool,
@@ -276,13 +247,15 @@ pub fn prepare_recursive_prover_precomputes()
 }
 
 pub fn privacy_recursive_prove_large(pie: CairoPie) -> Result<PrivacyProofOutput, Box<dyn Error>> {
-    let leaf_bootloader = get_leaf_bootloader_program()?;
+    // Currently, the large privacy proofs use the same component types as the small privacy
+    // proofs, so they can use the same bootloader.
+    let bootloader = get_privacy_bootloader_program()?;
     let circuit_registry = get_large_proofs_circuit_registry();
     let output_preimage_file = NamedTempFile::new()?;
     let output_preimage_path = output_preimage_file.path();
 
     // The leaf bootloader and the privacy bootloader have the same input format
-    let leaf_bootloader_input = build_privacy_bootloader_input(pie, output_preimage_path);
+    let bootloader_input = build_privacy_bootloader_input(pie, output_preimage_path);
 
     // Prove
     let SerializedLeafProof {
@@ -290,8 +263,8 @@ pub fn privacy_recursive_prove_large(pie: CairoPie) -> Result<PrivacyProofOutput
         circuit_hash: _,
         proof,
     }: SerializedLeafProof = prove_leaf(
-        &leaf_bootloader,
-        Some(ProgramInput::Value(Box::new(leaf_bootloader_input))),
+        &bootloader,
+        Some(ProgramInput::Value(Box::new(bootloader_input))),
         &circuit_registry,
     );
     // Read the output preimage
@@ -319,11 +292,8 @@ pub fn privacy_recursive_prove(
         prover_input,
         CAIRO_PROVER_PARAMS,
     )?;
-    let FlatClaim { component_enable_bits, component_log_sizes: _, public_data: _ } =
-        cairo_proof.claim.flatten_claim();
     info!("Prepare the cairo proof for the cairo-circuit verifier");
-    let (proof, serialized_aux_data) =
-        prepare_cairo_proof_for_circuit_verifier(&cairo_proof, &component_enable_bits);
+    let (proof, serialized_aux_data) = prepare_cairo_proof_for_circuit_verifier(&cairo_proof);
 
     info!("Build the cairo-circuit verifier context");
     let output_hash = compute_privacy_bootloader_output_hash(&output_preimage);
@@ -431,9 +401,9 @@ pub fn privacy_recursive_prove_once_stoppable(
     );
     check("before the cairo prover preprocessed tree")?;
     let cairo_preprocessed_tree =
-        CommitmentTreeProver::<SimdBackend, Blake2sM31MerkleChannel>::new_striped(
+        CommitmentTreeProver::<SimdBackend, Blake2sMerkleChannel>::new_striped(
             SimdBackend::interpolate_columns(cairo_preprocessed_evals, &twiddles),
-            CAIRO_PCS_CONFIG.fri_config.log_blowup_factor,
+            CAIRO_PCS_CONFIG.fri_params.log_blowup_factor,
             &twiddles,
             cairo_lifting_log_size,
             &base_column_pool,
@@ -457,11 +427,8 @@ pub fn privacy_recursive_prove_once_stoppable(
     else {
         return Err(Box::new(Cancelled { at: "during the cairo proof" }));
     };
-    let FlatClaim { component_enable_bits, component_log_sizes: _, public_data: _ } =
-        cairo_proof.claim.flatten_claim();
     info!("Prepare the cairo proof for the cairo-circuit verifier");
-    let (proof, serialized_aux_data) =
-        prepare_cairo_proof_for_circuit_verifier(&cairo_proof, &component_enable_bits);
+    let (proof, serialized_aux_data) = prepare_cairo_proof_for_circuit_verifier(&cairo_proof);
     drop(cairo_proof);
 
     check("before the cairo-circuit verifier context")?;
@@ -496,9 +463,9 @@ pub fn privacy_recursive_prove_once_stoppable(
         let _span = span!(Level::INFO, "prepare_circuit_preprocessed_tree").entered();
         let circuit_preprocessed_trace =
             preprocessed_circuit.preprocessed_trace.get_trace::<SimdBackend>();
-        CommitmentTreeProver::<SimdBackend, Blake2sM31MerkleChannel>::new_striped(
+        CommitmentTreeProver::<SimdBackend, Blake2sMerkleChannel>::new_striped(
             SimdBackend::interpolate_columns(circuit_preprocessed_trace, &twiddles),
-            CIRCUIT_FRI_CONFIG.log_blowup_factor,
+            CIRCUIT_FRI_CONFIG.params.log_blowup_factor,
             &twiddles,
             circuit_config.config.preprocessed_lifting_log_size,
             &base_column_pool,

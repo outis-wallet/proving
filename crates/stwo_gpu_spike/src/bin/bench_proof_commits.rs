@@ -51,7 +51,7 @@ use rand::{Rng, SeedableRng};
 use rayon::prelude::*;
 use stwo::core::fields::m31::{BaseField, P};
 use stwo::core::poly::circle::CanonicCoset;
-use stwo::core::vcs_lifted::blake2_merkle::Blake2sM31MerkleChannel;
+use stwo::core::vcs_lifted::blake2_merkle::Blake2sMerkleChannel;
 use stwo::prover::CommitmentTreeProver;
 use stwo::prover::backend::simd::SimdBackend;
 use stwo::prover::backend::simd::column::BaseColumn;
@@ -64,7 +64,7 @@ use stwo_gpu_spike::shapes::{
     Component, base_trace_log_sizes, cairo_pay_components, interaction_trace_log_sizes,
 };
 
-type TreeProver = CommitmentTreeProver<SimdBackend, Blake2sM31MerkleChannel>;
+type TreeProver = CommitmentTreeProver<SimdBackend, Blake2sMerkleChannel>;
 
 struct Args {
     proofs: usize,

@@ -1,15 +1,19 @@
 use circuits::blake::{blake_g_gate, m31_to_u32, triple_xor};
-use circuits::circuit::Circuit;
 use circuits::context::{Context, FinalizedContext, Var};
 use circuits::eval;
 use circuits::ivalue::{IValue, qm31_from_u32s};
 use circuits::ops::{add_into, eq};
+use circuits::wrappers::U32Wrapper;
 use rand_chacha::rand_core::{RngCore, SeedableRng};
 
 use crate::N_LANES;
 
+#[cfg(test)]
+#[path = "finalize_test.rs"]
+pub mod test;
+
 fn pad_qm31_ops(context: &mut Context<impl IValue>, target: usize) {
-    let qm31_ops_n_rows = qm31_ops_n_rows(&context.circuit);
+    let qm31_ops_n_rows = context.circuit.n_qm31_ops_rows();
     assert!(qm31_ops_n_rows <= target);
     let one = context.one();
     for _ in qm31_ops_n_rows..target {
@@ -30,7 +34,7 @@ fn pad_eq(context: &mut Context<impl IValue>, target: usize) {
 fn pad_triple_xor(context: &mut Context<impl IValue>, target: usize) {
     let n_rows = context.circuit.triple_xor.len();
     assert!(n_rows <= target);
-    let zero = context.zero();
+    let zero = U32Wrapper::const_u32(context, 0);
     for _ in n_rows..target {
         circuits::blake::triple_xor(context, zero, zero, zero);
     }
@@ -48,7 +52,7 @@ fn pad_m31_to_u32(context: &mut Context<impl IValue>, target: usize) {
 fn pad_blake_g_gate(context: &mut Context<impl IValue>, target: usize) {
     let n_rows = context.circuit.blake_g_gate.len();
     assert!(n_rows <= target);
-    let zero = context.zero();
+    let zero = U32Wrapper::const_u32(context, 0);
     for _ in n_rows..target {
         blake_g_gate(context, zero, zero, zero, zero, zero, zero);
     }
@@ -112,6 +116,9 @@ fn eq_zk_blinding(context: &mut Context<impl IValue>, rng: &mut impl RngCore) {
 ///
 /// Note that we don't use the guess function here because we want to be able to run this after
 /// finalize_guessed_vars.
+///
+/// Safety: this function is unsafe as it creates a new unconstrained variable (in particular, it
+/// is not guaranteed to hold a value of the form (low_u16, high_u16, 0, 0)).
 fn random_u32_var(context: &mut Context<impl IValue>, rng: &mut impl RngCore) -> Var {
     let zero = context.zero();
     let x = context.new_var(*IValue::pack_u32(rng.next_u32()).get());
@@ -133,9 +140,16 @@ fn random_m31_var(context: &mut Context<impl IValue>, rng: &mut impl RngCore) ->
 
 /// Adds a random row to the triple_xor component, blinding its trace.
 fn triple_xor_zk_blinding(context: &mut Context<impl IValue>, rng: &mut impl RngCore) {
-    let a = random_u32_var(context, rng);
-    let b = random_u32_var(context, rng);
-    let c = random_u32_var(context, rng);
+    // Safety:
+    // - none of the inputs to triple_xor is used anywhere else other than the gates x + 0 = x that
+    //   yield them.
+    // - the output of triple_xor is unused.
+    // Note that the constraints of triple_xor actually enforce that its inputs are of the form
+    // (low, high, 0, 0) with low, high in `[0, 2^16)` so the use of [`U32Wrapper::new_unsafe`] is
+    // fine.
+    let a = U32Wrapper::new_unsafe(random_u32_var(context, rng));
+    let b = U32Wrapper::new_unsafe(random_u32_var(context, rng));
+    let c = U32Wrapper::new_unsafe(random_u32_var(context, rng));
     triple_xor(context, a, b, c);
 }
 
@@ -147,18 +161,44 @@ fn m31_to_u32_zk_blinding(context: &mut Context<impl IValue>, rng: &mut impl Rng
 
 /// Adds a random row to the blake_g_gate component, blinding its trace.
 fn blake_g_gate_zk_blinding(context: &mut Context<impl IValue>, rng: &mut impl RngCore) {
-    let a = random_u32_var(context, rng);
-    let b = random_u32_var(context, rng);
-    let c = random_u32_var(context, rng);
-    let d = random_u32_var(context, rng);
-    let f0 = random_u32_var(context, rng);
-    let f1 = random_u32_var(context, rng);
+    // Safety: the variables returned by [`random_u32_var`] are not guaranteed to be of the form
+    // (low, high, 0, 0) with low, high in `[0, 2^16)`. The blake_g_gate constraints do not enforce
+    // all of its 6 inputs to have this form either. However, the usage in this function is fine
+    // because:
+    // - none of the inputs to blake_g_gate is used anywhere else other than the gates x + 0 = x
+    //   that yield them.
+    // - the output of blake_g_gate is unused.
+    let a = U32Wrapper::new_unsafe(random_u32_var(context, rng));
+    let b = U32Wrapper::new_unsafe(random_u32_var(context, rng));
+    let c = U32Wrapper::new_unsafe(random_u32_var(context, rng));
+    let d = U32Wrapper::new_unsafe(random_u32_var(context, rng));
+    let f0 = U32Wrapper::new_unsafe(random_u32_var(context, rng));
+    let f1 = U32Wrapper::new_unsafe(random_u32_var(context, rng));
     blake_g_gate(context, a, b, c, d, f0, f1);
 }
+
+// Blinding rows per unit of `n_padding`.
+//
+// Every value the proof reveals about a column is an M31 (~31 bits), so for each revealed value
+// the blinding rows must add ~31 random bits to every column the component commits to: its trace
+// columns and its interaction columns (each secure interaction column is 4 M31 columns). All the
+// columns of a row are computed from the row's random inputs, so a row adds only as many random
+// bits as its inputs have: a component needs ~`n_columns * 31 / input_bits` rows. This is a rough
+// estimate.
+
+/// 20 trace + 24 interaction columns; 3 random u32 inputs (96 bits): 44 * 31 / 96 ≈ 15.
+pub const TRIPLE_XOR_BLINDING_FACTOR: usize = 15;
+/// 4 trace + 12 interaction columns; 1 random M31 input (31 bits): 16 * 31 / 31 = 16.
+pub const M31_TO_U32_BLINDING_FACTOR: usize = 16;
+/// 52 trace + 52 interaction columns; 6 random u32 inputs (192 bits): 104 * 31 / 192 ≈ 17.
+pub const BLAKE_G_GATE_BLINDING_FACTOR: usize = 17;
 
 /// Adds ZK blinding to the circuit by adding random rows to all the witness components: qm31_ops,
 /// eq, triple_xor, m31_to_u32, and blake_g_gate. The fresh input variables are yielded through
 /// trivial `x + 0 = x` add gates in the qm31_ops component.
+///
+/// Each unit of `n_padding` blinds the values exposed by one query in the proof
+/// (amount of added randomness = amount of data exposed by query = size of one trace row).
 pub fn add_zk_blinding(
     context: &mut FinalizedContext<impl IValue>,
     seed_bytes: [u8; 32],
@@ -169,9 +209,15 @@ pub fn add_zk_blinding(
     for _ in 0..n_padding {
         qm31_zk_blinding(context, &mut rng);
         eq_zk_blinding(context, &mut rng);
-        triple_xor_zk_blinding(context, &mut rng);
-        m31_to_u32_zk_blinding(context, &mut rng);
-        blake_g_gate_zk_blinding(context, &mut rng);
+        for _ in 0..TRIPLE_XOR_BLINDING_FACTOR {
+            triple_xor_zk_blinding(context, &mut rng);
+        }
+        for _ in 0..M31_TO_U32_BLINDING_FACTOR {
+            m31_to_u32_zk_blinding(context, &mut rng);
+        }
+        for _ in 0..BLAKE_G_GATE_BLINDING_FACTOR {
+            blake_g_gate_zk_blinding(context, &mut rng);
+        }
     }
 }
 
@@ -241,7 +287,7 @@ pub fn raw_component_sizes(context: &FinalizedContext<impl IValue>) -> Component
     let circuit = &context.context.circuit;
     ComponentSizes {
         eq: circuit.eq.len(),
-        qm31_ops: qm31_ops_n_rows(circuit),
+        qm31_ops: circuit.n_qm31_ops_rows(),
         m31_to_u32: circuit.m31_to_u32.len(),
         triple_xor: circuit.triple_xor.len(),
         blake_g_gate: circuit.blake_g_gate.len(),
@@ -250,15 +296,6 @@ pub fn raw_component_sizes(context: &FinalizedContext<impl IValue>) -> Component
 
 pub fn compute_padded_sizes(context: &FinalizedContext<impl IValue>) -> ComponentSizes {
     raw_component_sizes(context).map(padded_size)
-}
-
-/// Computes the number of rows in the qm31_ops AIR component.
-pub fn qm31_ops_n_rows(circuit: &Circuit) -> usize {
-    circuit.add.len()
-        + circuit.sub.len()
-        + circuit.mul.len()
-        + circuit.pointwise_mul.len()
-        + circuit.permutation.iter().map(|p| p.inputs.len() + p.outputs.len()).sum::<usize>()
 }
 
 pub fn padded_size(n_rows: usize) -> usize {

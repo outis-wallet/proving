@@ -15,7 +15,7 @@ use rand::{Rng, SeedableRng};
 use rayon::prelude::*;
 use stwo::core::fields::m31::{BaseField, P};
 use stwo::core::poly::circle::CanonicCoset;
-use stwo::core::vcs_lifted::blake2_merkle::Blake2sM31MerkleChannel;
+use stwo::core::vcs_lifted::blake2_merkle::Blake2sMerkleChannel;
 use stwo::prover::CommitmentTreeProver;
 use stwo::prover::backend::Column;
 use stwo::prover::backend::simd::SimdBackend;
@@ -37,7 +37,7 @@ use stwo_gpu_spike::shapes::{
 use stwo_gpu_spike::stream::StreamedCommitment;
 use stwo_gpu_spike::transfer::{ReadbackRing, UploadRing};
 
-type TreeProver = CommitmentTreeProver<SimdBackend, Blake2sM31MerkleChannel>;
+type TreeProver = CommitmentTreeProver<SimdBackend, Blake2sMerkleChannel>;
 
 fn full() -> bool {
     std::env::var("STWO_GPU_SPIKE_FULL").is_ok_and(|v| v == "1")

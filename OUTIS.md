@@ -1,7 +1,9 @@
 # Outis's branch of StarkWare's prover
 
-This is `starkware-libs/proving` at `2b495a36`, the revision the sequencer's
-`PRIVACY-0.14.4-RC.0` pins, plus Outis's commits. The changes make the whole Starknet transaction
+This is `starkware-libs/proving` at `e0035ffc`, the revision the sequencer's `main-v0.14.4` pins
+(since `148de445`, 2026-10-28) and whose proofs Sepolia's gateway verifies, plus Outis's commits.
+Until then it was `2b495a36`, the revision of `PRIVACY-0.14.4-RC.0`, whose recursion circuit
+Sepolia no longer knows ("Unknown preprocessed root"). The changes make the whole Starknet transaction
 proof small enough in memory for phones and browsers (wasm32, 4 GiB), and let it run on a GPU
 (native, browsers, phones) with every GPU path off unless the prover turns it on. They are used by
 [outis-wallet/prover](https://github.com/outis-wallet/prover), and run on outis.cash/prover and
@@ -27,6 +29,7 @@ Proofs are byte-identical to the upstream prover's for the same input.
 | The large-block cache from 64 KiB on Apple | macOS and iOS keep freed blocks between 64 KiB and 1 MiB: mapping them here returns them (the CPU path's peak footprint 2576 to 2358 MiB on an M5 Pro). 1 MiB elsewhere, as before | Outis |
 | Lookup data narrowed from the base trace to the interaction trace | Each Cairo component's lookup tuples live from its `write_trace` until its interaction trace, across the base trace commitment. The bitwise-XOR tuples are now stored as one `u32` (4x smaller) and `memory_id_to_big`'s as 11 `u32` words (about 2.7x), in the bits the AIR range-checks them to, and widened back for the interaction trace. -350 MiB of wasm memory on every capture, no time cost. Hand-edits 34 AIR-generated witness files | ryun1, in the provably.fast frontier `66670df7` (whole-proof job f2498dc7), taken as is |
 | The verifier context freed before the circuit's base trace commitment | `prove_once` takes the padded context's values out (`FinalizedContext::into_values`, freeing the gates) and hands them to `prove_circuit_with_precompute_owned`, which frees them once the base trace is written. About -200 MiB through the circuit proof | Outis, after realadii's change in the provably.fast frontier `55720f34` |
+| Upstream `e0035ffc` merged in | Upstream's 167 commits from `2b495a36`, among them more zk-blinding rows in the circuit (`e0035ffc`), one Blake2s channel whose output is not reduced to M31 (#445) and `FriConfig` renamed `FriParams` (#296, #297). Upstream's semantics, the fork's mechanisms: the preprocessed trace is upstream's, with the compact and generated columns and their parallel build; the SIMD grind keeps its precomputed round 0 but no M31 reduction; the once paths prove through upstream's single-argument `prepare_cairo_proof_for_circuit_verifier`. Tested: proofs byte-identical to upstream's (below), and `privacy_recursive_prove_once` gives `privacy_recursive_prove`'s bytes | Outis |
 
 The prover's releases pin this branch at a tag: `outis-v0.1.0` (16f4a93a, the CPU prover),
 `outis-v0.2.0` (58503232, the GPU modes) and `outis-v0.2.1` (the lookup-data narrowing and the freed
@@ -39,12 +42,16 @@ about 25 remove the per-row allocations. The lookup-data narrowing adds about 1,
 
 ## Following upstream
 
-Rebase this branch on a newer upstream revision, then check that proofs are still byte-identical
-to the upstream prover's (outis-wallet/prover's captures carry the reference proofs).
+Rebase this branch on a newer upstream revision, or merge it in (as for `e0035ffc`: 9 conflicted
+files once, against 108 commits replayed), then check that proofs are still byte-identical to the
+upstream prover's. For `e0035ffc` that was the sequencer's transaction prover at `148de445`, built
+as it is and built with this branch patched in for every proving crate it uses, proving the same
+recorded Sepolia request pinned to one block: the unpatched prover twice, then the patched one,
+all three byte-identical. outis-wallet/prover's captures carry the reference proofs.
 
 ## License
 
-Apache-2.0, as upstream (`LICENSE`). The files changed from `2b495a36`:
+Apache-2.0, as upstream (`LICENSE`). The files changed from `e0035ffc`:
 
 - `Cargo.lock`
 - `OUTIS.md`
@@ -55,13 +62,14 @@ Apache-2.0, as upstream (`LICENSE`). The files changed from `2b495a36`:
 - `crates/cairo-program-runner-lib/src/utils.rs`
 - `crates/circuit_common/Cargo.toml`
 - `crates/circuit_common/src/preprocessed.rs`
+- `crates/circuit_common/src/preprocessed_test.rs`
 - `crates/circuit_prover/src/circuit_air/components/verify_bitwise_xor_12.rs`
 - `crates/circuit_prover/src/prover.rs`
 - `crates/circuit_prover/src/witness/components/blake_g_gate.rs`
 - `crates/circuit_prover/src/witness/components/eq.rs`
 - `crates/circuit_prover/src/witness/components/m_31_to_u_32.rs`
 - `crates/circuit_prover/src/witness/components/prelude.rs`
-- `crates/circuit_prover/src/witness/components/qm31_ops.rs`
+- `crates/circuit_prover/src/witness/components/qm_31_ops.rs`
 - `crates/circuit_prover/src/witness/components/triple_xor.rs`
 - `crates/circuit_prover/src/witness/components/verify_bitwise_xor_12.rs`
 - `crates/circuit_prover/src/witness/components/verify_bitwise_xor_4.rs`
@@ -88,6 +96,7 @@ Apache-2.0, as upstream (`LICENSE`). The files changed from `2b495a36`:
 - `crates/privacy_prove/Cargo.toml`
 - `crates/privacy_prove/src/consts.rs`
 - `crates/privacy_prove/src/lib.rs`
+- `crates/privacy_prove/src/tests.rs`
 - `crates/prover/src/prover.rs`
 - `crates/prover/src/witness/components/add_ap_opcode.rs`
 - `crates/prover/src/witness/components/add_mod_builtin.rs`

@@ -107,6 +107,149 @@ fn test_mix_felts_with_5_felts() {
     );
 }
 
+/// Reference values were generated from the Rust `Blake2sChannel::mix_u32s`
+/// (https://github.com/starkware-libs/stwo/blob/dev/crates/prover/src/core/channel/blake2s.rs)
+/// with input `[1, 2, ..., n]` on a default channel.
+fn assert_mix_u32s(words: Span<u32>, expected: [u32; 8]) {
+    let mut channel: Blake2sChannel = Default::default();
+    channel.mix_u32s(words);
+    assert_eq!(channel.digest.hash.unbox(), expected);
+}
+
+#[test]
+fn test_mix_u32s_len_0() {
+    assert_mix_u32s(
+        array![].span(),
+        [
+            2841512754, 3258672542, 1104909237, 1309331760, 1275804413, 1738990018, 1905092395,
+            2905849311,
+        ],
+    );
+}
+
+#[test]
+fn test_mix_u32s_len_1() {
+    assert_mix_u32s(
+        array![1].span(),
+        [
+            19235923, 1604041799, 1672672341, 2742337121, 3871249661, 1300042830, 4050860166,
+            769478617,
+        ],
+    );
+}
+
+#[test]
+fn test_mix_u32s_len_7() {
+    assert_mix_u32s(
+        array![1, 2, 3, 4, 5, 6, 7].span(),
+        [
+            1952582910, 3463395335, 4218083501, 3678229254, 4010827797, 227638702, 2211456986,
+            2204729745,
+        ],
+    );
+}
+
+#[test]
+fn test_mix_u32s_len_8() {
+    // First-block-exactly-filled boundary: `half` (digest) + 8 words → single finalize.
+    assert_mix_u32s(
+        array![1, 2, 3, 4, 5, 6, 7, 8].span(),
+        [
+            1835698174, 2969628929, 1758616107, 158303712, 3820231193, 179192886, 4063347398,
+            3332297509,
+        ],
+    );
+}
+
+#[test]
+fn test_mix_u32s_len_9() {
+    // First compress + 1-word tail combined with fresh `half` after compress.
+    assert_mix_u32s(
+        array![1, 2, 3, 4, 5, 6, 7, 8, 9].span(),
+        [
+            2205585776, 3004939095, 3067768628, 4208416691, 3824924742, 608382508, 2495807392,
+            3349281227,
+        ],
+    );
+}
+
+#[test]
+fn test_mix_u32s_len_15() {
+    assert_mix_u32s(
+        array![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15].span(),
+        [
+            2753343649, 3381002282, 3322866444, 1593947330, 1863381790, 282458799, 1460609626,
+            137829626,
+        ],
+    );
+}
+
+#[test]
+fn test_mix_u32s_len_16() {
+    // Compress block 0, then finalize `[new_half, zeros]` via the "None" branch after compress.
+    assert_mix_u32s(
+        array![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16].span(),
+        [
+            940149128, 1354728945, 2816315586, 1690943110, 210254904, 3746481728, 1339132640,
+            3760408575,
+        ],
+    );
+}
+
+#[test]
+fn test_mix_u32s_len_17() {
+    assert_mix_u32s(
+        array![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17].span(),
+        [
+            2376835750, 451513028, 2400139659, 1427462776, 2379020428, 895384260, 3462557408,
+            298945784,
+        ],
+    );
+}
+
+#[test]
+fn test_mix_u32s_len_23() {
+    assert_mix_u32s(
+        array![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]
+            .span(),
+        [
+            1985876374, 4211915189, 1616506157, 2006328026, 2371588099, 853383987, 3828210318,
+            1464037221,
+        ],
+    );
+}
+
+#[test]
+fn test_mix_u32s_len_24() {
+    // Two full blocks: compress block 0, finalize block 1 exactly.
+    assert_mix_u32s(
+        array![
+            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
+        ]
+            .span(),
+        [
+            520731041, 1083958258, 1138152617, 3056749115, 586997436, 3101777590, 2358708943,
+            863043355,
+        ],
+    );
+}
+
+#[test]
+fn test_mix_u32s_len_25() {
+    // Two full compresses, then 1-word tail forms partial final block on its own.
+    assert_mix_u32s(
+        array![
+            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
+            25,
+        ]
+            .span(),
+        [
+            2909607053, 1561944424, 1334308686, 2526443189, 613570545, 3119021913, 2423688026,
+            2836315110,
+        ],
+    );
+}
+
 #[test]
 fn test_mix_u64() {
     let mut channel: Blake2sChannel = Default::default();
@@ -167,7 +310,7 @@ fn test_draw_secure_felt() {
 
     // Tested against values produced from Rust code.
     // https://github.com/starkware-libs/stwo/blob/dev/crates/prover/src/core/channel/blake2s.rs
-    assert_eq!(felt, qm31_const::<1508103417, 49928118, 1851109195, 649450964>());
+    assert_eq!(felt, qm31_const::<1607959653, 1002527476, 1398396019, 67013898>());
 }
 
 #[test]
@@ -181,14 +324,14 @@ fn test_draw_secure_felts() {
     assert_eq!(
         felts,
         array![
-            qm31_const::<1508103417, 49928118, 1851109195, 649450964>(),
-            qm31_const::<1514800545, 2089281384, 523819246, 1919080973>(),
-            qm31_const::<1769619091, 1335149496, 2007506569, 1426464368>(),
-            qm31_const::<853727757, 1673676888, 635879929, 1327640380>(),
-            qm31_const::<1751831125, 1559795173, 442209472, 1280396692>(),
-            qm31_const::<1528893536, 644814910, 503157674, 286565543>(),
-            qm31_const::<1839261536, 1778992654, 807858428, 143171319>(),
-            qm31_const::<128590986, 1618375851, 213276683, 76892197>(),
+            qm31_const::<1607959653, 1002527476, 1398396019, 67013898>(),
+            qm31_const::<144950789, 565468011, 2053597886, 1143677042>(),
+            qm31_const::<576454177, 855519209, 671039709, 1076288760>(),
+            qm31_const::<1102279550, 1094201066, 1217859041, 367061077>(),
+            qm31_const::<467172210, 1084656950, 1059980591, 1137233454>(),
+            qm31_const::<365873393, 1732845274, 774277962, 892979872>(),
+            qm31_const::<226119429, 1746258861, 812369014, 1685182917>(),
+            qm31_const::<1356430388, 1427468863, 1241931671, 1433257830>(),
         ],
     );
 }

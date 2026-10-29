@@ -12,14 +12,14 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use itertools::Itertools;
 use num_traits::{One, Zero};
-use stwo::core::channel::Blake2sM31Channel;
+use stwo::core::channel::Blake2sChannel;
 use stwo::core::fields::FieldExpOps;
 use stwo::core::fields::m31::BaseField;
 use stwo::core::fields::qm31::SecureField;
-use stwo::core::fri::FriConfig;
+use stwo::core::fri::FriParams;
 use stwo::core::pcs::PcsConfig;
 use stwo::core::poly::circle::CanonicCoset;
-use stwo::core::vcs_lifted::blake2_merkle::Blake2sM31MerkleChannel;
+use stwo::core::vcs_lifted::blake2_merkle::Blake2sMerkleChannel;
 use stwo::prover::backend::simd::SimdBackend;
 use stwo::prover::poly::BitReversedOrder;
 use stwo::prover::poly::circle::{CircleEvaluation, PolyOps, part_domain};
@@ -82,16 +82,16 @@ fn generate_trace<const N: usize>(
 /// The proof's `Debug` text (every commitment, sampled value and decommitment), or the error.
 fn prove_striped() -> Result<String, ProvingError> {
     let config = PcsConfig {
-        fri_config: FriConfig::new(10, 0, LOG_BLOWUP, 3, 1),
+        fri_params: FriParams::new(10, 0, LOG_BLOWUP, 3, 1),
         trace_lifting_log_size: LOG_N_ROWS + LOG_BLOWUP,
         preprocessed_lifting_log_size: 0,
     };
     let twiddles = SimdBackend::precompute_twiddles(
         CanonicCoset::new(LOG_N_ROWS + 1 + LOG_BLOWUP).circle_domain().half_coset,
     );
-    let channel = &mut Blake2sM31Channel::default();
+    let channel = &mut Blake2sChannel::default();
     let mut commitment_scheme =
-        CommitmentSchemeProver::<SimdBackend, Blake2sM31MerkleChannel>::new(config, &twiddles);
+        CommitmentSchemeProver::<SimdBackend, Blake2sMerkleChannel>::new(config, &twiddles);
     commitment_scheme.set_stripe_residency();
     let mut tree_builder = commitment_scheme.tree_builder();
     tree_builder.extend_evals(vec![]);
@@ -107,7 +107,7 @@ fn prove_striped() -> Result<String, ProvingError> {
         WideFibonacciEval::<FIB_SEQUENCE_LENGTH> { log_n_rows: LOG_N_ROWS },
         SecureField::zero(),
     );
-    prove::<SimdBackend, Blake2sM31MerkleChannel>(&[&component], channel, commitment_scheme)
+    prove::<SimdBackend, Blake2sMerkleChannel>(&[&component], channel, commitment_scheme)
         .map(|proof| format!("{proof:?}"))
 }
 

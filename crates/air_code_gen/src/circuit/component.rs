@@ -76,9 +76,11 @@ pub fn generate_circuit_constraints_code(
             let col_id =
                 air_fn.external_states.iter().next().expect("Expected at least one external state");
             log_size = quote! {
-                preprocessed_column_log_sizes
-                    .get(&PreProcessedColumnId { id: $(quoted(col_id)).to_string() })
-                    .cloned()
+                Some(
+                    *preprocessed_column_log_sizes
+                        .get(&PreProcessedColumnId { id: $(quoted(col_id)).to_string() })
+                        .unwrap()
+                )
             };
             preprocessed_column_log_sizes = quote! { preprocessed_column_log_sizes };
         }
@@ -395,7 +397,7 @@ fn gen_tests_module(air_fn: &CompiledAirFn, assignment: &Assignment) -> rust::To
 
             #[allow(unused_imports)]
             use crate::components::prelude::PreProcessedColumnId;
-            use crate::sample_evaluations::*;
+            use crate::sample_evaluations_test_data::*;
             use circuits::context::Context;
             use circuits::ivalue::qm31_from_u32s;
             use circuits_stark_verifier::constraint_eval::*;

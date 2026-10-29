@@ -99,7 +99,7 @@ pub mod op {
     /// phases are pipelined (one submit, no waits between them) and only the total is timed.
     pub const M31_MUL: u32 = 16;
     /// `[descriptor, descriptor bytes]`: stwo's `CommitmentTreeProver::new_striped` (SimdBackend,
-    /// Blake2sM31MerkleChannel) for the polynomials and outputs the descriptor lists, laid out as
+    /// Blake2sMerkleChannel) for the polynomials and outputs the descriptor lists, laid out as
     /// [`commit`](super::commit) says. The GPU worker fills every output and the stats.
     pub const COMMIT_STRIPED: u32 = 32;
     /// Panics in the GPU module: exercises the failure path (the bridge is lost after it).

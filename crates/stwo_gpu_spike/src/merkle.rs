@@ -1,7 +1,7 @@
 //! stwo's lifted Blake2s Merkle tree on the GPU: the leaves of a stripe's columns and the layers
 //! above them, equal word for word to `SimdBackend`'s `build_layers_sparse` and
 //! `build_next_layer` (with `Blake2sMerkleHasher`, i.e. `Blake2sHasherGeneric<false>`, the hasher
-//! of `Blake2sM31MerkleChannel`).
+//! of `Blake2sMerkleChannel`).
 //!
 //! # What is hashed
 //!

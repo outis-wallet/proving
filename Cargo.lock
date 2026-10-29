@@ -1655,27 +1655,6 @@ dependencies = [
  "rand_chacha 0.3.1",
  "rayon",
  "stwo",
- "stwo-cairo-common",
- "stwo-constraint-framework",
-]
-
-[[package]]
-name = "circuit-multiverifier"
-version = "2.4.0"
-dependencies = [
- "blake2",
- "cairo-air",
- "circuit-cairo-serialize",
- "circuit-cairo-verifier",
- "circuit-common",
- "circuit-prover",
- "circuit-serialize",
- "circuit-verifier",
- "circuits",
- "circuits-stark-verifier",
- "itertools 0.12.1",
- "serde_json",
- "stwo",
  "stwo-constraint-framework",
 ]
 
@@ -1685,11 +1664,10 @@ version = "2.4.0"
 dependencies = [
  "circuit-cairo-verifier",
  "circuit-common",
- "circuit-multiverifier",
  "circuit-prover",
  "circuit-registry",
+ "circuit-verifier",
  "circuits",
- "circuits-stark-verifier",
  "clap",
  "leaf-prover",
  "serde",
@@ -1698,7 +1676,6 @@ dependencies = [
  "stwo-cairo-common",
  "stwo-cairo-prover",
  "stwo-cairo-utils",
- "stwo-constraint-framework",
  "tempfile",
 ]
 
@@ -1755,7 +1732,11 @@ name = "circuit-verifier"
 version = "2.4.0"
 dependencies = [
  "blake2",
+ "cairo-air",
+ "circuit-cairo-verifier",
  "circuit-common",
+ "circuit-prover",
+ "circuit-serialize",
  "circuits",
  "circuits-stark-verifier",
  "expect-test",
@@ -3120,6 +3101,7 @@ dependencies = [
  "circuits-stark-verifier",
  "clap",
  "indexmap 2.14.0",
+ "itertools 0.12.1",
  "leaf-proof-format",
  "serde_json",
  "stwo",
@@ -3148,6 +3130,15 @@ name = "libm"
 version = "0.2.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
+
+[[package]]
+name = "libmimalloc-sys"
+version = "0.1.49"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6a45a52f43e1c16f667ccfe4dd8c85b7f7c204fd5e3bf46c5b0db9a5c3c0b8e9"
+dependencies = [
+ "cc",
+]
 
 [[package]]
 name = "linux-raw-sys"
@@ -3222,6 +3213,15 @@ dependencies = [
  "log",
  "sprs",
  "web-time",
+]
+
+[[package]]
+name = "mimalloc"
+version = "0.1.52"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2d4139bb28d14ad1facf21d5eb8825051b326e172d216b39f6d31df53cc97862"
+dependencies = [
+ "libmimalloc-sys",
 ]
 
 [[package]]
@@ -3686,6 +3686,7 @@ dependencies = [
  "cairo-vm",
  "circuit-cairo-verifier",
  "circuit-common",
+ "circuit-params",
  "circuit-registry",
  "circuit-serialize",
  "circuit-verifier",
@@ -3695,11 +3696,11 @@ dependencies = [
  "itertools 0.12.1",
  "mockall",
  "privacy-prove",
+ "privacy_common",
  "rstest",
- "serde_json",
- "starknet-types-core",
  "stwo",
  "stwo-cairo-common",
+ "stwo-constraint-framework",
  "tempfile",
  "tracing",
  "tracing-subscriber",
@@ -3711,7 +3712,6 @@ name = "privacy-prove"
 version = "2.4.0"
 dependencies = [
  "anyhow",
- "cairo-air",
  "cairo-program-runner-lib",
  "cairo-vm",
  "circuit-cairo-verifier",
@@ -3728,6 +3728,7 @@ dependencies = [
  "leaf-prover",
  "mockall",
  "privacy-circuit-verify",
+ "privacy_common",
  "rayon",
  "rstest",
  "serde_json",
@@ -3740,6 +3741,20 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "zstd",
+]
+
+[[package]]
+name = "privacy_common"
+version = "2.4.0"
+dependencies = [
+ "cairo-vm",
+ "circuit-cairo-verifier",
+ "circuit-registry",
+ "circuits",
+ "itertools 0.12.1",
+ "serde_json",
+ "starknet-types-core",
+ "stwo",
 ]
 
 [[package]]
@@ -4982,9 +4997,10 @@ name = "stwo-run-and-prove-recursive-tree"
 version = "2.4.0"
 dependencies = [
  "blake2",
+ "cairo-program-runner-lib",
+ "cairo-vm",
  "circuit-cairo-serialize",
  "circuit-common",
- "circuit-multiverifier",
  "circuit-prover",
  "circuit-registry",
  "circuit-serialize",
@@ -4992,8 +5008,10 @@ dependencies = [
  "circuits",
  "circuits-stark-verifier",
  "clap",
+ "expect-test",
  "leaf-proof-format",
  "leaf-prover",
+ "mimalloc",
  "num-bigint",
  "serde",
  "serde_json",

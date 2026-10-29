@@ -102,18 +102,18 @@ mod tests {
     use itertools::Itertools;
     use num_traits::{One, Zero};
     use stwo::core::air::Component;
-    use stwo::core::channel::Blake2sM31Channel;
+    use stwo::core::channel::Blake2sChannel;
     #[cfg(not(target_arch = "wasm32"))]
     use stwo::core::channel::Poseidon252Channel;
     use stwo::core::fields::m31::BaseField;
     use stwo::core::fields::qm31::SecureField;
-    use stwo::core::fri::FriConfig;
+    use stwo::core::fri::FriParams;
     use stwo::core::pcs::{CommitmentSchemeVerifier, PcsConfig, TreeVec};
     use stwo::core::poly::circle::CanonicCoset;
-    use stwo::core::vcs_lifted::blake2_merkle::Blake2sM31MerkleChannel;
+    use stwo::core::vcs_lifted::blake2_merkle::Blake2sMerkleChannel;
     #[cfg(not(target_arch = "wasm32"))]
     use stwo::core::vcs_lifted::poseidon252_merkle::Poseidon252MerkleChannel;
-    use stwo::core::verifier::verify;
+    use stwo::core::verifier::{VerificationError, verify};
     use stwo::prover::backend::simd::SimdBackend;
     use stwo::prover::backend::{Column, CpuBackend};
     use stwo::prover::poly::circle::PolyOps;
@@ -182,26 +182,24 @@ mod tests {
     #[test_log::test]
     fn test_wide_fib_prove_with_blake() {
         for log_n_instances in 4..=8 {
-            let fri_config = FriConfig::default();
+            let fri_params = FriParams::test_params();
             let config = PcsConfig {
-                fri_config,
-                trace_lifting_log_size: log_n_instances + fri_config.log_blowup_factor,
+                fri_params,
+                trace_lifting_log_size: log_n_instances + fri_params.log_blowup_factor,
                 // The preprocessed tree is empty, so it is not lifted.
                 preprocessed_lifting_log_size: 0,
             };
             // Precompute twiddles.
             let twiddles = SimdBackend::precompute_twiddles(
-                CanonicCoset::new(log_n_instances + 1 + config.fri_config.log_blowup_factor)
+                CanonicCoset::new(log_n_instances + 1 + config.fri_params.log_blowup_factor)
                     .circle_domain()
                     .half_coset,
             );
 
             // Setup protocol.
-            let prover_channel = &mut Blake2sM31Channel::default();
-            let mut commitment_scheme = CommitmentSchemeProver::<
-                SimdBackend,
-                Blake2sM31MerkleChannel,
-            >::new(config, &twiddles);
+            let prover_channel = &mut Blake2sChannel::default();
+            let mut commitment_scheme =
+                CommitmentSchemeProver::<SimdBackend, Blake2sMerkleChannel>::new(config, &twiddles);
 
             // Preprocessed trace
             let mut tree_builder = commitment_scheme.tree_builder();
@@ -222,7 +220,7 @@ mod tests {
                 SecureField::zero(),
             );
 
-            let proof = prove::<SimdBackend, Blake2sM31MerkleChannel>(
+            let proof = prove::<SimdBackend, Blake2sMerkleChannel>(
                 &[&component],
                 prover_channel,
                 commitment_scheme,
@@ -230,9 +228,9 @@ mod tests {
             .unwrap();
 
             // Verify.
-            let verifier_channel = &mut Blake2sM31Channel::default();
+            let verifier_channel = &mut Blake2sChannel::default();
             let commitment_scheme =
-                &mut CommitmentSchemeVerifier::<Blake2sM31MerkleChannel>::new(config);
+                &mut CommitmentSchemeVerifier::<Blake2sMerkleChannel>::new(config);
 
             // Retrieve the expected column sizes in each commitment interaction, from the AIR.
             let sizes = component.trace_log_degree_bounds();
@@ -242,30 +240,96 @@ mod tests {
         }
     }
 
+    /// A bad OODS proof of work nonce must be rejected by the grind check (`ProofOfWork`): the
+    /// nonce is verified before the OODS point is drawn.
+    #[test]
+    fn test_wide_fib_bad_oods_pow_nonce_rejected() {
+        let log_n_instances = 6;
+        let fri_params = FriParams::test_params();
+        let config = PcsConfig {
+            fri_params,
+            trace_lifting_log_size: log_n_instances + fri_params.log_blowup_factor,
+            // The preprocessed tree is empty, so it is not lifted.
+            preprocessed_lifting_log_size: 0,
+        };
+        let twiddles = SimdBackend::precompute_twiddles(
+            CanonicCoset::new(log_n_instances + 1 + config.fri_params.log_blowup_factor)
+                .circle_domain()
+                .half_coset,
+        );
+
+        let prover_channel = &mut Blake2sChannel::default();
+        let mut commitment_scheme =
+            CommitmentSchemeProver::<SimdBackend, Blake2sMerkleChannel>::new(config, &twiddles);
+
+        let mut tree_builder = commitment_scheme.tree_builder();
+        tree_builder.extend_evals(vec![]);
+        tree_builder.commit(prover_channel);
+
+        let trace =
+            generate_trace::<FIB_SEQUENCE_LENGTH, _>(&generate_test_inputs(log_n_instances));
+        let mut tree_builder = commitment_scheme.tree_builder();
+        tree_builder.extend_evals(trace);
+        tree_builder.commit(prover_channel);
+
+        let component = WideFibonacciComponent::new(
+            &mut TraceLocationAllocator::default(),
+            WideFibonacciEval::<FIB_SEQUENCE_LENGTH> { log_n_rows: log_n_instances },
+            SecureField::zero(),
+        );
+
+        let proof = prove::<SimdBackend, Blake2sMerkleChannel>(
+            &[&component],
+            prover_channel,
+            commitment_scheme,
+        )
+        .unwrap();
+
+        let sizes = component.trace_log_degree_bounds();
+        let verify_with_oods_nonce = |nonce: u64| {
+            let mut proof = proof.clone();
+            proof.0.oods_proof_of_work = nonce;
+            let channel = &mut Blake2sChannel::default();
+            let scheme = &mut CommitmentSchemeVerifier::<Blake2sMerkleChannel>::new(config);
+            scheme.commit(proof.commitments[0], &sizes[0], channel);
+            scheme.commit(proof.commitments[1], &sizes[1], channel);
+            verify(&[&component], channel, scheme, proof)
+        };
+
+        // A bad nonce is rejected by the proof of work check, before the OODS point is drawn.
+        let valid_nonce = proof.oods_proof_of_work;
+        assert!(matches!(
+            verify_with_oods_nonce(valid_nonce ^ 1),
+            Err(VerificationError::OodsProofOfWork)
+        ));
+
+        // The genuine nonce still verifies, so the rejection above is due to the nonce alone and
+        // `verify_with_oods_nonce` leaves no channel state behind.
+        verify_with_oods_nonce(valid_nonce).unwrap();
+    }
+
     /// Tests the subdomain evaluation path (log_expansion > 0) by using log_blowup_factor = 2
     /// with constraint degree 1, so the committed domain is larger than the eval domain.
     #[test_log::test]
     fn test_wide_fib_prove_with_larger_blowup() {
         for log_n_instances in 4..=7 {
-            let fri_config = FriConfig::new(10, 0, 2, 3, 1);
+            let fri_params = FriParams::new(10, 0, 2, 3, 1);
             let config = PcsConfig {
-                fri_config,
-                trace_lifting_log_size: log_n_instances + fri_config.log_blowup_factor,
+                fri_params,
+                trace_lifting_log_size: log_n_instances + fri_params.log_blowup_factor,
                 // The preprocessed tree is empty, so it is not lifted.
                 preprocessed_lifting_log_size: 0,
             };
             // Precompute twiddles for the larger committed domain.
             let twiddles = SimdBackend::precompute_twiddles(
-                CanonicCoset::new(log_n_instances + 1 + config.fri_config.log_blowup_factor)
+                CanonicCoset::new(log_n_instances + 1 + config.fri_params.log_blowup_factor)
                     .circle_domain()
                     .half_coset,
             );
 
-            let prover_channel = &mut Blake2sM31Channel::default();
-            let mut commitment_scheme = CommitmentSchemeProver::<
-                SimdBackend,
-                Blake2sM31MerkleChannel,
-            >::new(config, &twiddles);
+            let prover_channel = &mut Blake2sChannel::default();
+            let mut commitment_scheme =
+                CommitmentSchemeProver::<SimdBackend, Blake2sMerkleChannel>::new(config, &twiddles);
 
             // Preprocessed trace.
             let mut tree_builder = commitment_scheme.tree_builder();
@@ -285,7 +349,7 @@ mod tests {
                 SecureField::zero(),
             );
 
-            let proof = prove::<SimdBackend, Blake2sM31MerkleChannel>(
+            let proof = prove::<SimdBackend, Blake2sMerkleChannel>(
                 &[&component],
                 prover_channel,
                 commitment_scheme,
@@ -293,9 +357,9 @@ mod tests {
             .unwrap();
 
             // Verify.
-            let verifier_channel = &mut Blake2sM31Channel::default();
+            let verifier_channel = &mut Blake2sChannel::default();
             let commitment_scheme =
-                &mut CommitmentSchemeVerifier::<Blake2sM31MerkleChannel>::new(config);
+                &mut CommitmentSchemeVerifier::<Blake2sMerkleChannel>::new(config);
             let sizes = component.trace_log_degree_bounds();
             commitment_scheme.commit(proof.commitments[0], &sizes[0], verifier_channel);
             commitment_scheme.commit(proof.commitments[1], &sizes[1], verifier_channel);
@@ -309,26 +373,24 @@ mod tests {
         for log_n_instances in 4..=8 {
             // Test different steps.
             let fold_step = if (4..6).contains(&log_n_instances) { 2 } else { 3 };
-            let fri_config = FriConfig { fold_step, ..FriConfig::default() };
+            let fri_params = FriParams { fold_step, ..FriParams::test_params() };
             let config = PcsConfig {
-                fri_config,
-                trace_lifting_log_size: log_n_instances + fri_config.log_blowup_factor,
+                fri_params,
+                trace_lifting_log_size: log_n_instances + fri_params.log_blowup_factor,
                 // The preprocessed tree is empty, so it is not lifted.
                 preprocessed_lifting_log_size: 0,
             };
             // Precompute twiddles.
             let twiddles = SimdBackend::precompute_twiddles(
-                CanonicCoset::new(log_n_instances + 1 + config.fri_config.log_blowup_factor)
+                CanonicCoset::new(log_n_instances + 1 + config.fri_params.log_blowup_factor)
                     .circle_domain()
                     .half_coset,
             );
 
             // Setup protocol.
-            let prover_channel = &mut Blake2sM31Channel::default();
-            let mut commitment_scheme = CommitmentSchemeProver::<
-                SimdBackend,
-                Blake2sM31MerkleChannel,
-            >::new(config, &twiddles);
+            let prover_channel = &mut Blake2sChannel::default();
+            let mut commitment_scheme =
+                CommitmentSchemeProver::<SimdBackend, Blake2sMerkleChannel>::new(config, &twiddles);
 
             // Preprocessed trace
             let mut tree_builder = commitment_scheme.tree_builder();
@@ -349,7 +411,7 @@ mod tests {
                 SecureField::zero(),
             );
 
-            let proof = prove::<SimdBackend, Blake2sM31MerkleChannel>(
+            let proof = prove::<SimdBackend, Blake2sMerkleChannel>(
                 &[&component],
                 prover_channel,
                 commitment_scheme,
@@ -357,9 +419,9 @@ mod tests {
             .unwrap();
 
             // Verify.
-            let verifier_channel = &mut Blake2sM31Channel::default();
+            let verifier_channel = &mut Blake2sChannel::default();
             let commitment_scheme =
-                &mut CommitmentSchemeVerifier::<Blake2sM31MerkleChannel>::new(config);
+                &mut CommitmentSchemeVerifier::<Blake2sMerkleChannel>::new(config);
 
             // Retrieve the expected column sizes in each commitment interaction, from the AIR.
             let sizes = component.trace_log_degree_bounds();
@@ -373,16 +435,16 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     fn test_wide_fib_prove_with_poseidon() {
         const LOG_N_INSTANCES: u32 = 6;
-        let fri_config = FriConfig::default();
+        let fri_params = FriParams::test_params();
         let config = PcsConfig {
-            fri_config,
-            trace_lifting_log_size: LOG_N_INSTANCES + fri_config.log_blowup_factor,
+            fri_params,
+            trace_lifting_log_size: LOG_N_INSTANCES + fri_params.log_blowup_factor,
             // The preprocessed tree is empty, so it is not lifted.
             preprocessed_lifting_log_size: 0,
         };
         // Precompute twiddles.
         let twiddles = SimdBackend::precompute_twiddles(
-            CanonicCoset::new(LOG_N_INSTANCES + 1 + config.fri_config.log_blowup_factor)
+            CanonicCoset::new(LOG_N_INSTANCES + 1 + config.fri_params.log_blowup_factor)
                 .circle_domain()
                 .half_coset,
         );
@@ -438,24 +500,24 @@ mod tests {
         const N_COLS_LONG_COMPONENT: usize = 4;
         const N_COLS_SHORT_COMPONENT: usize = 5;
 
-        let fri_config = FriConfig::default();
+        let fri_params = FriParams::test_params();
         let config = PcsConfig {
-            fri_config,
-            trace_lifting_log_size: LOG_SIZE_LONG + fri_config.log_blowup_factor,
+            fri_params,
+            trace_lifting_log_size: LOG_SIZE_LONG + fri_params.log_blowup_factor,
             // The preprocessed tree is empty, so it is not lifted.
             preprocessed_lifting_log_size: 0,
         };
         // Precompute twiddles.
         let twiddles = CpuBackend::precompute_twiddles(
-            CanonicCoset::new(LOG_SIZE_LONG + config.fri_config.log_blowup_factor)
+            CanonicCoset::new(LOG_SIZE_LONG + config.fri_params.log_blowup_factor)
                 .circle_domain()
                 .half_coset,
         );
 
         // Setup protocol.
-        let prover_channel = &mut Blake2sM31Channel::default();
+        let prover_channel = &mut Blake2sChannel::default();
         let mut commitment_scheme =
-            CommitmentSchemeProver::<CpuBackend, Blake2sM31MerkleChannel>::new(config, &twiddles);
+            CommitmentSchemeProver::<CpuBackend, Blake2sMerkleChannel>::new(config, &twiddles);
         commitment_scheme.set_store_polynomials_coefficients();
         // Preprocessed trace
         let mut tree_builder = commitment_scheme.tree_builder();
@@ -487,7 +549,7 @@ mod tests {
         );
 
         // Prove.
-        let proof = prove::<CpuBackend, Blake2sM31MerkleChannel>(
+        let proof = prove::<CpuBackend, Blake2sMerkleChannel>(
             &[&component0, &component1],
             prover_channel,
             commitment_scheme,
@@ -495,9 +557,8 @@ mod tests {
         .unwrap();
 
         // Verify.
-        let verifier_channel = &mut Blake2sM31Channel::default();
-        let commitment_scheme =
-            &mut CommitmentSchemeVerifier::<Blake2sM31MerkleChannel>::new(config);
+        let verifier_channel = &mut Blake2sChannel::default();
+        let commitment_scheme = &mut CommitmentSchemeVerifier::<Blake2sMerkleChannel>::new(config);
 
         let trace_sizes = [
             vec![LOG_SIZE_LONG; N_COLS_LONG_COMPONENT],

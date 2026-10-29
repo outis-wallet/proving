@@ -23,7 +23,7 @@ use itertools::Itertools;
 use stwo::core::ColumnVec;
 use stwo::core::circle::Coset;
 use stwo::core::fields::m31::BaseField;
-use stwo::core::vcs_lifted::blake2_merkle::Blake2sM31MerkleChannel;
+use stwo::core::vcs_lifted::blake2_merkle::Blake2sMerkleChannel;
 use stwo::prover::CommitmentTreeProver;
 use stwo::prover::backend::Column;
 use stwo::prover::backend::simd::SimdBackend;
@@ -45,7 +45,7 @@ use crate::transfer::{Readback, ReadbackRing, RingTimes, Upload, UploadRing};
 use crate::warm::{KeepWarm, window_from_env};
 
 /// The tree `new_striped` returns.
-pub type StripedTree = CommitmentTreeProver<SimdBackend, Blake2sM31MerkleChannel>;
+pub type StripedTree = CommitmentTreeProver<SimdBackend, Blake2sMerkleChannel>;
 
 /// Why a commitment wasn't made on the GPU: the caller commits on the CPU instead.
 #[derive(Debug)]

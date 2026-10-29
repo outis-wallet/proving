@@ -35,8 +35,12 @@ pub type PartialECMulGenericState = (Felt252Width27Expr, ECPoint, ECPoint, FeltE
 // - m_c is the coefficient of Q_c in the chain with index `c`.
 // - (m_c)_r are the r least-significant bits of m_c.
 // - `counter` is an auxiliary term equal to (26 - r) % 27, used for determining the round type.
+//
 // The third element m_c >> r is represented as an array of 27-bit limbs to save trace cells.
 // The shift is performed by shifting the entire array [r/27] limbs, and the least limb by r % 27.
+// That is, usually we only shift the last limb by one bit. Once every 27 rows we've used
+// all 27 bits of the last limb so we shift the whole array by one limb, bringing a new limb
+// to the least-significant position. Such row is called a "special round".
 //
 // To use this relation for a multiplication with `k` rounds, the caller should
 // 1. Yield (c, 0, m_c, Q_c,      P_c,             26           )
@@ -189,7 +193,7 @@ impl AirFn for PartialECMulGeneric {
                             accumulator[j].get_felt(i),
                             accumulator_with_add[j].get_felt(i),
                         ),
-                        &format!("new_acculumator_{j}_{i}"),
+                        &format!("new_accumulator_{j}_{i}"),
                     )
                 })
                 .collect::<Vec<_>>()
