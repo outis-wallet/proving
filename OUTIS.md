@@ -30,11 +30,14 @@ Proofs are byte-identical to the upstream prover's for the same input.
 | Lookup data narrowed from the base trace to the interaction trace | Each Cairo component's lookup tuples live from its `write_trace` until its interaction trace, across the base trace commitment. The bitwise-XOR tuples are now stored as one `u32` (4x smaller) and `memory_id_to_big`'s as 11 `u32` words (about 2.7x), in the bits the AIR range-checks them to, and widened back for the interaction trace. -350 MiB of wasm memory on every capture, no time cost. Hand-edits 34 AIR-generated witness files | ryun1, in the provably.fast frontier `66670df7` (whole-proof job f2498dc7), taken as is |
 | The verifier context freed before the circuit's base trace commitment | `prove_once` takes the padded context's values out (`FinalizedContext::into_values`, freeing the gates) and hands them to `prove_circuit_with_precompute_owned`, which frees them once the base trace is written. About -200 MiB through the circuit proof | Outis, after realadii's change in the provably.fast frontier `55720f34` |
 | Upstream `e0035ffc` merged in | Upstream's 167 commits from `2b495a36`, among them more zk-blinding rows in the circuit (`e0035ffc`), one Blake2s channel whose output is not reduced to M31 (#445) and `FriConfig` renamed `FriParams` (#296, #297). Upstream's semantics, the fork's mechanisms: the preprocessed trace is upstream's, with the compact and generated columns and their parallel build; the SIMD grind keeps its precomputed round 0 but no M31 reduction; the once paths prove through upstream's single-argument `prepare_cairo_proof_for_circuit_verifier`. Tested: proofs byte-identical to upstream's (below), and `privacy_recursive_prove_once` gives `privacy_recursive_prove`'s bytes | Outis |
+| `mul_doubled_wasm` not inlined | wasm32 only. Once `e0035ffc` was merged in, LLVM inlined the wasm field multiplication into the FFT's loops, where V8 ran it slower: the FFTs with their multiplications took 74 s instead of 55 s of a single-threaded pay proof (V8 CPU profile), the whole proof 15% longer than `outis-v0.2.1`'s; natively nothing slowed. Not inlined, pay took 152.9 s in Node against `outis-v0.2.1`'s 150.3 s. No proof changes | Outis |
 
 The prover's releases pin this branch at a tag: `outis-v0.1.0` (16f4a93a, the CPU prover),
-`outis-v0.2.0` (58503232, the GPU modes) and `outis-v0.2.1` (the lookup-data narrowing and the freed
-verifier context: about -350 MiB of wasm memory and -200 to -320 MiB natively, the same time). Their measurements are in outis-wallet/prover's
-BASELINES.md.
+`outis-v0.2.0` (58503232, the GPU modes), `outis-v0.2.1` (the lookup-data narrowing and the freed
+verifier context: about -350 MiB of wasm memory and -200 to -320 MiB natively, the same time),
+`outis-v0.3.0` (c96ed535, upstream `e0035ffc` merged in: the revision Sepolia verifies) and
+`outis-v0.3.1` (`mul_doubled_wasm` not inlined: the wasm time back to `outis-v0.2.1`'s). Their
+measurements are in outis-wallet/prover's BASELINES.md.
 
 Of the non-trivial lines these commits add, about 2,600 come from the frontier, about 830 are
 ours (the striped prover and its port to `2b495a36`), about 50 are the wasm and Android fixes, and

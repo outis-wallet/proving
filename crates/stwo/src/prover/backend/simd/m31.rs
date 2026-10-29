@@ -442,6 +442,10 @@ cfg_if::cfg_if! {
         /// Returns `a * b`.
         ///
         /// `b_double` should be in the range `[0, 2P]`.
+        // Not inlined: since upstream e0035ffc was merged in, LLVM inlined it into the FFT's loops,
+        // where V8 ran the FFT a third slower and the whole wasm proof 15% slower than outis-v0.2.1's,
+        // whose build kept it out of line.
+        #[inline(never)]
         pub(crate) fn mul_doubled_wasm(a: PackedM31, b_double: u32x16) -> PackedM31 {
             let [a0, a1, a2, a3]: [v128; 4] = unsafe { transmute(a) };
             let [b_double0, b_double1, b_double2, b_double3]: [v128; 4] = unsafe { transmute(b_double) };
